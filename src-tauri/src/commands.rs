@@ -120,21 +120,23 @@ async fn chat_json<T>(
 
 #[tauri::command]
 pub fn get_setting(state: State<AppState>, key: String) -> CmdResult<Option<String>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    use rusqlite::OptionalExtension;
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    // 只有"无此行"才返回 None；真实的库/IO 错误必须透传，避免静默掩盖故障
+    db
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",
             [&key],
             |row| row.get(0),
         )
-        .map(Some)
-        .or(Ok(None))
+        .optional()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_setting(state: State<AppState>, key: String, value: String) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "INSERT INTO settings(key, value) VALUES(?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -146,9 +148,8 @@ pub fn set_setting(state: State<AppState>, key: String, value: String) -> CmdRes
 
 #[tauri::command]
 pub fn get_all_settings(state: State<AppState>) -> CmdResult<HashMap<String, String>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .conn
         .prepare("SELECT key, value FROM settings")
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -223,9 +224,8 @@ fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
 
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> CmdResult<Vec<Project>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .conn
         .prepare("SELECT id, name, target_host, scope, created_at FROM projects ORDER BY id DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -248,21 +248,21 @@ pub fn create_project(
     if name.trim().is_empty() {
         return Err("项目名称不能为空".into());
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let scope_json = serde_json::to_string(&scope).map_err(|e| e.to_string())?;
-    db.conn
+    db
         .execute(
             "INSERT INTO projects(name, target_host, scope) VALUES(?1, ?2, ?3)",
             rusqlite::params![name.trim(), target_host.trim(), scope_json],
         )
         .map_err(|e| e.to_string())?;
-    Ok(db.conn.last_insert_rowid())
+    Ok(db.last_insert_rowid())
 }
 
 #[tauri::command]
 pub fn delete_project(state: State<AppState>, id: i64) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute("DELETE FROM projects WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -271,9 +271,8 @@ pub fn delete_project(state: State<AppState>, id: i64) -> CmdResult<()> {
 /// 当前打开的项目 id 存在 settings 里，重启后恢复
 #[tauri::command]
 pub fn get_current_project(state: State<AppState>) -> CmdResult<Option<Project>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let id: i64 = match db
-        .conn
         .query_row(
             "SELECT value FROM settings WHERE key = 'current_project_id'",
             [],
@@ -285,7 +284,7 @@ pub fn get_current_project(state: State<AppState>) -> CmdResult<Option<Project>>
         Some(id) => id,
         None => return Ok(None),
     };
-    db.conn
+    db
         .query_row(
             "SELECT id, name, target_host, scope, created_at FROM projects WHERE id = ?1",
             [id],
@@ -297,8 +296,8 @@ pub fn get_current_project(state: State<AppState>) -> CmdResult<Option<Project>>
 
 #[tauri::command]
 pub fn set_current_project(state: State<AppState>, id: i64) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "INSERT INTO settings(key, value) VALUES('current_project_id', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -315,9 +314,9 @@ pub fn update_project_scope(
     id: i64,
     scope: Vec<String>,
 ) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let scope_json = serde_json::to_string(&scope).map_err(|e| e.to_string())?;
-    db.conn
+    db
         .execute(
             "UPDATE projects SET scope = ?1 WHERE id = ?2",
             rusqlite::params![scope_json, id],
@@ -414,6 +413,85 @@ pub fn reveal_ca_cert(app: AppHandle) -> CmdResult<()> {
     Ok(())
 }
 
+// ---------- 运行环境（关于页诊断） ----------
+
+#[derive(serde::Serialize)]
+pub struct RuntimeInfo {
+    pub os: String,
+    pub arch: String,
+    pub app_data_dir: String,
+}
+
+#[tauri::command]
+pub fn get_runtime_info(app: AppHandle) -> CmdResult<RuntimeInfo> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(RuntimeInfo {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        app_data_dir: dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// 在文件管理器中打开应用数据目录（证书 / 本地库所在处）
+#[tauri::command]
+pub fn reveal_app_data_dir(app: AppHandle) -> CmdResult<()> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(dir.as_os_str())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 用系统默认浏览器打开外链（仅允许 http/https）
+#[tauri::command]
+pub fn open_url(url: String) -> CmdResult<()> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("仅允许打开 http/https 链接".into());
+    }
+    // 拒绝控制字符/空白/引号，避免参数被截断或注入
+    if url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '"') {
+        return Err("链接包含非法字符".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // 用 explorer 直接打开（CreateProcess，不经 cmd），
+        // 避免 URL 里的 & | ^ 等被命令解释器当作元字符执行
+        std::process::Command::new("explorer")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ---------- 流量查询 ----------
 
 fn row_to_summary(row: &rusqlite::Row) -> rusqlite::Result<TrafficSummary> {
@@ -451,7 +529,7 @@ pub fn list_traffic(
     limit: u32,
     offset: u32,
 ) -> CmdResult<Vec<TrafficSummary>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let sql = format!(
         "SELECT {SUMMARY_COLS} FROM traffic
          WHERE project_id = ?1
@@ -460,7 +538,7 @@ pub fn list_traffic(
            AND (?4 IS NULL OR host LIKE '%' || ?4 || '%' OR path LIKE '%' || ?4 || '%')
          ORDER BY id DESC LIMIT ?5 OFFSET ?6"
     );
-    let mut stmt = db.conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
             rusqlite::params![
@@ -530,14 +608,14 @@ fn load_detail(conn: &rusqlite::Connection, id: i64) -> CmdResult<TrafficDetail>
 
 #[tauri::command]
 pub fn get_traffic_detail(state: State<AppState>, id: i64) -> CmdResult<TrafficDetail> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    load_detail(&db.conn, id)
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    load_detail(&db, id)
 }
 
 #[tauri::command]
 pub fn clear_traffic(state: State<AppState>, project_id: i64) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute("DELETE FROM traffic WHERE project_id = ?1", [project_id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -556,15 +634,15 @@ pub async fn analyze_traffic(
 ) -> CmdResult<AnalysisResult> {
     // 1) 读设置 + 流量（短锁）
     let (detail, template, model, base_url, api_key, project_id) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        if read_setting(&db.conn, "ai_enabled").as_deref() == Some("false") {
+        let db = state.db.get().map_err(|e| e.to_string())?;
+        if read_setting(&db, "ai_enabled").as_deref() == Some("false") {
             return Err("AI 功能已在设置中全局禁用（隐私开关）".into());
         }
-        let (base_url, api_key, model) = resolved_ai(&db.conn)?;
-        let template = read_setting(&db.conn, prompts::ANALYZE_TEMPLATE_KEY)
+        let (base_url, api_key, model) = resolved_ai(&db)?;
+        let template = read_setting(&db, prompts::ANALYZE_TEMPLATE_KEY)
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| prompts::DEFAULT_ANALYZE_TEMPLATE.to_string());
-        let detail = load_detail(&db.conn, traffic_id)?;
+        let detail = load_detail(&db, traffic_id)?;
         let project_id = detail.summary.project_id;
         (detail, template, model, base_url, api_key, project_id)
     };
@@ -577,22 +655,31 @@ pub async fn analyze_traffic(
     let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut new_findings: Vec<Finding> = Vec::new();
     {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.conn
-            .execute(
-                "INSERT INTO analyses(project_id, traffic_id, purpose, suspicious_params, summary, raw_json, model)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![
-                    project_id,
-                    traffic_id,
-                    result.purpose,
-                    serde_json::to_string(&result.suspicious_params).unwrap_or_default(),
-                    result.summary,
-                    serde_json::to_string(&result).unwrap_or_default(),
-                    model,
-                ],
-            )
+        let db = state.db.get().map_err(|e| e.to_string())?;
+        // 整组落库放进事务，保证原子；同时清掉本流量此前"待验证"的 AI 结果与
+        // 分析缓存，避免"重新分析"反复堆积重复 Finding（已确认/已排除的保留）
+        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM findings WHERE traffic_id = ?1 AND source = 'ai' AND status = 'pending'",
+            [traffic_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM analyses WHERE traffic_id = ?1", [traffic_id])
             .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO analyses(project_id, traffic_id, purpose, suspicious_params, summary, raw_json, model)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                project_id,
+                traffic_id,
+                result.purpose,
+                serde_json::to_string(&result.suspicious_params).unwrap_or_default(),
+                result.summary,
+                serde_json::to_string(&result).unwrap_or_default(),
+                model,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
 
         for h in &result.hypotheses {
             let reasoning = if h.param.trim().is_empty() {
@@ -600,19 +687,18 @@ pub async fn analyze_traffic(
             } else {
                 format!("【可疑参数】{}\n{}", h.param, h.reasoning)
             };
-            db.conn
-                .execute(
-                    "INSERT INTO findings(project_id, traffic_id, source, title, vuln_type,
-                                          owasp, cwe, severity, confidence, reasoning, verify_steps)
-                     VALUES(?1,?2,'ai',?3,?4,?5,?6,?7,?8,?9,?10)",
-                    rusqlite::params![
-                        project_id, traffic_id, h.vuln_type, h.vuln_type, h.owasp, h.cwe,
-                        h.severity, h.confidence as i64, reasoning, h.verify_steps,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO findings(project_id, traffic_id, source, title, vuln_type,
+                                      owasp, cwe, severity, confidence, reasoning, verify_steps)
+                 VALUES(?1,?2,'ai',?3,?4,?5,?6,?7,?8,?9,?10)",
+                rusqlite::params![
+                    project_id, traffic_id, h.vuln_type, h.vuln_type, h.owasp, h.cwe,
+                    h.severity, h.confidence as i64, reasoning, h.verify_steps,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
             new_findings.push(Finding {
-                id: db.conn.last_insert_rowid(),
+                id: tx.last_insert_rowid(),
                 project_id,
                 traffic_id: Some(traffic_id),
                 source: "ai".into(),
@@ -628,7 +714,8 @@ pub async fn analyze_traffic(
                 created_at: created_at.clone(),
             });
         }
-        record_usage(&db.conn, &usage);
+        record_usage(&tx, &usage);
+        tx.commit().map_err(|e| e.to_string())?;
     }
     for f in &new_findings {
         let _ = app.emit("finding:new", f);
@@ -639,9 +726,8 @@ pub async fn analyze_traffic(
 /// 读取某条流量最近一次 AI 分析缓存（避免重复烧 token）
 #[tauri::command]
 pub fn get_analysis(state: State<AppState>, traffic_id: i64) -> CmdResult<Option<AnalysisResult>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let raw: Option<String> = db
-        .conn
         .query_row(
             "SELECT raw_json FROM analyses WHERE traffic_id = ?1 ORDER BY id DESC LIMIT 1",
             [traffic_id],
@@ -666,9 +752,8 @@ pub fn list_findings(
     severity: Option<String>,
     source: Option<String>,
 ) -> CmdResult<Vec<Finding>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .conn
         .prepare(
             "SELECT id, project_id, traffic_id, source, title, vuln_type, owasp, cwe,
                     severity, confidence, reasoning, verify_steps, status, created_at
@@ -725,8 +810,8 @@ pub fn update_finding_status(
     if !["pending", "confirmed", "rejected"].contains(&status.as_str()) {
         return Err(format!("非法状态: {status}"));
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "UPDATE findings SET status = ?1 WHERE id = ?2",
             rusqlite::params![status, id],
@@ -737,8 +822,8 @@ pub fn update_finding_status(
 
 #[tauri::command]
 pub fn delete_finding(state: State<AppState>, id: i64) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute("DELETE FROM findings WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -749,9 +834,9 @@ pub fn delete_finding(state: State<AppState>, id: i64) -> CmdResult<()> {
 /// 取模板：settings 有自定义就用，否则返回内置默认
 #[tauri::command]
 pub fn get_prompt_template(state: State<AppState>) -> CmdResult<String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     Ok(
-        read_setting(&db.conn, prompts::ANALYZE_TEMPLATE_KEY)
+        read_setting(&db, prompts::ANALYZE_TEMPLATE_KEY)
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| prompts::DEFAULT_ANALYZE_TEMPLATE.to_string()),
     )
@@ -762,8 +847,8 @@ pub fn set_prompt_template(state: State<AppState>, content: String) -> CmdResult
     if content.trim().is_empty() {
         return Err("模板不能为空".into());
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "INSERT INTO settings(key, value) VALUES(?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -776,8 +861,8 @@ pub fn set_prompt_template(state: State<AppState>, content: String) -> CmdResult
 /// 恢复内置默认模板
 #[tauri::command]
 pub fn reset_prompt_template(state: State<AppState>) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "DELETE FROM settings WHERE key = ?1",
             [prompts::ANALYZE_TEMPLATE_KEY],
@@ -847,8 +932,8 @@ fn load_task_node(conn: &rusqlite::Connection, id: i64) -> CmdResult<TaskNode> {
 
 #[tauri::command]
 pub fn get_task_tree(state: State<AppState>, project_id: i64) -> CmdResult<Vec<TaskNode>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    load_task_nodes(&db.conn, project_id)
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    load_task_nodes(&db, project_id)
 }
 
 /// AI 生成整棵树（replace=true 时先清空现有树）。持锁取数 → 放锁调 LLM → 持锁落库。
@@ -859,9 +944,8 @@ pub async fn generate_task_tree(
     replace: bool,
 ) -> CmdResult<usize> {
     let (client, digest_text, target, valid_ids) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = state.db.get().map_err(|e| e.to_string())?;
         let existing: i64 = db
-            .conn
             .query_row(
                 "SELECT COUNT(*) FROM task_nodes WHERE project_id = ?1",
                 [project_id],
@@ -871,17 +955,16 @@ pub async fn generate_task_tree(
         if existing > 0 && !replace {
             return Err("任务树已存在。如需重建请点「重新生成」（会清空现有树）".into());
         }
-        let client = llm_client(&db.conn)?;
-        let digest_text = digest::build_digest(&db.conn, project_id)?;
+        let client = llm_client(&db)?;
+        let digest_text = digest::build_digest(&db, project_id)?;
         let target: String = db
-            .conn
             .query_row(
                 "SELECT target_host FROM projects WHERE id = ?1",
                 [project_id],
                 |r| r.get(0),
             )
             .unwrap_or_default();
-        let valid_ids = planner::valid_finding_ids(&db.conn, project_id)?;
+        let valid_ids = planner::valid_finding_ids(&db, project_id)?;
         (client, digest_text, target, valid_ids)
     };
 
@@ -891,9 +974,9 @@ pub async fn generate_task_tree(
     })
     .await?;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let n = planner::insert_tree(&db.conn, project_id, &tree, replace)?;
-    record_usage(&db.conn, &usage);
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    let n = planner::insert_tree(&db, project_id, &tree, replace)?;
+    record_usage(&db, &usage);
     Ok(n)
 }
 
@@ -901,11 +984,11 @@ pub async fn generate_task_tree(
 #[tauri::command]
 pub async fn expand_task_node(state: State<'_, AppState>, node_id: i64) -> CmdResult<usize> {
     let (client, node, digest_text, valid_ids) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let node = load_task_node(&db.conn, node_id)?;
-        let client = llm_client(&db.conn)?;
-        let digest_text = digest::build_digest(&db.conn, node.project_id)?;
-        let valid_ids = planner::valid_finding_ids(&db.conn, node.project_id)?;
+        let db = state.db.get().map_err(|e| e.to_string())?;
+        let node = load_task_node(&db, node_id)?;
+        let client = llm_client(&db)?;
+        let digest_text = digest::build_digest(&db, node.project_id)?;
+        let valid_ids = planner::valid_finding_ids(&db, node.project_id)?;
         (client, node, digest_text, valid_ids)
     };
 
@@ -915,11 +998,11 @@ pub async fn expand_task_node(state: State<'_, AppState>, node_id: i64) -> CmdRe
     })
     .await?;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     // 节点可能在等待期间被删，重新加载确认存在
-    let node = load_task_node(&db.conn, node_id)?;
-    let n = planner::insert_children(&db.conn, &node, &children)?;
-    record_usage(&db.conn, &usage);
+    let node = load_task_node(&db, node_id)?;
+    let n = planner::insert_children(&db, &node, &children)?;
+    record_usage(&db, &usage);
     Ok(n)
 }
 
@@ -927,10 +1010,10 @@ pub async fn expand_task_node(state: State<'_, AppState>, node_id: i64) -> CmdRe
 #[tauri::command]
 pub async fn alternative_task_node(state: State<'_, AppState>, node_id: i64) -> CmdResult<()> {
     let (client, node, digest_text) = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        let node = load_task_node(&db.conn, node_id)?;
-        let client = llm_client(&db.conn)?;
-        let digest_text = digest::build_digest(&db.conn, node.project_id)?;
+        let db = state.db.get().map_err(|e| e.to_string())?;
+        let node = load_task_node(&db, node_id)?;
+        let client = llm_client(&db)?;
+        let digest_text = digest::build_digest(&db, node.project_id)?;
         (client, node, digest_text)
     };
 
@@ -940,17 +1023,17 @@ pub async fn alternative_task_node(state: State<'_, AppState>, node_id: i64) -> 
     })
     .await?;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    planner::apply_alternative(&db.conn, node_id, &alt)?;
-    record_usage(&db.conn, &usage);
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    planner::apply_alternative(&db, node_id, &alt)?;
+    record_usage(&db, &usage);
     Ok(())
 }
 
 /// "下一步"：进行中优先，否则第一个可执行的 todo 叶子
 #[tauri::command]
 pub fn next_task(state: State<AppState>, project_id: i64) -> CmdResult<Option<TaskNode>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let nodes = load_task_nodes(&db.conn, project_id)?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    let nodes = load_task_nodes(&db, project_id)?;
     let id = tree_state::next_actionable(&nodes);
     Ok(id.and_then(|nid| nodes.into_iter().find(|n| n.id == nid)))
 }
@@ -958,12 +1041,12 @@ pub fn next_task(state: State<AppState>, project_id: i64) -> CmdResult<Option<Ta
 /// 手动标记状态（状态机白名单校验）
 #[tauri::command]
 pub fn update_task_status(state: State<AppState>, node_id: i64, status: String) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let node = load_task_node(&db.conn, node_id)?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    let node = load_task_node(&db, node_id)?;
     if !tree_state::can_transition(&node.status, &status) {
         return Err(format!("不允许从「{}」变为「{}」", node.status, status));
     }
-    db.conn
+    db
         .execute(
             "UPDATE task_nodes SET status = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
             rusqlite::params![status, node_id],
@@ -987,15 +1070,14 @@ pub fn create_task_node(
     if title.trim().is_empty() {
         return Err("标题不能为空".into());
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     if let Some(pid) = parent_id {
-        let parent = load_task_node(&db.conn, pid)?;
+        let parent = load_task_node(&db, pid)?;
         if parent.project_id != project_id {
             return Err("父节点不属于当前项目".into());
         }
     }
     let next_sort: i64 = db
-        .conn
         .query_row(
             "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM task_nodes
              WHERE project_id = ?1 AND parent_id IS ?2",
@@ -1003,7 +1085,7 @@ pub fn create_task_node(
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
-    db.conn
+    db
         .execute(
             "INSERT INTO task_nodes(project_id, parent_id, title, description, why, how_to,
                                     verify_criteria, status, sort_order)
@@ -1014,14 +1096,14 @@ pub fn create_task_node(
             ],
         )
         .map_err(|e| e.to_string())?;
-    Ok(db.conn.last_insert_rowid())
+    Ok(db.last_insert_rowid())
 }
 
 /// 删除节点（子节点与关联随 FK 级联删除）
 #[tauri::command]
 pub fn delete_task_node(state: State<AppState>, node_id: i64) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute("DELETE FROM task_nodes WHERE id = ?1", [node_id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1030,9 +1112,8 @@ pub fn delete_task_node(state: State<AppState>, node_id: i64) -> CmdResult<()> {
 /// 节点关联的 Finding 列表
 #[tauri::command]
 pub fn get_task_findings(state: State<AppState>, node_id: i64) -> CmdResult<Vec<Finding>> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .conn
         .prepare(
             "SELECT f.id, f.project_id, f.traffic_id, f.source, f.title, f.vuln_type,
                     f.owasp, f.cwe, f.severity, f.confidence, f.reasoning, f.verify_steps,
@@ -1170,16 +1251,16 @@ pub async fn replay_request(
 /// 生成 Markdown 报告文本（供前端预览）
 #[tauri::command]
 pub fn build_report(state: State<AppState>, project_id: i64) -> CmdResult<String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    report::build_markdown(&db.conn, project_id)
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    report::build_markdown(&db, project_id)
 }
 
 /// 导出报告到下载目录，返回保存路径
 #[tauri::command]
 pub fn export_report(app: AppHandle, state: State<AppState>, project_id: i64) -> CmdResult<String> {
     let md = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        report::build_markdown(&db.conn, project_id)?
+        let db = state.db.get().map_err(|e| e.to_string())?;
+        report::build_markdown(&db, project_id)?
     };
     let dest_dir = app
         .path()
@@ -1202,8 +1283,8 @@ pub fn count_traffic(
     status_class: Option<String>,
     search: Option<String>,
 ) -> CmdResult<i64> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .query_row(
             "SELECT COUNT(*) FROM traffic
              WHERE project_id = ?1
@@ -1234,9 +1315,9 @@ pub struct TokenUsage {
 /// 读本机累计用量（record_usage 写入的 settings 键）
 #[tauri::command]
 pub fn get_token_usage(state: State<AppState>) -> CmdResult<TokenUsage> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.db.get().map_err(|e| e.to_string())?;
     let read = |key: &str| -> i64 {
-        db.conn
+        db
             .query_row(
                 "SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1",
                 [key],
@@ -1254,8 +1335,8 @@ pub fn get_token_usage(state: State<AppState>) -> CmdResult<TokenUsage> {
 
 #[tauri::command]
 pub fn reset_token_usage(state: State<AppState>) -> CmdResult<()> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.conn
+    let db = state.db.get().map_err(|e| e.to_string())?;
+    db
         .execute(
             "DELETE FROM settings WHERE key IN
              ('usage_calls','usage_prompt_tokens','usage_completion_tokens','usage_total_tokens')",

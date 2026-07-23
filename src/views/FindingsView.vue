@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
+import { Document, FolderOpened } from "@element-plus/icons-vue";
 import MarkdownIt from "markdown-it";
 import { useFindingsStore } from "../stores/findings";
 import { useProjectStore } from "../stores/project";
 import { buildReport, exportReport } from "../api/tauri";
 import KnowledgeCard from "../components/KnowledgeCard.vue";
+import EmptyState from "../components/shell/EmptyState.vue";
+import PageHeader from "../components/shell/PageHeader.vue";
 
 const findings = useFindingsStore();
 const project = useProjectStore();
@@ -13,7 +16,6 @@ const md = new MarkdownIt({ breaks: true, linkify: true });
 
 const projectId = computed(() => project.current?.id ?? null);
 
-// ---------- 学习报告 ----------
 const reportVisible = ref(false);
 const reportMd = ref("");
 const reportLoading = ref(false);
@@ -89,55 +91,113 @@ function statusTag(s: string): { text: string; type: string } {
 </script>
 
 <template>
-  <div class="findings-page">
-    <div class="toolbar">
-      <h3 class="title">
-        发现
-        <el-tag v-if="pendingCount" type="warning" effect="dark" size="small" class="pending-tag">
+  <div class="findings-page rf-page rf-page--inset">
+    <PageHeader
+      title="发现"
+      description="复核 AI / 规则命中，标记确认或误报，并导出学习报告。"
+    />
+    <div class="rf-toolbar">
+      <div v-if="pendingCount" class="rf-toolbar-group">
+        <el-tag type="warning" effect="plain" size="small">
           {{ pendingCount }} 条待验证
         </el-tag>
-      </h3>
-      <div class="filters">
-        <el-select v-model="findings.filterStatus" placeholder="状态" clearable class="f"
-          @change="projectId !== null && findings.refresh(projectId)">
-          <el-option label="待验证" value="pending" />
-          <el-option label="已确认" value="confirmed" />
-          <el-option label="误报" value="rejected" />
-        </el-select>
-        <el-select v-model="findings.filterSeverity" placeholder="严重度" clearable class="f"
-          @change="projectId !== null && findings.refresh(projectId)">
-          <el-option v-for="s in ['critical', 'high', 'medium', 'low', 'info']" :key="s" :label="s" :value="s" />
-        </el-select>
-        <el-select v-model="findings.filterSource" placeholder="来源" clearable class="f"
-          @change="projectId !== null && findings.refresh(projectId)">
-          <el-option label="AI 分析" value="ai" />
-          <el-option label="被动规则" value="rule" />
-        </el-select>
-        <el-button type="primary" plain :disabled="projectId === null" @click="openReport">
-          📄 生成报告
+      </div>
+      <div class="rf-filters">
+        <div class="rf-toolbar-group">
+          <el-select
+            v-model="findings.filterStatus"
+            placeholder="状态"
+            clearable
+            size="small"
+            class="f"
+            @change="projectId !== null && findings.refresh(projectId)"
+          >
+            <el-option label="待验证" value="pending" />
+            <el-option label="已确认" value="confirmed" />
+            <el-option label="误报" value="rejected" />
+          </el-select>
+          <el-select
+            v-model="findings.filterSeverity"
+            placeholder="严重度"
+            clearable
+            size="small"
+            class="f"
+            @change="projectId !== null && findings.refresh(projectId)"
+          >
+            <el-option
+              v-for="s in ['critical', 'high', 'medium', 'low', 'info']"
+              :key="s"
+              :label="s"
+              :value="s"
+            />
+          </el-select>
+          <el-select
+            v-model="findings.filterSource"
+            placeholder="来源"
+            clearable
+            size="small"
+            class="f"
+            @change="projectId !== null && findings.refresh(projectId)"
+          >
+            <el-option label="AI 分析" value="ai" />
+            <el-option label="被动规则" value="rule" />
+          </el-select>
+        </div>
+        <el-button
+          type="primary"
+          size="small"
+          :icon="Document"
+          :disabled="projectId === null"
+          @click="openReport"
+        >
+          生成报告
         </el-button>
       </div>
     </div>
 
-    <el-alert type="info" :closable="false" class="hint">
-      所有 Finding 默认「待验证」——这是设计红线：AI 和规则都会误报，
-      请按验证步骤人工复核后标记「已确认」或「误报」。
-    </el-alert>
+    <EmptyState
+      v-if="!project.current"
+      centered
+      title="尚未选择项目"
+      description="请先在顶部创建或选择项目。发现列表按项目隔离。"
+    >
+      <template #icon><el-icon :size="20"><FolderOpened /></el-icon></template>
+    </EmptyState>
 
-    <el-table v-loading="findings.loading" :data="findings.items" size="small" class="table">
+    <template v-else>
+      <el-alert type="info" :closable="false" class="hint" show-icon>
+        所有 Finding 默认「待验证」。请按验证步骤人工复核后标记「已确认」或「误报」。
+      </el-alert>
+
+      <EmptyState
+        v-if="!findings.loading && findings.items.length === 0"
+        centered
+        title="暂无发现"
+        description="抓包后被动规则会自动打标；在流量页选中请求做 AI 分析，也会生成待验证发现。"
+      >
+        <template #icon><el-icon :size="20"><Document /></el-icon></template>
+      </EmptyState>
+
+      <el-table
+        v-else
+        v-loading="findings.loading"
+        :data="findings.items"
+        size="small"
+        class="rf-table-shell"
+      >
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="expand">
             <div class="block">
-              <div class="label">🔍 推理过程 / 命中说明</div>
+              <div class="label">推理过程 / 命中说明</div>
               <div class="md" v-html="md.render(row.reasoning || '（无）')" />
             </div>
             <div class="block">
-              <div class="label">🧪 手动验证步骤</div>
+              <div class="label">手动验证步骤</div>
               <div class="md" v-html="md.render(row.verify_steps || '（无）')" />
             </div>
-            <div class="block" v-if="row.owasp || row.cwe">
-              <div class="label">📚 知识卡片</div>
+            <div v-if="row.owasp || row.cwe" class="block">
+              <div class="label">知识卡片</div>
               <KnowledgeCard :owasp="row.owasp" :cwe="row.cwe" />
             </div>
           </div>
@@ -162,8 +222,11 @@ function statusTag(s: string): { text: string; type: string } {
       </el-table-column>
       <el-table-column label="置信度" width="120">
         <template #default="{ row }">
-          <el-progress :percentage="row.confidence" :stroke-width="6"
-            :status="row.confidence >= 70 ? 'success' : row.confidence >= 40 ? 'warning' : 'exception'" />
+          <el-progress
+            :percentage="row.confidence"
+            :stroke-width="6"
+            :status="row.confidence >= 70 ? 'success' : row.confidence >= 40 ? 'warning' : 'exception'"
+          />
         </template>
       </el-table-column>
       <el-table-column label="OWASP / CWE" min-width="180" show-overflow-tooltip>
@@ -179,18 +242,31 @@ function statusTag(s: string): { text: string; type: string } {
       </el-table-column>
       <el-table-column label="操作" width="210">
         <template #default="{ row }">
-          <el-button v-if="row.status !== 'confirmed'" size="small" type="success" link
-            @click="setStatus(row.id, 'confirmed')">✓ 确认</el-button>
-          <el-button v-if="row.status !== 'rejected'" size="small" type="info" link
-            @click="setStatus(row.id, 'rejected')">✗ 误报</el-button>
-          <el-button v-if="row.status !== 'pending'" size="small" type="warning" link
-            @click="setStatus(row.id, 'pending')">↺ 重置</el-button>
+          <el-button
+            v-if="row.status !== 'confirmed'"
+            size="small"
+            type="success"
+            link
+            @click="setStatus(row.id, 'confirmed')"
+          >确认</el-button>
+          <el-button
+            v-if="row.status !== 'rejected'"
+            size="small"
+            type="info"
+            link
+            @click="setStatus(row.id, 'rejected')"
+          >误报</el-button>
+          <el-button
+            v-if="row.status !== 'pending'"
+            size="small"
+            type="warning"
+            link
+            @click="setStatus(row.id, 'pending')"
+          >重置</el-button>
         </template>
       </el-table-column>
-      <template #empty>
-        <el-empty description="暂无发现。抓包后规则会自动打标，选中流量做 AI 分析也会生成发现。" />
-      </template>
     </el-table>
+    </template>
 
     <el-dialog v-model="reportVisible" title="学习报告（Markdown 预览）" width="70%" top="6vh">
       <div v-loading="reportLoading" class="report-preview md" v-html="md.render(reportMd)" />
@@ -203,72 +279,46 @@ function statusTag(s: string): { text: string; type: string } {
 </template>
 
 <style scoped>
-.findings-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.title {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.pending-tag {
-  font-weight: 400;
-}
-.filters {
-  display: flex;
-  gap: 8px;
-}
 .f {
-  width: 120px;
+  width: 110px;
 }
 .hint {
   flex-shrink: 0;
-}
-.table {
-  flex: 1;
 }
 .cell-title {
   font-weight: 600;
 }
 .cell-sub {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
   display: flex;
   gap: 6px;
   align-items: center;
 }
 .tid {
-  font-family: Consolas, monospace;
+  font-family: var(--rf-font-mono);
 }
 .expand {
-  padding: 8px 16px;
+  padding: var(--rf-space-3) var(--rf-space-4);
 }
 .report-preview {
   max-height: 62vh;
   overflow: auto;
 }
 .block {
-  margin-bottom: 10px;
+  margin-bottom: var(--rf-space-4);
 }
 .label {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 4px;
+  font-weight: 600;
+  color: var(--rf-text-muted);
+  margin-bottom: var(--rf-space-2);
 }
 .md {
   font-size: 13px;
   line-height: 1.7;
-  background: var(--el-fill-color-dark);
-  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  border-radius: var(--rf-radius-control);
   padding: 8px 12px;
 }
 .md :deep(p) {
@@ -280,7 +330,7 @@ function statusTag(s: string): { text: string; type: string } {
   padding-left: 20px;
 }
 .md :deep(code) {
-  background: var(--el-fill-color);
+  background: var(--rf-bg-hover);
   padding: 1px 4px;
   border-radius: 3px;
 }

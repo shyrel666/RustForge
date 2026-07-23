@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="rf-fav-path" x1="6" y1="26" x2="25" y2="7" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#35E0C1"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="#0B1020"/>
+  <path
+    d="M 7.4 24.2 L 11 16.3 H 17.9 L 22.5 8.5"
+    fill="none"
+    stroke="url(#rf-fav-path)"
+    stroke-width="2.9"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M 24.1 4.9 L 25.15 7.05 L 27.3 8.1 L 25.15 9.15 L 24.1 11.3 L 23.05 9.15 L 20.9 8.1 L 23.05 7.05 Z"
+    fill="#FF7A45"
+  />
+</svg>

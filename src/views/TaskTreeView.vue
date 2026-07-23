@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { MagicStick, Refresh, Plus, Delete } from "@element-plus/icons-vue";
+import { MagicStick, Refresh, Plus, Delete, Aim, FolderOpened, FullScreen } from "@element-plus/icons-vue";
 import MarkdownIt from "markdown-it";
 import { VueFlow, useVueFlow, Handle, Position } from "@vue-flow/core";
 import type { Node, Edge } from "@vue-flow/core";
@@ -12,6 +12,8 @@ import { useTreeStore } from "../stores/tree";
 import { useProjectStore } from "../stores/project";
 import { useSettingsStore } from "../stores/settings";
 import { getTaskFindings, type Finding, type TaskNode } from "../api/tauri";
+import EmptyState from "../components/shell/EmptyState.vue";
+import PageHeader from "../components/shell/PageHeader.vue";
 
 const tree = useTreeStore();
 const project = useProjectStore();
@@ -293,10 +295,10 @@ const TRANSITIONS: Record<string, string[]> = {
   done: ["todo"],
 };
 const TRANSITION_LABEL: Record<string, string> = {
-  in_progress: "▶ 进行中",
-  done: "✓ 完成",
-  blocked: "⛔ 受阻",
-  todo: "↺ 重置",
+  in_progress: "进行中",
+  done: "完成",
+  blocked: "受阻",
+  todo: "重置",
 };
 function statusMeta(s: string) {
   return STATUS_META[s] ?? { label: s, type: "info" };
@@ -320,52 +322,58 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 </script>
 
 <template>
-  <div class="tree-page">
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <h3 class="title">渗透任务树</h3>
-      <template v-if="total > 0">
-        <el-progress :percentage="progress" :stroke-width="10" status="success" class="progress" />
+  <div class="tree-page rf-page rf-page--inset">
+    <PageHeader
+      title="任务树"
+      description="基于流量摘要生成引导式渗透任务，每一步由你手动执行。"
+    />
+    <div class="rf-toolbar">
+      <div v-if="total > 0" class="rf-toolbar-group">
+        <el-progress :percentage="progress" :stroke-width="8" status="success" class="progress" />
         <span class="prog-text">{{ tree.doneCount }} / {{ total }} 完成</span>
-      </template>
-      <div class="actions">
-        <template v-if="total === 0">
-          <el-button
-            type="primary"
-            :icon="MagicStick"
-            :loading="tree.aiBusy === 'generate'"
-            :disabled="aiDisabled"
-            @click="doGenerate(false)"
-          >AI 生成任务树</el-button>
-        </template>
-        <template v-else>
-          <el-button type="primary" :disabled="projectId === null" @click="onNext">
-            ⏭ 下一步
-          </el-button>
-          <el-button :icon="Plus" :disabled="projectId === null" @click="openAdd(null)">
-            添加阶段
-          </el-button>
-          <el-button
-            :icon="Refresh"
-            :loading="tree.aiBusy === 'generate'"
-            :disabled="aiDisabled"
-            @click="onRegenerate"
-          >重新生成</el-button>
-          <el-button @click="fitAll">🎯 适应视图</el-button>
-        </template>
+      </div>
+      <div class="rf-filters">
+        <div class="rf-toolbar-group">
+          <template v-if="total === 0">
+            <el-button
+              type="primary"
+              :icon="MagicStick"
+              :loading="tree.aiBusy === 'generate'"
+              :disabled="aiDisabled"
+              @click="doGenerate(false)"
+            >AI 生成任务树</el-button>
+          </template>
+          <template v-else>
+            <el-button type="primary" :disabled="projectId === null" @click="onNext">
+              下一步
+            </el-button>
+            <el-button :icon="Plus" :disabled="projectId === null" @click="openAdd(null)">
+              添加阶段
+            </el-button>
+            <el-button
+              :icon="Refresh"
+              :loading="tree.aiBusy === 'generate'"
+              :disabled="aiDisabled"
+              @click="onRegenerate"
+            >重新生成</el-button>
+            <el-button :icon="FullScreen" @click="fitAll">适应视图</el-button>
+          </template>
+        </div>
       </div>
     </div>
 
-    <!-- 引导 / 红线提示 -->
-    <el-alert v-if="!project.current" type="warning" :closable="false" class="hint">
-      请先在左下角创建/选择一个项目。任务树基于该项目已抓取的流量摘要生成。
+    <EmptyState
+      v-if="!project.current"
+      title="尚未选择项目"
+      description="请先在顶部创建或选择项目。任务树基于该项目已抓取的流量摘要生成。"
+    >
+      <template #icon><el-icon :size="20"><FolderOpened /></el-icon></template>
+    </EmptyState>
+    <el-alert v-else-if="!settings.ai_enabled" type="info" :closable="false" class="hint" show-icon>
+      AI 功能已在设置中全局禁用。你仍可手动添加节点并推进状态。
     </el-alert>
-    <el-alert v-else-if="!settings.ai_enabled" type="info" :closable="false" class="hint">
-      AI 功能已在设置中全局禁用（隐私开关），无法生成/展开任务树；你仍可手动添加节点并推进状态。
-    </el-alert>
-    <el-alert v-else type="info" :closable="false" class="hint">
-      <b>人在回路：</b>任务树只做「引导」——每一步都由你手动执行，AI 不会自动对目标发起攻击。
-      点「下一步」让 AI 帮你定位当前该做什么；带 🔗 的节点关联了「发现」。
+    <el-alert v-else type="info" :closable="false" class="hint" show-icon>
+      人在回路：任务树只做引导——每一步由你手动执行。点「下一步」定位当前该做什么；带链接标记的节点关联了发现。
     </el-alert>
 
     <!-- 主体：画布 + 详情面板 -->
@@ -397,7 +405,7 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
               <div class="tnode-foot">
                 <span class="tnode-badge">{{ statusMeta(data.node.status).label }}</span>
                 <span v-if="data.node.finding_ids.length" class="tnode-link" title="关联发现数">
-                  🔗 {{ data.node.finding_ids.length }}
+                  <el-icon :size="12"><Aim /></el-icon> {{ data.node.finding_ids.length }}
                 </span>
                 <span class="tnode-spacer" />
                 <button
@@ -416,25 +424,27 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 
         <!-- 空态引导 -->
         <div v-if="total === 0 && !tree.loading" class="empty-overlay">
-          <div class="empty-card">
-            <div class="empty-icon">🌳</div>
-            <div class="empty-title">还没有任务树</div>
-            <div class="empty-desc">
-              AI 会读取当前项目的流量侦察摘要（端点聚合、被动规则标签、已有发现），
-              生成一棵「信息收集 → 输入点探测 → 鉴权与会话 → 业务逻辑 → 验证与报告」的引导式任务树。
-              每个节点都会讲清楚：做什么、为什么、怎么手动做、怎样算完成。
-            </div>
-            <el-button
-              type="primary"
-              :icon="MagicStick"
-              :loading="tree.aiBusy === 'generate'"
-              :disabled="aiDisabled"
-              @click="doGenerate(false)"
-            >AI 生成任务树</el-button>
-            <div class="empty-tip">
-              需先在「流量」页抓取一段目标流量，并在「设置」页配置 API Key。
-            </div>
-          </div>
+          <EmptyState
+            class="empty-on-canvas"
+            title="还没有任务树"
+            description="AI 会读取当前项目的流量侦察摘要，生成引导式任务树。每个节点说明做什么、为什么、怎么手动做、怎样算完成。"
+            action-label="AI 生成任务树"
+            @action="doGenerate(false)"
+          >
+            <template #icon><el-icon :size="20"><MagicStick /></el-icon></template>
+            <template #action>
+              <el-button
+                type="primary"
+                :icon="MagicStick"
+                :loading="tree.aiBusy === 'generate'"
+                :disabled="aiDisabled"
+                @click="doGenerate(false)"
+              >AI 生成任务树</el-button>
+              <p class="empty-tip">
+                需先在「流量」页抓取目标流量，并在「设置」页配置 API Key。
+              </p>
+            </template>
+          </EmptyState>
         </div>
       </div>
 
@@ -464,25 +474,24 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
         <div class="scroll">
           <!-- 为什么：直接展示存储字段，不消耗 token -->
           <div v-if="tree.selected.why" class="field field-why">
-            <div class="field-label">💡 为什么做这步</div>
+            <div class="field-label">为什么做这步</div>
             <div class="field-body">{{ tree.selected.why }}</div>
           </div>
           <div v-if="tree.selected.description" class="field">
-            <div class="field-label">🎯 做什么</div>
+            <div class="field-label">做什么</div>
             <div class="md" v-html="md.render(tree.selected.description)" />
           </div>
           <div v-if="tree.selected.how_to" class="field">
-            <div class="field-label">🛠 怎么做（手动操作）</div>
+            <div class="field-label">怎么做（手动操作）</div>
             <div class="md" v-html="md.render(tree.selected.how_to)" />
           </div>
           <div v-if="tree.selected.verify_criteria" class="field">
-            <div class="field-label">✅ 怎样算完成</div>
+            <div class="field-label">怎样算完成</div>
             <div class="md" v-html="md.render(tree.selected.verify_criteria)" />
           </div>
 
-          <!-- 关联发现 -->
           <div v-if="tree.selected.finding_ids.length" class="field">
-            <div class="field-label">🔗 关联发现（{{ tree.selected.finding_ids.length }}）</div>
+            <div class="field-label">关联发现（{{ tree.selected.finding_ids.length }}）</div>
             <div v-loading="findingsLoading">
               <div
                 v-for="f in nodeFindings"
@@ -517,7 +526,7 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
             :loading="tree.aiBusy === 'alternative'"
             :disabled="!settings.ai_enabled"
             @click="onAlternative(tree.selected.id)"
-          >🔄 换个思路</el-button>
+          >换个思路</el-button>
           <el-button size="small" :icon="Plus" @click="openAdd(tree.selected.id)">子任务</el-button>
           <el-button
             size="small"
@@ -567,33 +576,12 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 </template>
 
 <style scoped>
-.tree-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.title {
-  margin: 0;
-}
 .progress {
-  width: 160px;
+  width: 140px;
 }
 .prog-text {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.actions {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  color: var(--rf-text-secondary);
 }
 .hint {
   flex-shrink: 0;
@@ -601,20 +589,19 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 .content {
   flex: 1;
   display: flex;
-  gap: 12px;
+  gap: var(--rf-space-3);
   min-height: 0;
 }
 .canvas {
   flex: 1;
   position: relative;
   min-height: 0;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-shell);
   overflow: hidden;
-  background: var(--el-bg-color-page);
+  background: var(--rf-bg-panel);
 }
 
-/* 自定义节点：重置 vue-flow 默认样式 */
 .canvas :deep(.vue-flow__node-task) {
   padding: 0;
   border: none;
@@ -626,50 +613,57 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   height: 6px;
   min-width: 6px;
   min-height: 6px;
-  background: var(--el-border-color-darker);
+  background: var(--rf-border-strong);
   border: none;
-  opacity: 0.6;
+  opacity: 0.7;
 }
 .canvas :deep(.vue-flow__edge-path) {
-  stroke: var(--el-border-color-darker);
+  stroke: var(--rf-border-strong);
   stroke-width: 1.5;
+}
+.canvas :deep(.vue-flow__background) {
+  background: var(--rf-bg-base);
 }
 
 .tnode {
   width: 200px;
   box-sizing: border-box;
-  border-radius: 8px;
-  border: 1px solid var(--el-border-color);
-  border-left-width: 4px;
-  background: var(--el-bg-color-overlay);
+  border-radius: var(--rf-radius-shell);
+  border: 1px solid var(--rf-border);
+  border-left-width: 3px;
+  background: var(--rf-bg-panel);
   padding: 8px 10px;
   cursor: pointer;
-  transition: box-shadow 0.15s, transform 0.15s;
+  transition:
+    box-shadow var(--rf-duration) var(--rf-ease),
+    transform var(--rf-duration) var(--rf-ease),
+    border-color var(--rf-duration) var(--rf-ease);
 }
 .tnode:hover {
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.35);
+  border-color: var(--rf-border-strong);
   transform: translateY(-1px);
 }
 .tnode.sel {
-  box-shadow: 0 0 0 2px var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--rf-accent-muted);
+  border-color: var(--rf-accent);
 }
 .tnode.phase {
-  background: var(--el-fill-color-darker);
+  background: var(--rf-bg-raised);
 }
 .tnode.phase .tnode-title {
   font-weight: 600;
 }
 .st-todo {
-  border-left-color: #909399;
+  border-left-color: var(--rf-text-muted);
 }
 .st-in_progress {
-  border-left-color: #409eff;
+  border-left-color: var(--rf-accent);
 }
 .st-done {
-  border-left-color: #67c23a;
+  border-left-color: var(--rf-success);
 }
 .st-blocked {
-  border-left-color: #f56c6c;
+  border-left-color: var(--rf-danger);
 }
 .tnode-title {
   font-size: 13px;
@@ -686,31 +680,34 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   gap: 6px;
   margin-top: 6px;
   font-size: 11px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .tnode-badge {
   padding: 0 5px;
-  border-radius: 3px;
-  background: var(--el-fill-color);
+  border-radius: var(--rf-radius-tag);
+  background: var(--rf-bg-raised);
 }
 .tnode-link {
-  color: var(--el-color-warning);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--rf-warning);
 }
 .tnode-spacer {
   flex: 1;
 }
 .tnode-toggle {
   border: none;
-  background: var(--el-fill-color);
-  color: var(--el-text-color-primary);
-  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  color: var(--rf-text);
+  border-radius: var(--rf-radius-tag);
   padding: 1px 7px;
   cursor: pointer;
   font-size: 12px;
   line-height: 1.4;
 }
 .tnode-toggle:hover {
-  background: var(--el-fill-color-dark);
+  background: var(--rf-bg-hover);
 }
 .tnode.pulse {
   animation: pulse 1.3s ease-in-out infinite;
@@ -718,10 +715,10 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 @keyframes pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(64, 158, 255, 0.6);
+    box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.55);
   }
   50% {
-    box-shadow: 0 0 0 7px rgba(64, 158, 255, 0);
+    box-shadow: 0 0 0 7px rgba(45, 212, 191, 0);
   }
 }
 
@@ -732,50 +729,38 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  background: color-mix(in srgb, var(--rf-bg-base) 55%, transparent);
+  padding: var(--rf-space-5);
 }
-.empty-card {
+.empty-on-canvas {
   max-width: 440px;
-  text-align: center;
-  padding: 24px;
+  width: 100%;
   pointer-events: auto;
-}
-.empty-icon {
-  font-size: 56px;
-}
-.empty-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 8px 0;
-}
-.empty-desc {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  line-height: 1.8;
-  margin-bottom: 16px;
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--rf-bg-base) 45%, transparent);
 }
 .empty-tip {
-  margin-top: 12px;
+  margin: var(--rf-space-2) 0 0;
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-muted);
+  line-height: 1.5;
 }
 
-/* 详情面板 */
 .detail {
   width: 380px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
-  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-shell);
+  background: var(--rf-bg-panel);
   overflow: hidden;
 }
 .detail-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px;
-  border-bottom: 1px solid var(--el-border-color);
+  padding: var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
 }
 .detail-title {
   font-weight: 600;
@@ -784,37 +769,38 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 }
 .detail-close {
   margin-left: auto;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .status-row {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--el-border-color);
+  border-bottom: 1px solid var(--rf-border);
   flex-wrap: wrap;
 }
 .status-label {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .scroll {
   flex: 1;
   overflow: auto;
-  padding: 12px;
+  padding: var(--rf-space-3);
 }
 .field {
   margin-bottom: 14px;
 }
 .field-label {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 5px;
+  font-weight: 600;
+  color: var(--rf-text-muted);
+  margin-bottom: 6px;
 }
 .field-why {
-  background: var(--el-color-primary-light-9);
-  border-left: 3px solid var(--el-color-primary);
-  border-radius: 4px;
+  background: var(--rf-accent-muted);
+  border-left: 3px solid var(--rf-accent);
+  border-radius: var(--rf-radius-control);
   padding: 8px 10px;
 }
 .field-why .field-body {
@@ -827,13 +813,13 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
   margin-bottom: 6px;
   cursor: pointer;
 }
 .finding-item:hover {
-  background: var(--el-fill-color);
+  background: var(--rf-bg-hover);
 }
 .finding-title {
   flex: 1;
@@ -841,24 +827,24 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 }
 .finding-conf {
   font-size: 11px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .finding-empty {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .detail-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 12px;
-  border-top: 1px solid var(--el-border-color);
+  padding: var(--rf-space-3);
+  border-top: 1px solid var(--rf-border);
 }
 .md {
   font-size: 13px;
   line-height: 1.7;
-  background: var(--el-fill-color-dark);
-  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  border-radius: var(--rf-radius-control);
   padding: 8px 12px;
 }
 .md :deep(p) {
@@ -870,7 +856,7 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   padding-left: 20px;
 }
 .md :deep(code) {
-  background: var(--el-fill-color);
+  background: var(--rf-bg-hover);
   padding: 1px 4px;
   border-radius: 3px;
 }

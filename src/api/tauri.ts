@@ -22,6 +22,9 @@ export const getAllSettings = () =>
 export const fetchModels = (baseUrl: string, apiKey: string) =>
   invoke<string[]>("fetch_models", { baseUrl, apiKey });
 
+/** 系统浏览器打开外链 */
+export const openUrl = (url: string) => invoke<void>("open_url", { url });
+
 // ---------- 项目 ----------
 export const listProjects = () => invoke<Project[]>("list_projects");
 
@@ -74,6 +77,18 @@ export const exportCaCert = () => invoke<string>("export_ca_cert");
 export const installCaCert = () => invoke<string>("install_ca_cert");
 
 export const revealCaCert = () => invoke<void>("reveal_ca_cert");
+
+// ---------- 运行环境（关于页） ----------
+
+export interface RuntimeInfo {
+  os: string;
+  arch: string;
+  app_data_dir: string;
+}
+
+export const getRuntimeInfo = () => invoke<RuntimeInfo>("get_runtime_info");
+
+export const revealAppDataDir = () => invoke<void>("reveal_app_data_dir");
 
 // ---------- 流量 ----------
 

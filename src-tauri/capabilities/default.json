@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default capabilities for the main window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-theme",
+    "core:app:allow-set-app-theme",
+    "updater:default"
+  ]
 }

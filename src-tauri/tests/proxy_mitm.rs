@@ -17,7 +17,7 @@ use hudsucker::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use hudsucker::Proxy;
 use rustforge_lib::proxy::ca;
 use rustforge_lib::proxy::interceptor::{FlowSink, TrafficHandler};
-use rustforge_lib::storage::db::Db;
+use rustforge_lib::storage::db::{open_pool, Pool};
 use rustforge_lib::storage::models::TrafficSummary;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -109,7 +109,7 @@ async fn spawn_origin() -> u16 {
 }
 
 /// 起代理：真实 TrafficHandler + 临时 SQLite + VecSink
-async fn spawn_proxy(origin_port: u16, db: Arc<Mutex<Db>>, sink: VecSink) -> (u16, oneshot::Sender<()>) {
+async fn spawn_proxy(origin_port: u16, db: Pool, sink: VecSink) -> (u16, oneshot::Sender<()>) {
     let dir = test_dir();
     let material = ca::ensure_ca(&dir).unwrap();
     let authority: RcgenAuthority = ca::build_authority(&material).unwrap();
@@ -170,17 +170,17 @@ async fn read_head(stream: &mut TcpStream) -> String {
 async fn mitm_https_end_to_end() {
     // 1) 项目 + Scope：只拦截 localhost
     let dir = test_dir();
-    let db = Arc::new(Mutex::new(Db::open(&dir.join("test.db")).unwrap()));
+    let pool = open_pool(&dir.join("test.db")).unwrap();
     {
-        let d = db.lock().unwrap();
-        d.conn
+        let d = pool.get().unwrap();
+        d
             .execute(
                 "INSERT INTO projects(name, target_host, scope) VALUES('t', 'localhost', '[\"localhost\"]')",
                 [],
             )
             .unwrap();
-        let pid = d.conn.last_insert_rowid();
-        d.conn
+        let pid = d.last_insert_rowid();
+        d
             .execute(
                 "INSERT INTO settings(key, value) VALUES('current_project_id', ?1)",
                 [pid.to_string()],
@@ -191,7 +191,7 @@ async fn mitm_https_end_to_end() {
     // 2) 目标站 + 代理
     let origin_port = spawn_origin().await;
     let sink = VecSink::default();
-    let (proxy_port, shutdown) = spawn_proxy(origin_port, db.clone(), sink.clone()).await;
+    let (proxy_port, shutdown) = spawn_proxy(origin_port, pool.clone(), sink.clone()).await;
 
     // 3) 客户端：CONNECT → TLS（信任测试 CA）→ GET
     let client = async {
@@ -230,7 +230,7 @@ async fn mitm_https_end_to_end() {
         .expect("客户端流程超时");
 
     // 4) 断言：DB 里有完整记录（handle_response 先落库后回包，此时必然已写入）
-    let d = db.lock().unwrap();
+    let d = pool.get().unwrap();
     let (method, host, path, status, resp_body, url): (
         String,
         String,
@@ -238,7 +238,7 @@ async fn mitm_https_end_to_end() {
         i64,
         Vec<u8>,
         String,
-    ) = d.conn
+    ) = d
         .query_row(
             "SELECT method, host, path, status, resp_body, url FROM traffic WHERE host = 'localhost'",
             [],
@@ -253,7 +253,6 @@ async fn mitm_https_end_to_end() {
     assert!(url.starts_with("https://localhost"), "url 异常: {url}");
     assert!(url.contains("/data.json?q=1"), "url 异常: {url}");
     let project_count: i64 = d
-        .conn
         .query_row("SELECT COUNT(*) FROM traffic", [], |row| row.get(0))
         .unwrap();
     assert_eq!(project_count, 1, "Scope 外流量不应被记录");
@@ -273,17 +272,17 @@ async fn out_of_scope_not_recorded() {
     // Scope 只有 localhost；向 other-host 发明文 HTTP，应只转发不记录
     let dir = test_dir();
     std::fs::remove_file(dir.join("test2.db")).ok();
-    let db = Arc::new(Mutex::new(Db::open(&dir.join("test2.db")).unwrap()));
+    let pool = open_pool(&dir.join("test2.db")).unwrap();
     {
-        let d = db.lock().unwrap();
-        d.conn
+        let d = pool.get().unwrap();
+        d
             .execute(
                 "INSERT INTO projects(name, target_host, scope) VALUES('t', 'localhost', '[\"localhost\"]')",
                 [],
             )
             .unwrap();
-        let pid = d.conn.last_insert_rowid();
-        d.conn
+        let pid = d.last_insert_rowid();
+        d
             .execute(
                 "INSERT INTO settings(key, value) VALUES('current_project_id', ?1)",
                 [pid.to_string()],
@@ -312,7 +311,7 @@ async fn out_of_scope_not_recorded() {
     });
 
     let sink = VecSink::default();
-    let (proxy_port, shutdown) = spawn_proxy(origin_port, db.clone(), sink.clone()).await;
+    let (proxy_port, shutdown) = spawn_proxy(origin_port, pool.clone(), sink.clone()).await;
 
     // 明文 HTTP 走代理，但 Host 头伪装成 Scope 外的域名
     let mut tcp = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
@@ -327,9 +326,8 @@ async fn out_of_scope_not_recorded() {
     drop(tcp);
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let d = db.lock().unwrap();
+    let d = pool.get().unwrap();
     let count: i64 = d
-        .conn
         .query_row("SELECT COUNT(*) FROM traffic", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0, "Scope 外流量不应被记录");

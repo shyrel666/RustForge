@@ -8,14 +8,13 @@ pub mod rules;
 pub mod storage;
 pub mod tree;
 
-use std::sync::{Arc, Mutex};
-use storage::db::Db;
+use storage::db::Pool;
 use tauri::Manager;
 
-/// 全局应用状态：数据库连接（rusqlite 非线程安全，用 Mutex 保护，
-/// Arc 共享给代理后台任务）+ 代理生命周期管理
+/// 全局应用状态：数据库连接池（代理与 UI 各借独立连接，避免单连接竞争/中毒）
+/// + 代理生命周期管理
 pub struct AppState {
-    pub db: Arc<Mutex<Db>>,
+    pub db: Pool,
     pub proxy: proxy::ProxyManager,
 }
 
@@ -23,12 +22,15 @@ pub struct AppState {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
-            let db = Db::open(&dir.join("rustforge.db"))
+            let db = storage::db::open_pool(&dir.join("rustforge.db"))
                 .map_err(|e| format!("打开数据库失败: {e}"))?;
             app.manage(AppState {
-                db: Arc::new(Mutex::new(db)),
+                db,
                 proxy: proxy::ProxyManager::default(),
             });
             Ok(())
@@ -51,6 +53,8 @@ pub fn run() {
             commands::export_ca_cert,
             commands::install_ca_cert,
             commands::reveal_ca_cert,
+            commands::get_runtime_info,
+            commands::reveal_app_data_dir,
             commands::list_traffic,
             commands::get_traffic_detail,
             commands::clear_traffic,
@@ -78,6 +82,7 @@ pub fn run() {
             commands::count_traffic,
             commands::get_token_usage,
             commands::reset_token_usage,
+            commands::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -36,11 +36,12 @@ async function onSelect(id: number) {
 
 <template>
   <div class="picker">
+    <div class="picker-label">当前项目</div>
     <el-select
       :model-value="project.current?.id"
-      placeholder="选择项目（授权目标）"
+      placeholder="选择授权目标"
       size="small"
-      style="width: 100%"
+      class="picker-select"
       @change="onSelect"
     >
       <el-option
@@ -53,7 +54,7 @@ async function onSelect(id: number) {
     <el-button
       size="small"
       :icon="Plus"
-      style="width: 100%; margin-top: 8px"
+      class="picker-add"
       @click="dialogVisible = true"
     >
       新建项目
@@ -86,3 +87,21 @@ async function onSelect(id: number) {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.picker-label {
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--rf-text-muted);
+  text-transform: uppercase;
+}
+.picker-select {
+  width: 100%;
+}
+.picker-add {
+  width: 100%;
+  margin-top: 8px;
+}
+</style>

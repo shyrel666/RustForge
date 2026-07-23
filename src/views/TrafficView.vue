@@ -11,6 +11,7 @@ import {
   Delete,
   Refresh,
   Promotion,
+  FolderOpened,
 } from "@element-plus/icons-vue";
 import { useTrafficStore } from "../stores/traffic";
 import { useProjectStore } from "../stores/project";
@@ -19,6 +20,8 @@ import { useRepeaterStore } from "../stores/repeater";
 import CertGuideDialog from "../components/CertGuideDialog.vue";
 import ScopeDialog from "../components/ScopeDialog.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
+import EmptyState from "../components/shell/EmptyState.vue";
+import PageHeader from "../components/shell/PageHeader.vue";
 
 const traffic = useTrafficStore();
 const project = useProjectStore();
@@ -157,87 +160,109 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
 </script>
 
 <template>
-  <div class="traffic-page">
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <el-button
-        :type="traffic.proxyRunning ? 'danger' : 'primary'"
-        :loading="proxyBusy"
-        :icon="traffic.proxyRunning ? VideoPause : VideoPlay"
-        @click="toggleProxy"
-      >
-        {{ traffic.proxyRunning ? "停止代理" : "启动代理" }}
-      </el-button>
-      <el-tag :type="traffic.proxyRunning ? 'success' : 'info'" effect="dark">
-        {{ traffic.proxyRunning ? `监听 127.0.0.1:${traffic.proxyPort}` : "未运行" }}
-      </el-tag>
-      <el-button :icon="Lock" @click="certGuideVisible = true">证书引导</el-button>
-      <el-button :icon="Aim" :disabled="!project.current" @click="scopeVisible = true">
-        Scope（{{ project.current?.scope.length ?? 0 }}）
-      </el-button>
-      <el-button
-        :icon="Refresh"
-        :disabled="projectId === null"
-        @click="projectId !== null && traffic.refresh(projectId)"
-      />
-      <el-button :icon="Delete" :disabled="projectId === null" @click="onClear">
-        清空
-      </el-button>
-
-      <div class="filters">
-        <el-select
-          v-model="traffic.filterMethod"
-          placeholder="方法"
-          clearable
-          class="f-method"
-          @change="projectId !== null && traffic.refresh(projectId)"
+  <div class="traffic-page rf-page rf-page--inset">
+    <PageHeader
+      title="流量"
+      description="启动 MITM 代理，捕获授权范围内的请求并进行分析。"
+    />
+    <div class="rf-toolbar">
+      <div class="rf-toolbar-group">
+        <el-button
+          :type="traffic.proxyRunning ? 'danger' : 'primary'"
+          :loading="proxyBusy"
+          :icon="traffic.proxyRunning ? VideoPause : VideoPlay"
+          @click="toggleProxy"
         >
-          <el-option v-for="m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']"
-            :key="m" :label="m" :value="m" />
-        </el-select>
-        <el-select
-          v-model="traffic.filterStatusClass"
-          placeholder="状态"
-          clearable
-          class="f-status"
-          @change="projectId !== null && traffic.refresh(projectId)"
-        >
-          <el-option v-for="s in ['2', '3', '4', '5']" :key="s" :label="`${s}xx`" :value="s" />
-        </el-select>
-        <el-input
-          v-model="traffic.filterSearch"
-          placeholder="搜索 host / path…"
-          clearable
-          class="f-search"
-          @input="onSearchInput"
-          @clear="projectId !== null && traffic.refresh(projectId)"
+          {{ traffic.proxyRunning ? "停止代理" : "启动代理" }}
+        </el-button>
+        <el-tag :type="traffic.proxyRunning ? 'success' : 'info'" effect="plain" size="small">
+          {{ traffic.proxyRunning ? `127.0.0.1:${traffic.proxyPort}` : "未运行" }}
+        </el-tag>
+      </div>
+      <div class="rf-toolbar-group">
+        <el-button :icon="Lock" @click="certGuideVisible = true">证书引导</el-button>
+        <el-button :icon="Aim" :disabled="!project.current" @click="scopeVisible = true">
+          Scope（{{ project.current?.scope.length ?? 0 }}）
+        </el-button>
+      </div>
+      <div class="rf-toolbar-group">
+        <el-button
+          :icon="Refresh"
+          :disabled="projectId === null"
+          @click="projectId !== null && traffic.refresh(projectId)"
         />
+        <el-button :icon="Delete" :disabled="projectId === null" @click="onClear">
+          清空
+        </el-button>
+      </div>
+
+      <div class="rf-filters">
+        <div class="rf-toolbar-group">
+          <el-select
+            v-model="traffic.filterMethod"
+            placeholder="方法"
+            clearable
+            size="small"
+            class="f-method"
+            @change="projectId !== null && traffic.refresh(projectId)"
+          >
+            <el-option v-for="m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']"
+              :key="m" :label="m" :value="m" />
+          </el-select>
+          <el-select
+            v-model="traffic.filterStatusClass"
+            placeholder="状态"
+            clearable
+            size="small"
+            class="f-status"
+            @change="projectId !== null && traffic.refresh(projectId)"
+          >
+            <el-option v-for="s in ['2', '3', '4', '5']" :key="s" :label="`${s}xx`" :value="s" />
+          </el-select>
+          <el-input
+            v-model="traffic.filterSearch"
+            placeholder="搜索 host / path…"
+            clearable
+            size="small"
+            class="f-search"
+            @input="onSearchInput"
+            @clear="projectId !== null && traffic.refresh(projectId)"
+          />
+        </div>
       </div>
     </div>
 
-    <!-- 引导提示 -->
-    <el-alert v-if="!project.current" type="warning" :closable="false" class="hint">
-      请先在左下角创建/选择一个项目（一个项目 = 一个授权测试目标）。
-    </el-alert>
-    <el-alert v-else-if="scopeEmpty" type="warning" :closable="false" class="hint">
-      当前项目 Scope 为空，<b>不会拦截任何流量</b>（设计红线：只拦截白名单内的授权目标）。
-      点击上方「Scope」添加目标域名。
-    </el-alert>
+    <EmptyState
+      v-if="!project.current"
+      title="尚未选择项目"
+      description="请先在顶部创建或选择一个项目。一个项目对应一个已获授权的测试目标。"
+    >
+      <template #icon><el-icon :size="20"><FolderOpened /></el-icon></template>
+    </EmptyState>
+    <EmptyState
+      v-else-if="scopeEmpty"
+      title="Scope 为空，不会拦截流量"
+      description="设计红线：仅拦截白名单内的授权目标。请添加目标域名后再启动代理。"
+      action-label="配置 Scope"
+      @action="scopeVisible = true"
+    >
+      <template #icon><el-icon :size="20"><Aim /></el-icon></template>
+    </EmptyState>
     <el-alert
       v-else-if="!traffic.proxyRunning"
       type="info"
       :closable="false"
       class="hint"
+      show-icon
     >
-      代理未运行。点击「启动代理」后，把浏览器代理设为 127.0.0.1:{{ settings.proxy_port }}，
-      首次使用请先完成「证书引导」。
+      代理未运行。启动后将浏览器代理设为 127.0.0.1:{{ settings.proxy_port }}；首次使用请完成证书引导。
     </el-alert>
 
     <!-- 流量表格 -->
     <el-table
       v-loading="traffic.loading"
       :data="traffic.items"
-      class="flow-table"
+      class="flow-table rf-table-shell"
       size="small"
       highlight-current-row
       @row-click="(row: any) => traffic.openDetail(row.id)"
@@ -314,7 +339,7 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
           <el-tag :type="methodTag(traffic.detail.method)" effect="dark">{{ traffic.detail.method }}</el-tag>
           <span class="detail-url">{{ traffic.detail.url }}</span>
           <el-button size="small" :icon="Promotion" class="to-repeater" @click="sendToRepeater">
-            发送到 Repeater
+            发送到重放
           </el-button>
         </div>
         <el-descriptions :column="4" border size="small" class="detail-meta">
@@ -359,7 +384,7 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
             </el-alert>
             <el-empty v-else description="无响应体" :image-size="40" />
           </el-tab-pane>
-          <el-tab-pane label="🤖 AI 分析">
+          <el-tab-pane label="AI 分析">
             <AnalysisPanel v-if="traffic.detail" :traffic-id="traffic.detail.id" />
           </el-tab-pane>
         </el-tabs>
@@ -372,51 +397,35 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
 </template>
 
 <style scoped>
-.traffic-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.filters {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
-}
 .f-method {
-  width: 110px;
-}
-.f-status {
   width: 100px;
 }
+.f-status {
+  width: 90px;
+}
 .f-search {
-  width: 220px;
+  width: 200px;
 }
 .hint {
   flex-shrink: 0;
 }
 .flow-table {
-  flex: 1;
   cursor: pointer;
 }
 .table-footer {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: var(--rf-space-3);
   flex-shrink: 0;
 }
 .footer-info {
+  margin-right: auto;
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-secondary);
 }
 .port {
-  color: var(--el-text-color-secondary);
+  color: var(--rf-text-muted);
 }
 .rule-tag {
   margin-right: 4px;
@@ -428,26 +437,30 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: var(--rf-space-3);
+  padding-bottom: var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
 }
 .detail-url {
-  font-family: Consolas, monospace;
+  font-family: var(--rf-font-mono);
   font-size: 13px;
   word-break: break-all;
+  color: var(--rf-text);
 }
 .to-repeater {
   margin-left: auto;
   flex-shrink: 0;
 }
 .detail-meta {
-  margin-bottom: 12px;
+  margin-bottom: var(--rf-space-3);
 }
 .body-view {
   margin: 0;
   padding: 10px;
-  background: var(--el-fill-color-dark);
-  border-radius: 4px;
-  font-family: Consolas, monospace;
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  font-family: var(--rf-font-mono);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;

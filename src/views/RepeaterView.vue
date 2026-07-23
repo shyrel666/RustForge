@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { Promotion } from "@element-plus/icons-vue";
+import { Promotion, DocumentCopy } from "@element-plus/icons-vue";
 import { useRepeaterStore } from "../stores/repeater";
+import EmptyState from "../components/shell/EmptyState.vue";
+import PageHeader from "../components/shell/PageHeader.vue";
 
 const rep = useRepeaterStore();
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -18,36 +20,40 @@ function fmtSize(n: number): string {
 </script>
 
 <template>
-  <div class="rep-page">
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <el-select v-model="rep.draft.method" class="method">
-        <el-option v-for="m in METHODS" :key="m" :label="m" :value="m" />
-      </el-select>
-      <el-input
-        v-model="rep.draft.url"
-        placeholder="https://target.example.com/path?a=1"
-        class="url mono"
-        @keyup.enter="rep.send()"
-      />
+  <div class="rep-page rf-page rf-page--inset">
+    <PageHeader
+      title="重放"
+      description="手动改包并向目标重发，用于人工验证。"
+    />
+    <div class="rf-toolbar">
+      <div class="rf-toolbar-group request-bar">
+        <el-select v-model="rep.draft.method" class="method" size="default">
+          <el-option v-for="m in METHODS" :key="m" :label="m" :value="m" />
+        </el-select>
+        <el-input
+          v-model="rep.draft.url"
+          placeholder="https://target.example.com/path?a=1"
+          class="url mono"
+          @keyup.enter="rep.send()"
+        />
+      </div>
       <el-button type="primary" :icon="Promotion" :loading="rep.sending" @click="rep.send()">
         发送
       </el-button>
     </div>
 
-    <el-alert type="warning" :closable="false" class="hint">
-      <b>Repeater 会真实地向目标发送请求</b>——这是人在回路的手动「验证」动作，请确保目标在你的授权范围内。
-      忽略证书错误、不自动跟随重定向。
-      <span v-if="rep.loadedFrom"> 当前请求来自流量 #{{ rep.loadedFrom }}。</span>
-    </el-alert>
+    <div class="rf-inline-warn">
+      <span>
+        重放会真实向目标发送请求——请确保目标在授权范围内。忽略证书错误、不自动跟随重定向。
+        <template v-if="rep.loadedFrom"> 当前请求来自流量 #{{ rep.loadedFrom }}。</template>
+      </span>
+    </div>
 
-    <!-- 请求 / 响应 双栏 -->
-    <div class="content">
-      <!-- 请求编辑 -->
+    <div class="rf-split-shell content">
       <div class="pane">
-        <div class="pane-title">请求（可自由改包）</div>
+        <div class="pane-title">请求</div>
         <div class="field">
-          <div class="field-label">请求头（每行 Name: Value）</div>
+          <div class="rf-field-label">请求头（每行 Name: Value）</div>
           <el-input
             v-model="rep.draft.headersRaw"
             type="textarea"
@@ -57,7 +63,7 @@ function fmtSize(n: number): string {
           />
         </div>
         <div class="field grow">
-          <div class="field-label">请求体</div>
+          <div class="rf-field-label">请求体</div>
           <el-input
             v-model="rep.draft.body"
             type="textarea"
@@ -68,7 +74,8 @@ function fmtSize(n: number): string {
         </div>
       </div>
 
-      <!-- 响应查看 -->
+      <div class="pane-divider" aria-hidden="true" />
+
       <div class="pane">
         <div class="pane-title">响应</div>
         <el-alert v-if="rep.error" type="error" :closable="false" class="resp-err">
@@ -83,74 +90,69 @@ function fmtSize(n: number): string {
             <span class="resp-meta">{{ rep.resp.duration_ms }} ms · {{ fmtSize(rep.resp.resp_size) }}</span>
           </div>
           <div class="field">
-            <div class="field-label">响应头</div>
-            <pre class="view">{{ rep.resp.headers.map((h) => `${h.name}: ${h.value}`).join("\n") || "(无)" }}</pre>
+            <div class="rf-field-label">响应头</div>
+            <pre class="rf-mono-pre">{{ rep.resp.headers.map((h) => `${h.name}: ${h.value}`).join("\n") || "(无)" }}</pre>
           </div>
           <div class="field grow">
-            <div class="field-label">响应体</div>
-            <pre v-if="rep.resp.body_text !== null" class="view body-view">{{ rep.resp.body_text || "(空)" }}</pre>
+            <div class="rf-field-label">响应体</div>
+            <pre v-if="rep.resp.body_text !== null" class="rf-mono-pre body-view">{{ rep.resp.body_text || "(空)" }}</pre>
             <el-alert v-else-if="rep.resp.body_base64" type="info" :closable="false">
               二进制内容（{{ fmtSize(rep.resp.resp_size) }}），Base64（截断）：
-              <pre class="view">{{ rep.resp.body_base64.slice(0, 2000) }}…</pre>
+              <pre class="rf-mono-pre">{{ rep.resp.body_base64.slice(0, 2000) }}…</pre>
             </el-alert>
             <div v-else class="empty-body">无响应体</div>
           </div>
         </template>
 
-        <el-empty
+        <EmptyState
           v-else-if="!rep.error"
-          description="尚未发送。改好请求后点「发送」，在此查看响应。"
-          :image-size="48"
-        />
+          title="尚未发送"
+          description="改好请求后点「发送」，响应会显示在这里。"
+        >
+          <template #icon><el-icon :size="20"><DocumentCopy /></el-icon></template>
+        </EmptyState>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.rep-page {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.request-bar {
+  flex: 1;
+  min-width: 0;
 }
 .method {
-  width: 120px;
+  width: 110px;
   flex-shrink: 0;
 }
 .url {
   flex: 1;
-}
-.hint {
-  flex-shrink: 0;
+  min-width: 0;
 }
 .content {
-  flex: 1;
-  display: flex;
-  gap: 12px;
-  min-height: 0;
+  /* rf-split-shell provides chrome */
 }
 .pane {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
-  padding: 12px;
+  padding: var(--rf-space-4);
   overflow: auto;
 }
+.pane-divider {
+  width: 1px;
+  flex-shrink: 0;
+  background: var(--rf-border);
+}
 .pane-title {
-  font-weight: 600;
-  margin-bottom: 10px;
+  font-weight: 650;
+  font-size: 13px;
+  margin-bottom: var(--rf-space-3);
+  color: var(--rf-text);
 }
 .field {
-  margin-bottom: 12px;
+  margin-bottom: var(--rf-space-3);
   display: flex;
   flex-direction: column;
 }
@@ -158,14 +160,9 @@ function fmtSize(n: number): string {
   flex: 1;
   min-height: 0;
 }
-.field-label {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 5px;
-}
 .mono :deep(textarea),
 .mono :deep(input) {
-  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-family: var(--rf-font-mono);
   font-size: 12.5px;
 }
 .body-input :deep(textarea) {
@@ -178,29 +175,18 @@ function fmtSize(n: number): string {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: var(--rf-space-3);
 }
 .resp-meta {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.view {
-  margin: 0;
-  padding: 10px;
-  background: var(--el-fill-color-dark);
-  border-radius: 4px;
-  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 260px;
-  overflow: auto;
+  color: var(--rf-text-secondary);
 }
 .body-view {
   max-height: none;
+  flex: 1;
 }
 .empty-body {
+  color: var(--rf-text-muted);
   font-size: 13px;
-  color: var(--el-text-color-secondary);
 }
 </style>

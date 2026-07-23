@@ -31,14 +31,15 @@ function decline() {
 <template>
   <el-dialog
     v-model="visible"
-    title="⚖️ 授权使用声明"
+    title="授权使用声明"
     width="640px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
     :show-close="false"
+    class="consent-dialog"
   >
     <div class="consent-body">
-      <p><strong>本工具仅供学习与授权测试使用。</strong>在继续之前，请确认：</p>
+      <p class="lead"><strong>本工具仅供学习与授权测试使用。</strong>在继续之前，请确认：</p>
       <ol>
         <li>你仅对<strong>已获得书面授权</strong>的目标系统使用本工具（如：自己的网站、公司授权目标、CTF 靶场、漏洞赏金范围内的目标）。</li>
         <li>对未授权目标进行扫描、探测或攻击<strong>违反《中华人民共和国网络安全法》等相关法律法规</strong>，需自行承担全部法律责任。</li>
@@ -60,8 +61,22 @@ function decline() {
 </template>
 
 <style scoped>
+.consent-body {
+  color: var(--rf-text-secondary);
+  font-size: 13px;
+}
+.consent-body .lead {
+  margin: 0 0 var(--rf-space-3);
+  color: var(--rf-text);
+}
 .consent-body ol {
   padding-left: 20px;
-  line-height: 1.9;
+  margin: 0 0 var(--rf-space-4);
+  line-height: 1.85;
+}
+.consent-body :deep(.el-checkbox) {
+  align-items: flex-start;
+  height: auto;
+  white-space: normal;
 }
 </style>

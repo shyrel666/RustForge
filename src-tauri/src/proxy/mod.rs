@@ -6,7 +6,7 @@
 pub mod ca;
 pub mod interceptor;
 
-use crate::storage::db::Db;
+use crate::storage::db::Pool;
 use hudsucker::Proxy;
 use hudsucker::rustls::crypto::aws_lc_rs;
 use interceptor::{TauriSink, TrafficHandler};
@@ -55,7 +55,7 @@ impl ProxyManager {
     pub async fn start(
         &self,
         app: AppHandle,
-        db: Arc<Mutex<Db>>,
+        db: Pool,
         app_data_dir: PathBuf,
         port: u16,
     ) -> Result<ProxyStatus, String> {

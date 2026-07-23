@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# SQLite 连接池：代理高频写入与 UI 查询各用独立连接，消除单连接 Mutex 竞争与中毒
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
 thiserror = "2"
 chrono = "0.4"
 # Phase 1：MITM 代理。hudsucker 0.25（hyper 1.x + rustls + rcgen 0.14）
@@ -39,3 +42,6 @@ brotli = "8"
 # MITM 端到端测试用：搭本地 TLS 目标站 + 自定义上游 connector
 tokio-rustls = "0.26"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "webpki-tokio"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2.10.1"

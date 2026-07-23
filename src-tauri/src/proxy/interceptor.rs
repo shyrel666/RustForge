@@ -7,18 +7,33 @@
 //! 作用于同一个 clone，因此可以用 self.pending 暂存请求侧数据。
 
 use crate::rules::engine::{self, Severity, TrafficView};
-use crate::storage::db::Db;
+use crate::storage::db::Pool;
 use crate::storage::models::{Finding, TrafficSummary};
 use hudsucker::hyper::body::Bytes;
 use hudsucker::hyper::{Request, Response};
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use http_body_util::BodyExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
 /// 单个方向 body 的最大存储字节数，超出截断（防止大文件下载撑爆数据库）
 const MAX_STORED_BODY: usize = 1024 * 1024;
+
+/// 单方向 body 声明大小（Content-Length）超过此值时，只记录元数据、原始流直接透传，
+/// 不缓冲进内存也不入库——防止大文件传输撑爆内存。未声明长度（分块）的仍按常规缓冲。
+const MAX_CAPTURE_BODY: usize = 16 * 1024 * 1024;
+
+/// 解析 Content-Length 头为字节数（缺失或非法时 None）
+fn declared_len(headers: &hudsucker::hyper::HeaderMap) -> Option<usize> {
+    headers
+        .get("content-length")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
 
 /// 流量产出回调：Tauri 运行时推事件给前端，测试时收集断言。
 /// 抽这个 trait 是为了让拦截管线可以在无 GUI 环境下做端到端测试。
@@ -58,21 +73,20 @@ struct PendingReq {
 
 #[derive(Clone)]
 pub struct TrafficHandler {
-    db: Arc<Mutex<Db>>,
+    db: Pool,
     sink: Arc<dyn FlowSink>,
     pending: Option<PendingReq>,
 }
 
 impl TrafficHandler {
-    pub fn new(db: Arc<Mutex<Db>>, sink: Arc<dyn FlowSink>) -> Self {
+    pub fn new(db: Pool, sink: Arc<dyn FlowSink>) -> Self {
         Self { db, sink, pending: None }
     }
 
     /// 当前项目 + Scope。没有打开的项目 = 没有授权目标 = 一律不拦截
     fn current_project_scope(&self) -> Option<(i64, Vec<String>)> {
-        let db = self.db.lock().ok()?;
+        let db = self.db.get().ok()?;
         let project_id: i64 = db
-            .conn
             .query_row(
                 "SELECT value FROM settings WHERE key = 'current_project_id'",
                 [],
@@ -82,7 +96,6 @@ impl TrafficHandler {
             .parse()
             .ok()?;
         let scope_json: String = db
-            .conn
             .query_row(
                 "SELECT scope FROM projects WHERE id = ?1",
                 [project_id],
@@ -123,8 +136,13 @@ impl TrafficHandler {
         let req_body_stored = truncate(p.req_body, MAX_STORED_BODY);
         let resp_body_stored = resp_body.map(|b| truncate(b, MAX_STORED_BODY));
 
-        let Ok(db) = self.db.lock() else { return };
-        let res = db.conn.execute(
+        let Ok(db) = self.db.get() else { return };
+        // 流量 + 打标 + 建 Finding 放进一个事务，避免中途失败留下半截数据
+        let Ok(tx) = db.unchecked_transaction() else {
+            eprintln!("[proxy] 开启事务失败，流量丢弃");
+            return;
+        };
+        let res = tx.execute(
             "INSERT INTO traffic(project_id, method, scheme, host, port, path, url,
                                  req_headers, req_body, status, resp_headers, resp_body,
                                  content_type, req_size, resp_size, duration_ms)
@@ -136,7 +154,7 @@ impl TrafficHandler {
             ],
         );
         let id = match res {
-            Ok(_) => db.conn.last_insert_rowid(),
+            Ok(_) => tx.last_insert_rowid(),
             Err(e) => {
                 eprintln!("[proxy] 流量写库失败: {e}");
                 return;
@@ -154,7 +172,7 @@ impl TrafficHandler {
         let hits = engine::evaluate(&view);
         let rule_tags: Vec<String> = hits.iter().map(|h| h.rule.tag.to_string()).collect();
         if !rule_tags.is_empty() {
-            let _ = db.conn.execute(
+            let _ = tx.execute(
                 "UPDATE traffic SET rule_tags = ?1 WHERE id = ?2",
                 rusqlite::params![serde_json::to_string(&rule_tags).unwrap_or_default(), id],
             );
@@ -168,7 +186,7 @@ impl TrafficHandler {
                 continue;
             }
             let reasoning = format!("{}（命中位置：{}）", rule.description, hit.location);
-            let exec = db.conn.execute(
+            let exec = tx.execute(
                 "INSERT INTO findings(project_id, traffic_id, source, title, vuln_type,
                                       owasp, cwe, severity, confidence, reasoning, verify_steps)
                  VALUES(?1,?2,'rule',?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -179,7 +197,7 @@ impl TrafficHandler {
             );
             if let Ok(_) = exec {
                 new_findings.push(Finding {
-                    id: db.conn.last_insert_rowid(),
+                    id: tx.last_insert_rowid(),
                     project_id: p.project_id,
                     traffic_id: Some(id),
                     source: "rule".into(),
@@ -195,6 +213,10 @@ impl TrafficHandler {
                     created_at: created_at.clone(),
                 });
             }
+        }
+        if let Err(e) = tx.commit() {
+            eprintln!("[proxy] 事务提交失败: {e}");
+            return;
         }
         drop(db);
 
@@ -230,14 +252,6 @@ impl HttpHandler for TrafficHandler {
         req: Request<Body>,
     ) -> RequestOrResponse {
         let (parts, body) = req.into_parts();
-        // 必须收完整 body 才能既记录又原样转发
-        let body_bytes = match body.collect().await {
-            Ok(c) => c.to_bytes(),
-            Err(e) => {
-                eprintln!("[proxy] 请求体读取失败: {e}");
-                Bytes::new()
-            }
-        };
 
         let uri = &parts.uri;
         let host = uri.host().unwrap_or_default().to_string();
@@ -246,21 +260,56 @@ impl HttpHandler for TrafficHandler {
             .port_u16()
             .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
-        // Scope 外：静默转发，不记录（白名单红线）
+        // Scope 外：静默转发，不记录也不缓冲 body（原始流直接透传，白名单红线）
         let Some(project_id) = self.in_scope(&host) else {
-            return Request::from_parts(parts, Body::from(body_bytes)).into();
+            return Request::from_parts(parts, body).into();
         };
 
-        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        let path = uri
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let url = uri.to_string();
+        let method = parts.method.to_string();
+        let req_headers = headers_to_json(&parts.headers);
+
+        // 大请求体（按 Content-Length 判断）：只记录元数据，原始流透传不缓冲，
+        // 避免大文件上传把整包读进内存
+        if let Some(declared) = declared_len(&parts.headers).filter(|n| *n > MAX_CAPTURE_BODY) {
+            self.pending = Some(PendingReq {
+                project_id,
+                method,
+                scheme,
+                host,
+                port,
+                path,
+                url,
+                req_headers,
+                req_size: declared,
+                req_body: Vec::new(),
+                start: Instant::now(),
+            });
+            return Request::from_parts(parts, body).into();
+        }
+
+        // 常规：收全 body 才能既记录又原样转发
+        let body_bytes = match body.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                eprintln!("[proxy] 请求体读取失败: {e}");
+                Bytes::new()
+            }
+        };
         self.pending = Some(PendingReq {
             project_id,
-            method: parts.method.to_string(),
+            method,
             scheme,
             host,
             port,
-            path: path.to_string(),
-            url: uri.to_string(),
-            req_headers: headers_to_json(&parts.headers),
+            path,
+            url,
+            req_headers,
             req_size: body_bytes.len(),
             req_body: body_bytes.to_vec(),
             start: Instant::now(),
@@ -280,7 +329,15 @@ impl HttpHandler for TrafficHandler {
         };
 
         let status = res.status().as_u16();
-        let resp_headers = headers_to_json(res.headers());
+
+        // 大响应（按 Content-Length 判断）：只记录元数据（含响应头），body 原始流透传，
+        // 不缓冲/不解压/不入库，避免大文件下载把整包读进内存
+        if let Some(declared) = declared_len(res.headers()).filter(|n| *n > MAX_CAPTURE_BODY) {
+            let resp_headers = headers_to_json(res.headers());
+            self.store_and_emit(p, Some(status), Some(resp_headers), None, declared);
+            return res;
+        }
+
         // 记录 Content-Encoding：入库/规则/AI/展示用解压后的副本，转发给浏览器的仍是原始字节
         let encoding = res
             .headers()
@@ -298,6 +355,9 @@ impl HttpHandler for TrafficHandler {
         // resp_size 记录线上（压缩后）字节数；stored_body 为解压后的内容
         let wire_size = body_bytes.len();
         let stored_body = decode_body(&body_bytes, encoding.as_deref());
+        // 是否确实发生了解压（识别到的编码且长度变化）——据此校正入库头
+        let decoded = encoding.is_some() && stored_body.len() != body_bytes.len();
+        let resp_headers = headers_to_json_for_storage(&parts.headers, decoded, stored_body.len());
 
         self.store_and_emit(
             p,
@@ -374,20 +434,46 @@ fn normalize_scope_pattern(raw: &str) -> String {
     s.trim_end_matches('.').to_string()
 }
 
-/// HeaderMap → JSON 对象字符串（同名头逗号合并，与 schema 注释一致）
-fn headers_to_json(headers: &hudsucker::hyper::HeaderMap) -> String {
+/// HeaderMap → JSON 对象（同名头合并）。除 Set-Cookie 外按 HTTP 惯例逗号合并；
+/// Set-Cookie 的值可能自带逗号（如 Expires），逗号合并会破坏其边界，故用换行分隔。
+fn headers_to_map(headers: &hudsucker::hyper::HeaderMap) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     for (name, value) in headers.iter() {
         let key = name.as_str().to_string();
         let val = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        let sep = if key.eq_ignore_ascii_case("set-cookie") { "\n" } else { ", " };
         map.entry(key)
             .and_modify(|e: &mut serde_json::Value| {
                 if let Some(s) = e.as_str() {
-                    *e = serde_json::Value::String(format!("{s}, {val}"));
+                    *e = serde_json::Value::String(format!("{s}{sep}{val}"));
                 }
             })
             .or_insert(serde_json::Value::String(val));
     }
+    map
+}
+
+fn headers_to_json(headers: &hudsucker::hyper::HeaderMap) -> String {
+    serde_json::Value::Object(headers_to_map(headers)).to_string()
+}
+
+/// 入库副本专用：当响应体已被解压时，剥掉 content-encoding 并把 content-length
+/// 改写为解压后长度，避免"头声明 gzip、体是明文、长度对不上"的展示错乱。
+/// （转发给浏览器的响应仍用原始头与原始压缩字节，不受影响。）
+fn headers_to_json_for_storage(
+    headers: &hudsucker::hyper::HeaderMap,
+    decoded: bool,
+    decoded_len: usize,
+) -> String {
+    if !decoded {
+        return headers_to_json(headers);
+    }
+    let mut map = headers_to_map(headers);
+    map.remove("content-encoding");
+    map.insert(
+        "content-length".to_string(),
+        serde_json::Value::String(decoded_len.to_string()),
+    );
     serde_json::Value::Object(map).to_string()
 }
 

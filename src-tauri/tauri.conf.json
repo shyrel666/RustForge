@@ -13,10 +13,12 @@
     "windows": [
       {
         "title": "RustForge",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 1024,
-        "minHeight": 700
+        "width": 1180,
+        "height": 760,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "theme": "Dark"
       }
     ],
     "security": {
@@ -26,11 +28,26 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "publisher": "RustForge",
     "copyright": "© 2026 RustForge · 仅供授权渗透测试与安全学习使用",
     "category": "DeveloperTool",
     "shortDescription": "AI 引导式渗透学习桌面应用",
     "longDescription": "面向已获授权的渗透初学者：MITM 抓包 + 被动规则初筛 + AI 分析（OWASP/CWE/置信度/验证步骤）+ 渗透任务树引导 + 手动验证 Repeater + 学习报告导出。全程人在回路，AI 不自动攻击目标。"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2NzlGREREQjg2QjMzNTAKUldSUU0ydTQzZjE1MWpzdTdqN3NhWmJIZEV0elA4QjNzQTdXcThqdGN6T2NMZlJqcUthRi9UMXUK",
+      "endpoints": [
+        "https://github.com/shyrel666/RustForge/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

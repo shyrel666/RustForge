@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 48" role="img" aria-label="RustForge">
+  <defs>
+    <linearGradient id="rf-lockup-path" x1="4" y1="40" x2="36" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#35E0C1"/>
+    </linearGradient>
+  </defs>
+  <!-- Color mark on transparent background -->
+  <g transform="translate(2 2)">
+    <path
+      d="M 5.5 36.4 L 10.9 24.4 H 21.1 L 28.1 12.8"
+      fill="none"
+      stroke="url(#rf-lockup-path)"
+      stroke-width="4.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M 30.8 6.7 L 32.7 10.5 L 36.5 12.4 L 32.7 14.3 L 30.8 18.1 L 28.9 14.3 L 25.1 12.4 L 28.9 10.5 Z"
+      fill="#FF7A45"
+    />
+  </g>
+  <text
+    x="56"
+    y="32"
+    fill="#F5F7FA"
+    font-family="Segoe UI Variable, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
+    font-size="26"
+    font-weight="700"
+    letter-spacing="-0.4"
+  >RustForge</text>
+</svg>

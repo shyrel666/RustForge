@@ -1,5 +1,10 @@
 import { defineStore } from "pinia";
 import { getAllSettings, setSetting } from "../api/tauri";
+import {
+  applyTheme,
+  parseThemeMode,
+  type ThemeMode,
+} from "../utils/theme";
 
 /**
  * AI 供应商（CC-switch 风格）：一套完整的 API 配置三件套 + 名称/备注。
@@ -26,6 +31,8 @@ export interface AppSettings {
   price_per_mtok: number;
   // 首次启动授权声明
   consent_accepted: boolean;
+  // 外观：浅色 / 深色 / 跟随系统
+  theme: ThemeMode;
 }
 
 const DEFAULTS = {
@@ -33,6 +40,7 @@ const DEFAULTS = {
   proxy_port: 8080,
   price_per_mtok: 0,
   consent_accepted: false,
+  theme: "dark" as ThemeMode,
 };
 
 /** 生成一个本地唯一 id（时间戳 + 随机后缀，够用即可） */
@@ -48,6 +56,7 @@ export const useSettingsStore = defineStore("settings", {
     proxy_port: DEFAULTS.proxy_port,
     price_per_mtok: DEFAULTS.price_per_mtok,
     consent_accepted: DEFAULTS.consent_accepted,
+    theme: DEFAULTS.theme,
   }),
   getters: {
     /** 当前生效的供应商（无则取列表首个，仍无则 null） */
@@ -66,6 +75,8 @@ export const useSettingsStore = defineStore("settings", {
       this.proxy_port = Number(all.proxy_port) || DEFAULTS.proxy_port;
       this.price_per_mtok = Number(all.price_per_mtok) || DEFAULTS.price_per_mtok;
       this.consent_accepted = all.consent_accepted === "true";
+      this.theme = parseThemeMode(all.theme);
+      applyTheme(this.theme);
 
       // 解析多供应商列表
       let providers: AiProvider[] = [];
@@ -116,7 +127,14 @@ export const useSettingsStore = defineStore("settings", {
         setSetting("proxy_port", String(this.proxy_port)),
         setSetting("price_per_mtok", String(this.price_per_mtok)),
         setSetting("consent_accepted", String(this.consent_accepted)),
+        setSetting("theme", this.theme),
       ]);
+    },
+
+    async setTheme(mode: ThemeMode) {
+      this.theme = mode;
+      applyTheme(mode);
+      await setSetting("theme", mode);
     },
 
     /** 新增供应商，返回其 id；若此前无当前项则自动设为当前 */
