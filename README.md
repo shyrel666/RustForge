@@ -12,6 +12,7 @@
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![AI](https://img.shields.io/badge/AI-BYO%20Key%20·%20OpenAI%20兼容-8A2BE2)
 ![Status](https://img.shields.io/badge/progress-Phase%200–5%20完成-2ea44f)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
@@ -154,6 +155,6 @@ RustForge 的设计参考并致敬以下优秀项目：
 
 ## ⚖️ 许可
 
-本项目**仅用于授权测试与安全教育**，请勿用于任何未授权场景。
+本项目采用 [MIT License](LICENSE) 开源。
 
-> 尚未选定开源许可协议（建议 MIT）；在明确选定前，默认保留所有权利。
+> 请注意：开源许可授予的是**软件本身的使用权**，不等于授权你测试任何目标系统。RustForge **仅可用于已获书面授权的目标**，请勿用于任何未授权场景，一切后果由使用者自行承担。
