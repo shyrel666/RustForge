@@ -11,7 +11,6 @@
 ![Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=black)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![AI](https://img.shields.io/badge/AI-BYO%20Key%20·%20OpenAI%20兼容-8A2BE2)
-![Status](https://img.shields.io/badge/progress-Phase%200–5%20完成-2ea44f)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
