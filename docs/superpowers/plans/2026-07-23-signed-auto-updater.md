@@ -4,11 +4,15 @@
 
 **Goal:** Add signed Windows x64 in-app updates from GitHub Releases, expose an automatic update button beside the RustForge brand, and remove the duplicated GitHub action from the About page.
 
-**Architecture:** A tested updater controller owns all check/download/install state and receives Tauri operations through dependency injection. A thin adapter binds it to the official updater/process plugins; `AppShell` starts one silent check, while `AppTopbar` and `SettingsView` consume the same singleton state. Tauri config and a tag-triggered GitHub Actions workflow produce and distribute signed updater artifacts.
+**Status:** Implemented locally. Remaining: GitHub Secrets + signed Release E2E.
 
-**Tech Stack:** Vue 3, TypeScript, Element Plus, Tauri 2, `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-process`, Rust updater/process plugins, Node 22 test runner, GitHub Actions.
+**Architecture:** A tested updater controller owns all check/download/install state and receives Tauri operations through dependency injection. A thin adapter binds it to `@tauri-apps/plugin-updater` only. `AppShell` starts one silent check; `AppUpdateButton` is shared by `AppTopbar` and the About brand row. Windows install launches the installer then exits; the installer relaunches the app (no `plugin-process` / `relaunch`). Tauri config and a tag-triggered GitHub Actions workflow produce signed updater artifacts. `ReleaseNotFound` is treated as “latest”.
+
+**Tech Stack:** Vue 3, TypeScript, Element Plus, Tauri 2, `@tauri-apps/plugin-updater`, Rust `tauri-plugin-updater`, Node 22 test runner, GitHub Actions.
 
 **Working tree note:** Continue in the existing dirty `main` workspace because this feature depends on the uncommitted UI redesign. Do not commit, push, tag, create a release, or configure remote Secrets unless the user explicitly requests it.
+
+**Review deltas vs early task drafts below:** drop process plugin; share `AppUpdateButton` on About; match `ReleaseNotFound` not generic 404; confirm dialog shows `current → target`; release workflow verifies tag/version alignment.
 
 ---
 
