@@ -36,18 +36,58 @@ fn record_usage(conn: &rusqlite::Connection, usage: &crate::ai::client::Usage) {
     bump("usage_total_tokens", usage.total_tokens);
 }
 
+/// 当前生效的 AI 供应商（CC-switch 风格：多供应商 + 一个活动项）。
+/// 返回 (base_url, api_key, model)。优先从 ai_providers/ai_current 解析活动供应商；
+/// 若尚未配置多供应商（旧版本），回退到旧的单条 base_url/api_key/model 设置。
+fn active_ai(conn: &rusqlite::Connection) -> Option<(String, String, String)> {
+    if let Some(json) = read_setting(conn, "ai_providers") {
+        if let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+            if !list.is_empty() {
+                let current = read_setting(conn, "ai_current").unwrap_or_default();
+                let p = list
+                    .iter()
+                    .find(|p| p["id"].as_str() == Some(current.as_str()))
+                    .unwrap_or(&list[0]);
+                let base_url = p["base_url"].as_str().unwrap_or_default().trim().to_string();
+                let api_key = p["api_key"].as_str().unwrap_or_default().trim().to_string();
+                let model = p["model"].as_str().unwrap_or_default().trim().to_string();
+                return Some((base_url, api_key, model));
+            }
+        }
+    }
+    // 回退：旧版单供应商设置
+    let base_url = read_setting(conn, "base_url")?;
+    let api_key = read_setting(conn, "api_key")?;
+    let model = read_setting(conn, "model").unwrap_or_else(|| "deepseek-chat".into());
+    Some((base_url, api_key, model))
+}
+
+/// 归一化活动供应商三元组：空 base_url/model 用内置默认兜底。
+fn resolved_ai(conn: &rusqlite::Connection) -> CmdResult<(String, String, String)> {
+    let (base_url, api_key, model) =
+        active_ai(conn).ok_or("请先在设置页添加并选择一个 AI 供应商")?;
+    if api_key.trim().is_empty() {
+        return Err("当前 AI 供应商未配置 API Key，请在设置页填写".into());
+    }
+    let base_url = if base_url.trim().is_empty() {
+        "https://api.deepseek.com".to_string()
+    } else {
+        base_url
+    };
+    let model = if model.trim().is_empty() {
+        "deepseek-chat".to_string()
+    } else {
+        model
+    };
+    Ok((base_url, api_key, model))
+}
+
 /// 红线检查 + 构建 LLM 客户端（ai_enabled=false / 无 Key 直接拒绝）
 fn llm_client(conn: &rusqlite::Connection) -> CmdResult<OpenAiClient> {
     if read_setting(conn, "ai_enabled").as_deref() == Some("false") {
         return Err("AI 功能已在设置中全局禁用（隐私开关）".into());
     }
-    let api_key = read_setting(conn, "api_key").unwrap_or_default();
-    if api_key.trim().is_empty() {
-        return Err("请先在设置页配置 API Key".into());
-    }
-    let base_url = read_setting(conn, "base_url")
-        .unwrap_or_else(|| "https://api.deepseek.com".into());
-    let model = read_setting(conn, "model").unwrap_or_else(|| "deepseek-chat".into());
+    let (base_url, api_key, model) = resolved_ai(conn)?;
     OpenAiClient::new(&base_url, &api_key, &model)
 }
 
@@ -120,6 +160,52 @@ pub fn get_all_settings(state: State<AppState>) -> CmdResult<HashMap<String, Str
         map.insert(k, v);
     }
     Ok(map)
+}
+
+/// 从供应商的 OpenAI 兼容 /models 端点拉取可用模型列表（CC-switch 风格「获取模型」）。
+/// GET {base_url}/models，Bearer 鉴权；失败时透传服务端错误片段。
+#[tauri::command]
+pub async fn fetch_models(base_url: String, api_key: String) -> CmdResult<Vec<String>> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("请先填写 Base URL".into());
+    }
+    if api_key.trim().is_empty() {
+        return Err("请先填写 API Key".into());
+    }
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = http
+        .get(format!("{base}/models"))
+        .bearer_auth(api_key.trim())
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let snippet: String = text.chars().take(300).collect();
+        return Err(format!("获取模型失败 {status}: {snippet}"));
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("响应非 JSON: {e}"))?;
+    // OpenAI 兼容：{ "data": [ { "id": "..." }, ... ] }
+    let mut ids: Vec<String> = json["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err("该端点未返回模型列表（可能不支持 /models）".into());
+    }
+    Ok(ids)
 }
 
 // ---------- 项目 ----------
@@ -474,13 +560,7 @@ pub async fn analyze_traffic(
         if read_setting(&db.conn, "ai_enabled").as_deref() == Some("false") {
             return Err("AI 功能已在设置中全局禁用（隐私开关）".into());
         }
-        let api_key = read_setting(&db.conn, "api_key").unwrap_or_default();
-        if api_key.trim().is_empty() {
-            return Err("请先在设置页配置 API Key".into());
-        }
-        let base_url = read_setting(&db.conn, "base_url")
-            .unwrap_or_else(|| "https://api.deepseek.com".into());
-        let model = read_setting(&db.conn, "model").unwrap_or_else(|| "deepseek-chat".into());
+        let (base_url, api_key, model) = resolved_ai(&db.conn)?;
         let template = read_setting(&db.conn, prompts::ANALYZE_TEMPLATE_KEY)
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| prompts::DEFAULT_ANALYZE_TEMPLATE.to_string());

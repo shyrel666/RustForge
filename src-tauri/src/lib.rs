@@ -37,6 +37,7 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
             commands::get_all_settings,
+            commands::fetch_models,
             commands::list_projects,
             commands::create_project,
             commands::delete_project,

@@ -18,6 +18,10 @@ export const setSetting = (key: string, value: string) =>
 export const getAllSettings = () =>
   invoke<Record<string, string>>("get_all_settings");
 
+/** 从供应商 /models 端点拉取可用模型（CC-switch 风格「获取模型」） */
+export const fetchModels = (baseUrl: string, apiKey: string) =>
+  invoke<string[]>("fetch_models", { baseUrl, apiKey });
+
 // ---------- 项目 ----------
 export const listProjects = () => invoke<Project[]>("list_projects");
 
