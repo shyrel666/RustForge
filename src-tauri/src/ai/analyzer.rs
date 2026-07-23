@@ -2,7 +2,9 @@
 //! 误报素养红线：解析失败重试一次；confidence 强制钳到 0-100；
 //! 每条假设必须带 reasoning 和 verify_steps，空值降级为无假设。
 
-use super::client::{ChatResponse, LlmClient, Usage};
+use super::client::{LlmClient, Usage};
+#[cfg(test)]
+use super::client::ChatResponse;
 use super::json::parse_llm_json;
 use super::prompts;
 use crate::storage::models::{AnalysisResult, TrafficDetail};
