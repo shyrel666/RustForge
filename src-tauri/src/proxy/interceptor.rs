@@ -281,6 +281,12 @@ impl HttpHandler for TrafficHandler {
 
         let status = res.status().as_u16();
         let resp_headers = headers_to_json(res.headers());
+        // 记录 Content-Encoding：入库/规则/AI/展示用解压后的副本，转发给浏览器的仍是原始字节
+        let encoding = res
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_ascii_lowercase());
         let (parts, body) = res.into_parts();
         let body_bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
@@ -289,13 +295,16 @@ impl HttpHandler for TrafficHandler {
                 Bytes::new()
             }
         };
+        // resp_size 记录线上（压缩后）字节数；stored_body 为解压后的内容
+        let wire_size = body_bytes.len();
+        let stored_body = decode_body(&body_bytes, encoding.as_deref());
 
         self.store_and_emit(
             p,
             Some(status),
             Some(resp_headers),
-            Some(body_bytes.to_vec()),
-            body_bytes.len(),
+            Some(stored_body),
+            wire_size,
         );
 
         Response::from_parts(parts, Body::from(body_bytes))
@@ -390,6 +399,66 @@ fn truncate(data: Vec<u8>, max: usize) -> Vec<u8> {
     }
 }
 
+/// 解压上限：防 zip 炸弹撑爆内存（最终入库还会再截到 MAX_STORED_BODY）
+const MAX_DECOMPRESSED: u64 = 8 * 1024 * 1024;
+
+/// 按 Content-Encoding 解压响应体，供入库/规则/AI/展示使用；失败或未知编码时原样返回。
+/// 只处理最外层编码（覆盖 gzip / br / deflate 绝大多数真实场景）。
+fn decode_body(raw: &[u8], encoding: Option<&str>) -> Vec<u8> {
+    let Some(enc) = encoding else {
+        return raw.to_vec();
+    };
+    // Content-Encoding 可能是列表（如 "gzip, br"），取最外层（最后一个）
+    let enc = enc.split(',').map(|s| s.trim()).last().unwrap_or("");
+    let decoded = match enc {
+        "gzip" | "x-gzip" => gunzip(raw),
+        "br" => brotli_decode(raw),
+        "deflate" => inflate(raw),
+        _ => None, // identity / 未知 / 空 → 原样
+    };
+    decoded.unwrap_or_else(|| raw.to_vec())
+}
+
+fn gunzip(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .take(MAX_DECOMPRESSED)
+        .read_to_end(&mut out)
+        .ok()?;
+    (!out.is_empty()).then_some(out)
+}
+
+fn inflate(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    // HTTP "deflate" 多为 zlib 包裹，少数是裸 deflate：先按 zlib，失败再按裸流
+    let mut out = Vec::new();
+    if flate2::read::ZlibDecoder::new(data)
+        .take(MAX_DECOMPRESSED)
+        .read_to_end(&mut out)
+        .is_ok()
+        && !out.is_empty()
+    {
+        return Some(out);
+    }
+    out.clear();
+    flate2::read::DeflateDecoder::new(data)
+        .take(MAX_DECOMPRESSED)
+        .read_to_end(&mut out)
+        .ok()?;
+    (!out.is_empty()).then_some(out)
+}
+
+fn brotli_decode(data: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    brotli::Decompressor::new(data, 4096)
+        .take(MAX_DECOMPRESSED)
+        .read_to_end(&mut out)
+        .ok()?;
+    (!out.is_empty()).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::host_matches_scope;
@@ -424,5 +493,25 @@ mod tests {
         assert!(host_matches_scope(&scope, "x.foo.bar"));
         assert!(host_matches_scope(&scope, "foo.bar"));
         assert!(host_matches_scope(&scope, "a.b"));
+    }
+
+    #[test]
+    fn decodes_gzip_and_passthrough() {
+        use super::decode_body;
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let plain = b"<html>You have an error in your SQL syntax near 'x'</html>";
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(plain).unwrap();
+        let gz = e.finish().unwrap();
+
+        assert_eq!(decode_body(&gz, Some("gzip")), plain.to_vec(), "gzip 应被解开成原文");
+        // 未知 / 无编码：原样返回
+        assert_eq!(decode_body(plain, Some("identity")), plain.to_vec());
+        assert_eq!(decode_body(plain, None), plain.to_vec());
+        // 声明 gzip 但内容并非 gzip：降级为原始字节，绝不 panic
+        assert_eq!(decode_body(b"not gzip at all", Some("gzip")), b"not gzip at all".to_vec());
     }
 }

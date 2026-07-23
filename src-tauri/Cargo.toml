@@ -31,6 +31,9 @@ pem = "3"
 # Phase 2：LLM API 调用（rustls 避免 OpenSSL 依赖）+ 被动规则引擎
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 regex = "1"
+# 解压响应体（gzip/deflate/br）供展示与分析；转发给浏览器的仍是原始压缩字节
+flate2 = "1"
+brotli = "8"
 
 [dev-dependencies]
 # MITM 端到端测试用：搭本地 TLS 目标站 + 自定义上游 connector
