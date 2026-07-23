@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RustForge",
+  "version": "0.1.0",
+  "identifier": "com.rustforge.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "RustForge",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "publisher": "RustForge",
+    "copyright": "© 2026 RustForge · 仅供授权渗透测试与安全学习使用",
+    "category": "DeveloperTool",
+    "shortDescription": "AI 引导式渗透学习桌面应用",
+    "longDescription": "面向已获授权的渗透初学者：MITM 抓包 + 被动规则初筛 + AI 分析（OWASP/CWE/置信度/验证步骤）+ 渗透任务树引导 + 手动验证 Repeater + 学习报告导出。全程人在回路，AI 不自动攻击目标。"
+  }
+}

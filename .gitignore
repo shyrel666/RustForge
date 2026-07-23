@@ -1,0 +1,40 @@
+# ---------- 依赖 ----------
+node_modules/
+.pnpm-store/
+
+# ---------- 前端构建产物 ----------
+dist/
+dist-ssr/
+*.local
+
+# ---------- Rust / Tauri 构建产物 ----------
+src-tauri/target/
+**/*.rs.bk
+
+# ---------- 日志 ----------
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 运行期本地数据（不应入库：含用户 API Key 与 CA 私钥的数据库在 app_data_dir，不在仓库内） ----------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite

@@ -1,0 +1,38 @@
+[package]
+name = "rustforge"
+version = "0.1.0"
+description = "AI-guided pentest learning desktop app"
+edition = "2021"
+rust-version = "1.86"
+
+[lib]
+name = "rustforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+chrono = "0.4"
+# Phase 1：MITM 代理。hudsucker 0.25（hyper 1.x + rustls + rcgen 0.14）
+hudsucker = { version = "0.25", features = ["http2"] }
+rcgen = "0.14"
+http-body-util = "0.1"
+bytes = "1"
+base64 = "0.22"
+sha2 = "0.10"
+pem = "3"
+# Phase 2：LLM API 调用（rustls 避免 OpenSSL 依赖）+ 被动规则引擎
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+regex = "1"
+
+[dev-dependencies]
+# MITM 端到端测试用：搭本地 TLS 目标站 + 自定义上游 connector
+tokio-rustls = "0.26"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "webpki-tokio"] }
