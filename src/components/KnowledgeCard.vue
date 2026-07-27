@@ -1,33 +1,50 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { getKnowledgeCards, type KnowledgeCard } from "../api/tauri";
+import {
+  getKnowledgeCards,
+  type KnowledgeCard,
+  type StandardReference,
+} from "../api/tauri";
 
-const props = defineProps<{ owasp: string; cwe: string }>();
+const props = defineProps<{ references: StandardReference[] }>();
 const cards = ref<KnowledgeCard[]>([]);
+const error = ref("");
 
 async function load() {
   cards.value = [];
-  const owasp = props.owasp?.trim() ?? "";
-  const cwe = props.cwe?.trim() ?? "";
-  if (!owasp && !cwe) return;
+  error.value = "";
+  if (!props.references.length) return;
   try {
-    cards.value = await getKnowledgeCards(owasp, cwe);
-  } catch {
-    /* 知识库查询失败不影响主流程，静默 */
+    cards.value = await getKnowledgeCards(props.references);
+  } catch (e) {
+    error.value = String(e);
   }
 }
 
-watch(() => [props.owasp, props.cwe], load, { immediate: true });
+watch(() => props.references, load, { immediate: true, deep: true });
 </script>
 
 <template>
-  <div v-if="cards.length" class="kb">
+  <el-alert
+    v-if="error"
+    type="warning"
+    :closable="false"
+    title="标准引用无法解析"
+    :description="error"
+    show-icon
+  />
+  <div v-else-if="cards.length" class="kb">
     <div v-for="c in cards" :key="c.key" class="kb-card">
       <div class="kb-head">
-        <el-tag size="small" :type="c.kind === 'owasp' ? 'primary' : 'warning'" effect="dark">
+        <el-tag size="small" type="primary" effect="dark">
           {{ c.key }}
         </el-tag>
-        <span class="kb-title">{{ c.title }}</span>
+        <div>
+          <div class="kb-title">{{ c.title }}</div>
+          <div class="kb-meta">
+            {{ c.framework_label }} · 发布 {{ c.published_at }} · {{ c.license_name }}
+          </div>
+        </div>
       </div>
       <div class="kb-grid">
         <div class="kb-item"><span class="kb-label">原理</span>{{ c.principle }}</div>
@@ -60,6 +77,11 @@ watch(() => [props.owasp, props.cwe], load, { immediate: true });
 .kb-title {
   font-weight: 600;
   font-size: 13px;
+}
+.kb-meta {
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
 }
 .kb-grid {
   display: flex;

@@ -3,7 +3,7 @@ name = "rustforge"
 version = "0.1.0"
 description = "AI-guided pentest learning desktop app"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 
 [lib]
 name = "rustforge_lib"
@@ -33,7 +33,11 @@ sha2 = "0.10"
 pem = "3"
 # Phase 2：LLM API 调用（rustls 避免 OpenSSL 依赖）+ 被动规则引擎
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+# Scope/URL 授权边界直接使用 WHATWG URL + IDNA 规范化，不依赖 reqwest 的传递依赖
+url = "2"
 regex = "1"
+keyring = "4.1.5"
+zeroize = "1.9"
 # 解压响应体（gzip/deflate/br）供展示与分析；转发给浏览器的仍是原始压缩字节
 flate2 = "1"
 brotli = "8"
@@ -42,6 +46,10 @@ brotli = "8"
 # MITM 端到端测试用：搭本地 TLS 目标站 + 自定义上游 connector
 tokio-rustls = "0.26"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "webpki-tokio"] }
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.1"

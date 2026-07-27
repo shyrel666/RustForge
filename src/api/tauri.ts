@@ -18,9 +18,39 @@ export const setSetting = (key: string, value: string) =>
 export const getAllSettings = () =>
   invoke<Record<string, string>>("get_all_settings");
 
-/** 从供应商 /models 端点拉取可用模型（CC-switch 风格「获取模型」） */
-export const fetchModels = (baseUrl: string, apiKey: string) =>
-  invoke<string[]>("fetch_models", { baseUrl, apiKey });
+export interface AiDataPolicy {
+  redact_query_values: boolean;
+  redact_sensitive_headers: boolean;
+  redact_body_secrets: boolean;
+  include_truncated_bodies: boolean;
+  include_binary_bodies: boolean;
+  include_decode_failed_bodies: boolean;
+  request_body_max_bytes: number;
+  response_body_max_bytes: number;
+  total_context_max_bytes: number;
+}
+
+export const getAiDataPolicy = () =>
+  invoke<AiDataPolicy>("get_ai_data_policy");
+
+export const setAiDataPolicy = (policy: AiDataPolicy) =>
+  invoke<AiDataPolicy>("set_ai_data_policy", { policy });
+
+export interface ApiKeyStatus {
+  provider_id: string;
+  has_api_key: boolean;
+}
+
+/** 专用秘密写入命令；返回值只包含是否已配置，不回传 Key。 */
+export const setProviderApiKey = (providerId: string, apiKey: string) =>
+  invoke<ApiKeyStatus>("set_provider_api_key", { providerId, apiKey });
+
+export const deleteProviderApiKey = (providerId: string) =>
+  invoke<ApiKeyStatus>("delete_provider_api_key", { providerId });
+
+/** Key 由 Rust 后端按 providerId 从系统凭据库读取。 */
+export const fetchModels = (providerId: string) =>
+  invoke<string[]>("fetch_models", { providerId });
 
 /** 系统浏览器打开外链 */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
@@ -92,6 +122,20 @@ export const revealAppDataDir = () => invoke<void>("reveal_app_data_dir");
 
 // ---------- 流量 ----------
 
+export type BodyDecodeStatus =
+  | "not_received"
+  | "empty"
+  | "identity_text"
+  | "identity_binary"
+  | "decoded_text"
+  | "decoded_binary"
+  | "decode_failed"
+  | "unsupported_encoding"
+  | "encoded_truncated"
+  | "decode_truncated"
+  | "stream_error"
+  | "stream_incomplete";
+
 export interface TrafficSummary {
   id: number;
   project_id: number;
@@ -103,8 +147,14 @@ export interface TrafficSummary {
   url: string;
   status: number | null;
   content_type: string | null;
-  req_size: number;
-  resp_size: number;
+  req_wire_size: number;
+  resp_wire_size: number;
+  req_captured_size: number;
+  resp_captured_size: number;
+  req_truncated: boolean;
+  resp_truncated: boolean;
+  req_decode_status: BodyDecodeStatus;
+  resp_decode_status: BodyDecodeStatus;
   duration_ms: number;
   rule_tags: string[];
   created_at: string;
@@ -145,16 +195,46 @@ export const clearTraffic = (projectId: number) =>
 
 // ---------- AI 分析 ----------
 
+export interface StandardReference {
+  framework: "owasp-top10" | "owasp-api-top10" | "asvs" | "wstg" | "cwe";
+  version: string;
+  id: string;
+}
+
+export function formatStandardReference(reference: StandardReference): string {
+  if (
+    reference.framework === "owasp-top10" ||
+    reference.framework === "owasp-api-top10"
+  ) {
+    return `${reference.id}:${reference.version}`;
+  }
+  if (reference.framework === "asvs") {
+    return `ASVS v${reference.version}-${reference.id}`;
+  }
+  if (reference.framework === "wstg") {
+    return `WSTG-v${reference.version.split(".").join("")}-${reference.id.replace(
+      /^WSTG-/,
+      ""
+    )}`;
+  }
+  if (reference.framework === "cwe") {
+    return `${reference.id} (v${reference.version})`;
+  }
+  return `${reference.framework}@${reference.version}/${reference.id}`;
+}
+
 export interface VulnHypothesis {
   vuln_type: string;
   param: string;
-  owasp: string;
-  cwe: string;
+  standard_references: StandardReference[];
   severity: string;
   /** 0-100，AI 自评，必须人工复核 */
   confidence: number;
   reasoning: string;
   verify_steps: string;
+  evidence_refs: string[];
+  grounding_status: "grounded" | "ungrounded";
+  validation_notes: string[];
 }
 
 export interface AnalysisResult {
@@ -162,15 +242,112 @@ export interface AnalysisResult {
   suspicious_params: string[];
   hypotheses: VulnHypothesis[];
   summary: string;
+  analysis_run_id: number | null;
 }
 
-/** 触发 AI 分析（后端会落缓存 + 生成 Finding） */
-export const analyzeTraffic = (trafficId: number) =>
-  invoke<AnalysisResult>("analyze_traffic", { trafficId });
+export interface RedactionRecord {
+  location: string;
+  kind: string;
+  count: number;
+}
+
+export interface OmissionRecord {
+  location: string;
+  reason: string;
+}
+
+export interface BodyDecision {
+  location: string;
+  capture_status: string;
+  included: boolean;
+  reason: string;
+  source_bytes: number;
+  sent_bytes: number;
+  truncated_by_policy: boolean;
+}
+
+export interface RedactionManifest {
+  redactions: RedactionRecord[];
+  omissions: OmissionRecord[];
+  disclosures: string[];
+  body_decisions: BodyDecision[];
+  notes: string[];
+  total_input_bytes: number;
+}
+
+export interface AiContextPreview {
+  traffic_id: number;
+  provider_id: string;
+  provider_base_url: string;
+  model: string;
+  prompt_id: string;
+  prompt_version: number;
+  prompt_source: "builtin" | "custom";
+  system_prompt: string;
+  user_prompt: string;
+  retry_user_prompt: string;
+  response_schema: Record<string, unknown> | null;
+  input_hash: string;
+  policy: AiDataPolicy;
+  manifest: RedactionManifest;
+  evidence_refs: string[];
+  is_relaxed: boolean;
+}
+
+export const previewAiContext = (
+  trafficId: number,
+  policy: AiDataPolicy | null = null
+) => invoke<AiContextPreview>("preview_ai_context", { trafficId, policy });
+
+/** 只允许发送与预览哈希完全一致的上下文。 */
+export const analyzeTraffic = (
+  trafficId: number,
+  policy: AiDataPolicy,
+  expectedInputHash: string
+) =>
+  invoke<AnalysisResult>("analyze_traffic", {
+    trafficId,
+    policy,
+    expectedInputHash,
+  });
 
 /** 读缓存的分析结果（没有则 null） */
 export const getAnalysis = (trafficId: number) =>
   invoke<AnalysisResult | null>("get_analysis", { trafficId });
+
+export interface ValidationReport {
+  status: "valid" | "invalid";
+  errors: string[];
+  warnings: string[];
+  attempts: number;
+  hypotheses_total: number;
+  grounded_hypotheses: number;
+  ungrounded_hypotheses: number;
+}
+
+export interface AnalysisRun {
+  id: number;
+  project_id: number;
+  traffic_id: number | null;
+  provider_id: string;
+  provider_base_url: string;
+  model: string;
+  prompt_id: string;
+  prompt_version: number;
+  input_hash: string;
+  policy: AiDataPolicy;
+  manifest: RedactionManifest;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  schema_applied: boolean;
+  validation: ValidationReport;
+  raw_output_hash: string;
+  created_at: string;
+}
+
+export const getAnalysisRun = (runId: number) =>
+  invoke<AnalysisRun>("get_analysis_run", { runId });
 
 // ---------- Findings ----------
 
@@ -181,8 +358,7 @@ export interface Finding {
   source: "ai" | "rule";
   title: string;
   vuln_type: string;
-  owasp: string;
-  cwe: string;
+  standard_references: StandardReference[];
   severity: string;
   confidence: number;
   reasoning: string;
@@ -211,14 +387,35 @@ export const deleteFinding = (id: number) =>
 
 // ---------- 提示词模板 ----------
 
+export interface PromptTemplateVersion {
+  id: number | null;
+  prompt_id: string;
+  version: number;
+  source: "builtin" | "custom";
+  content: string;
+  based_on_id: number | null;
+  operation: "builtin" | "save" | "copy" | "rollback";
+  created_at: string | null;
+  active: boolean;
+}
+
 export const getPromptTemplate = () =>
-  invoke<string>("get_prompt_template");
+  invoke<PromptTemplateVersion>("get_prompt_template");
+
+export const listPromptVersions = () =>
+  invoke<PromptTemplateVersion[]>("list_prompt_versions");
 
 export const setPromptTemplate = (content: string) =>
-  invoke<void>("set_prompt_template", { content });
+  invoke<PromptTemplateVersion>("set_prompt_template", { content });
+
+export const copyPromptTemplate = (sourceId: number | null) =>
+  invoke<PromptTemplateVersion>("copy_prompt_template", { sourceId });
+
+export const rollbackPromptTemplate = (sourceId: number | null) =>
+  invoke<PromptTemplateVersion>("rollback_prompt_template", { sourceId });
 
 export const resetPromptTemplate = () =>
-  invoke<void>("reset_prompt_template");
+  invoke<PromptTemplateVersion>("reset_prompt_template");
 
 // ---------- 渗透任务树 ----------
 
@@ -240,21 +437,48 @@ export interface TaskNode {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  standard_references: StandardReference[];
   finding_ids: number[];
 }
 
 export const getTaskTree = (projectId: number) =>
   invoke<TaskNode[]>("get_task_tree", { projectId });
 
+export type TaskAiOperation = "generate" | "expand" | "alternative";
+
+export interface TaskAiExecution {
+  affected_nodes: number;
+  analysis_run_id: number;
+}
+
+export const previewTaskAi = (
+  operation: TaskAiOperation,
+  projectId: number | null,
+  nodeId: number | null
+) =>
+  invoke<AiContextPreview>("preview_task_ai", {
+    operation,
+    projectId,
+    nodeId,
+  });
+
 /** AI 生成整树；replace=true 时先清空现有树。返回节点数 */
-export const generateTaskTree = (projectId: number, replace: boolean) =>
-  invoke<number>("generate_task_tree", { projectId, replace });
+export const generateTaskTree = (
+  projectId: number,
+  replace: boolean,
+  expectedInputHash: string
+) =>
+  invoke<TaskAiExecution>("generate_task_tree", {
+    projectId,
+    replace,
+    expectedInputHash,
+  });
 
-export const expandTaskNode = (nodeId: number) =>
-  invoke<number>("expand_task_node", { nodeId });
+export const expandTaskNode = (nodeId: number, expectedInputHash: string) =>
+  invoke<TaskAiExecution>("expand_task_node", { nodeId, expectedInputHash });
 
-export const alternativeTaskNode = (nodeId: number) =>
-  invoke<void>("alternative_task_node", { nodeId });
+export const alternativeTaskNode = (nodeId: number, expectedInputHash: string) =>
+  invoke<TaskAiExecution>("alternative_task_node", { nodeId, expectedInputHash });
 
 export const nextTask = (projectId: number) =>
   invoke<TaskNode | null>("next_task", { projectId });
@@ -288,8 +512,10 @@ export const getTaskFindings = (nodeId: number) =>
 // ---------- 知识库（OWASP/CWE 卡片） ----------
 
 export interface KnowledgeCard {
+  reference: StandardReference;
   key: string;
-  kind: "owasp" | "cwe";
+  framework_label: string;
+  pack_title: string;
   title: string;
   /** 原理 */
   principle: string;
@@ -299,16 +525,26 @@ export interface KnowledgeCard {
   cause: string;
   /** 修复建议 */
   remediation: string;
+  source_url: string;
+  published_at: string;
+  license_name: string;
+  license_url: string;
 }
 
-export const getKnowledgeCards = (owasp: string, cwe: string) =>
-  invoke<KnowledgeCard[]>("get_knowledge_cards", { owasp, cwe });
+export const getKnowledgeCards = (references: StandardReference[]) =>
+  invoke<KnowledgeCard[]>("get_knowledge_cards", { references });
 
 // ---------- Repeater（手动改包重发） ----------
 
 export interface ReplayHeader {
   name: string;
   value: string;
+}
+
+export interface ScopeDecision {
+  normalized_host: string;
+  matched_scope: string;
+  match_kind: "exact" | "wildcard";
 }
 
 export interface ReplayResponse {
@@ -319,14 +555,32 @@ export interface ReplayResponse {
   body_base64: string | null;
   resp_size: number;
   duration_ms: number;
+  scope_decision: ScopeDecision;
 }
 
+/** 只做后端 ScopePolicy 判定，不建立网络连接。真正发送时后端会再次校验。 */
+export const authorizeReplayTarget = (
+  projectId: number | null,
+  url: string
+) =>
+  invoke<ScopeDecision>("authorize_replay_target", { projectId, url });
+
 export const replayRequest = (
+  projectId: number,
   method: string,
   url: string,
   headers: ReplayHeader[],
-  body: string | null
-) => invoke<ReplayResponse>("replay_request", { method, url, headers, body });
+  bodyText: string | null,
+  bodyBase64: string | null
+) =>
+  invoke<ReplayResponse>("replay_request", {
+    projectId,
+    method,
+    url,
+    headers,
+    bodyText,
+    bodyBase64,
+  });
 
 // ---------- 学习报告 ----------
 
@@ -351,6 +605,20 @@ export interface TokenUsage {
 export const getTokenUsage = () => invoke<TokenUsage>("get_token_usage");
 
 export const resetTokenUsage = () => invoke<void>("reset_token_usage");
+
+export interface UsageTrendPoint {
+  period: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export function getUsageTrend(
+  granularity: 'day' | 'month',
+): Promise<UsageTrendPoint[]> {
+  return invoke('get_usage_trend', { granularity });
+}
 
 /** 按筛选条件统计流量总条数（分页用） */
 export const countTraffic = (projectId: number, f: TrafficFilter = {}) =>

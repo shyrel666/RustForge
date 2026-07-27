@@ -71,6 +71,7 @@ mod tests {
             why: String::new(),
             how_to: String::new(),
             verify_criteria: String::new(),
+            standard_references: vec![],
             status: status.into(),
             sort_order: 0,
             created_at: String::new(),

@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "pack_id": "owasp-top10-2021",
+  "framework": "owasp-top10",
+  "version": "2021",
+  "title": "OWASP Top 10:2021",
+  "source_url": "https://owasp.org/Top10/2021/",
+  "published_at": "2021",
+  "license": {
+    "name": "Creative Commons Attribution 3.0",
+    "url": "https://creativecommons.org/licenses/by/3.0/"
+  },
+  "content_sha256": "49b59425b2765652bb2c5ad49160627496a6dca9541423eb251e5ea253030741",
+  "entries": [
+    {
+      "id": "A01",
+      "title": "失效的访问控制（Broken Access Control）",
+      "principle": "服务端没有可靠限制主体对资源和操作的访问，导致用户能够越过预期权限边界。",
+      "impact": "攻击者可能读取或修改他人数据、调用管理功能，或借助 SSRF 等路径访问受限资源。",
+      "cause": "常见根因包括只在前端隐藏入口、对象归属未校验、默认允许以及授权规则散落不一致。",
+      "remediation": "在可信服务层集中执行默认拒绝的授权校验，逐请求验证主体、资源和操作，并记录拒绝事件。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-639" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-352" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "A02",
+      "title": "加密机制失效（Cryptographic Failures）",
+      "principle": "敏感数据在传输、存储或密钥生命周期中没有得到与风险相称的密码学保护。",
+      "impact": "口令、令牌、隐私和业务数据可能泄露、被篡改或被离线破解。",
+      "cause": "常见根因是明文传输、弱算法、错误证书校验、硬编码密钥以及不安全的口令存储。",
+      "remediation": "分类敏感数据，强制现代 TLS，采用经审查的算法和库，并对密钥实施最小权限、轮换和撤销。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-319" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-614" }
+      ]
+    },
+    {
+      "id": "A03",
+      "title": "注入（Injection）",
+      "principle": "不可信输入改变了解释器原本的数据与指令边界。",
+      "impact": "可能造成数据库读写、脚本执行、命令执行、认证绕过或服务端代码执行。",
+      "cause": "常见根因是拼接 SQL、命令或模板，以及缺少与输出上下文匹配的编码和参数化。",
+      "remediation": "优先使用参数化接口和安全 API，对输入做语义白名单校验，并按最终解释上下文编码输出。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-78" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-79" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-89" }
+      ]
+    },
+    {
+      "id": "A04",
+      "title": "不安全的设计（Insecure Design）",
+      "principle": "系统设计本身缺少必要的安全控制，即使实现没有明显编码错误也可能被滥用。",
+      "impact": "业务流程、额度、角色和信任边界可能被系统性绕过，修复成本通常高于局部缺陷。",
+      "cause": "缺少威胁建模、滥用场景、安全需求和关键状态机约束。",
+      "remediation": "在设计阶段建立威胁模型与滥用用例，明确安全需求，并用纵深防御和可验证的业务不变量约束实现。",
+      "related_references": []
+    },
+    {
+      "id": "A05",
+      "title": "安全配置错误（Security Misconfiguration）",
+      "principle": "平台、框架、云资源或应用使用了不安全默认值或暴露了不需要的能力。",
+      "impact": "可能泄露内部信息、开放调试或管理功能，并为进一步攻击提供入口。",
+      "cause": "环境差异、默认账号、调试模式、多余服务、错误权限和缺失安全响应头。",
+      "remediation": "建立可自动验证的最小化配置基线，按环境管理配置，关闭调试与样例，并持续检测配置漂移。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-209" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-942" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-1188" }
+      ]
+    },
+    {
+      "id": "A06",
+      "title": "易受攻击和过时的组件（Vulnerable and Outdated Components）",
+      "principle": "应用依赖的组件、运行时或平台存在已知漏洞或已失去维护。",
+      "impact": "公开利用链可能直接导致数据泄露、拒绝服务或远程代码执行。",
+      "cause": "缺少依赖清单、版本治理、安全公告订阅和及时升级机制。",
+      "remediation": "维护 SBOM，持续检测直接和传递依赖，及时修补或替换，并只从可信来源获取可验证组件。",
+      "related_references": []
+    },
+    {
+      "id": "A07",
+      "title": "身份识别和认证失效（Identification and Authentication Failures）",
+      "principle": "身份校验、凭据恢复或会话生命周期无法可靠证明当前主体。",
+      "impact": "可能发生撞库、账号接管、会话固定或冒用其他身份。",
+      "cause": "弱口令、缺少防自动化、认证绕过、会话未轮换或退出后仍有效。",
+      "remediation": "使用成熟认证组件，启用多因素和防自动化控制，安全管理会话标识，并对恢复流程实施同等强度保护。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-306" }
+      ]
+    },
+    {
+      "id": "A08",
+      "title": "软件和数据完整性失效（Software and Data Integrity Failures）",
+      "principle": "系统把未经可信来源或完整性校验的软件、更新或数据当作可信内容处理。",
+      "impact": "可能发生供应链投毒、恶意更新、危险反序列化或关键数据篡改。",
+      "cause": "缺少签名验证、信任边界模糊、构建链保护不足或处理不可信序列化对象。",
+      "remediation": "锁定并验证依赖与制品来源，对更新和关键数据校验签名，保护 CI/CD，并避免反序列化不可信对象。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-345" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-502" }
+      ]
+    },
+    {
+      "id": "A09",
+      "title": "安全日志和监控失效（Security Logging and Monitoring Failures）",
+      "principle": "关键安全事件没有形成足够、可信且可行动的日志与告警。",
+      "impact": "攻击可能长期未被发现，事件响应和取证缺少可靠时间线。",
+      "cause": "关键事件漏记、日志字段不足、未集中分析、无告警或日志可被篡改。",
+      "remediation": "定义安全事件清单和统一字段，集中保护日志，建立可验证告警，并定期演练检测与响应。",
+      "related_references": []
+    },
+    {
+      "id": "A10",
+      "title": "服务端请求伪造（Server-Side Request Forgery）",
+      "principle": "服务端根据不可信地址发起请求，使外部输入跨越了网络信任边界。",
+      "impact": "可能访问内网、云元数据或本机服务，并绕过网络访问控制。",
+      "cause": "直接请求用户提供的 URL，未限制协议、主机、解析后地址或重定向目标。",
+      "remediation": "使用明确允许列表，解析并校验每一跳的目标地址，限制协议和出网路径，并隔离请求组件权限。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    }
+  ]
+}

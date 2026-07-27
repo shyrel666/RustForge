@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "pack_id": "unknown-reference",
+  "version": "1.0.0",
+  "source": "fixture",
+  "description": "引用了内置知识包里不存在的标准条目：规则结论必须能追溯到固定版本的标准，否则不允许上线。",
+  "rules": [
+    {
+      "rule_id": "unknown-reference",
+      "version": "1.0.0",
+      "source": "fixture",
+      "name": "未知标准引用",
+      "description": "引用不存在的 CWE 条目",
+      "verify_hint": "不应加载",
+      "severity": "low",
+      "confidence": 50,
+      "tag": "fixture",
+      "vuln_type": "fixture",
+      "references": [{ "framework": "cwe", "version": "4.20", "id": "CWE-999999" }],
+      "condition": {
+        "operator": "exists",
+        "selector": { "target": "url" }
+      }
+    }
+  ]
+}

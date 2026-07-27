@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "pack_id": "owasp-api-top10-2023",
+  "framework": "owasp-api-top10",
+  "version": "2023",
+  "title": "OWASP API Security Top 10:2023",
+  "source_url": "https://owasp.org/API-Security/editions/2023/en/0x11-t10/",
+  "published_at": "2023",
+  "license": {
+    "name": "Creative Commons Attribution-ShareAlike 4.0",
+    "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+  },
+  "content_sha256": "7e36da7a386fbc41295f959066a99dd047eb6efea7aecd5b75693ef563820a89",
+  "entries": [
+    {
+      "id": "API1",
+      "title": "对象级授权失效（Broken Object Level Authorization）",
+      "principle": "API 接受对象标识后没有验证当前主体是否有权访问该具体对象。",
+      "impact": "攻击者可枚举标识并读取、修改或删除其他用户的数据。",
+      "cause": "只校验登录状态、信任客户端对象 ID，或在不同端点采用不一致的归属校验。",
+      "remediation": "每次对象访问都在服务端校验主体与对象关系，采用不可预测标识只能作为辅助而非授权替代。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-639" }
+      ]
+    },
+    {
+      "id": "API2",
+      "title": "认证失效（Broken Authentication）",
+      "principle": "API 的身份建立、令牌验证或恢复流程存在可绕过或可批量滥用的缺口。",
+      "impact": "可导致账号接管、令牌冒用和高权限 API 被未授权调用。",
+      "cause": "认证端点缺少防自动化、令牌验证不完整、弱凭据或敏感恢复流程保护不足。",
+      "remediation": "集中验证令牌全部安全属性，对认证流程限速和监控，并为高风险操作采用更强身份确认。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" }
+      ]
+    },
+    {
+      "id": "API3",
+      "title": "对象属性级授权失效（Broken Object Property Level Authorization）",
+      "principle": "API 对对象字段的读取和修改权限控制不足。",
+      "impact": "调用方可能读取敏感字段或通过批量赋值修改受保护属性。",
+      "cause": "直接序列化内部对象、自动绑定请求字段，或缺少按角色定义的字段白名单。",
+      "remediation": "为请求与响应分别定义允许字段，显式映射 DTO，并按主体权限过滤可读和可写属性。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-200" }
+      ]
+    },
+    {
+      "id": "API4",
+      "title": "资源消耗不受限（Unrestricted Resource Consumption）",
+      "principle": "API 未限制会消耗计算、内存、存储、带宽或第三方费用的操作。",
+      "impact": "攻击者可造成拒绝服务、资源枯竭或不可控成本。",
+      "cause": "缺少请求大小、分页、并发、频率、执行时间和下游调用预算。",
+      "remediation": "在各层设置可观测的硬限制和配额，及早拒绝超限请求，并为昂贵操作采用异步和成本控制。",
+      "related_references": []
+    },
+    {
+      "id": "API5",
+      "title": "功能级授权失效（Broken Function Level Authorization）",
+      "principle": "API 没有按主体角色限制管理或高风险功能。",
+      "impact": "普通用户可能调用管理员端点或执行超出角色的操作。",
+      "cause": "依赖路由隐藏、HTTP 方法差异或前端菜单控制，而服务端授权不统一。",
+      "remediation": "按业务能力集中定义角色与权限，在每个敏感端点和方法上执行默认拒绝的服务端授权。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-306" }
+      ]
+    },
+    {
+      "id": "API6",
+      "title": "敏感业务流程访问不受限（Unrestricted Access to Sensitive Business Flows）",
+      "principle": "技术上合法的 API 操作可被自动化规模滥用，破坏业务预期。",
+      "impact": "可造成囤货、刷票、批量注册、薅取优惠或其他业务损失。",
+      "cause": "未识别敏感业务流，缺少行为级限额、反自动化和异常检测。",
+      "remediation": "建立业务滥用模型，按主体和资源设置限额，结合行为信号、挑战与人工复核。",
+      "related_references": []
+    },
+    {
+      "id": "API7",
+      "title": "服务端请求伪造（Server Side Request Forgery）",
+      "principle": "API 使用调用方可控地址发起服务端请求，跨越内部网络边界。",
+      "impact": "可访问内网服务、云元数据或本机接口。",
+      "cause": "协议、域名、端口、解析后地址和重定向目标缺少严格允许列表。",
+      "remediation": "对每次解析和重定向逐跳授权，隔离出站组件，限制协议、DNS 结果和目标网段。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "API8",
+      "title": "安全配置错误（Security Misconfiguration）",
+      "principle": "API 栈、网关、云资源或响应策略采用了宽松或不一致配置。",
+      "impact": "可能暴露调试信息、不必要方法、跨域访问或管理接口。",
+      "cause": "默认配置、环境漂移、错误 CORS、详细异常和未维护组件。",
+      "remediation": "统一并自动验证 API 安全基线，最小化暴露面，规范错误响应和跨域策略。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-942" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-209" }
+      ]
+    },
+    {
+      "id": "API9",
+      "title": "资产清单管理不当（Improper Inventory Management）",
+      "principle": "组织不知道哪些 API、版本、主机和数据流正在运行或仍可访问。",
+      "impact": "旧版、测试或影子 API 可能长期暴露且缺少补丁与监控。",
+      "cause": "缺少自动发现、版本退役、文档归属和环境隔离。",
+      "remediation": "维护包含版本、数据、所有者和生命周期的 API 清单，持续发现偏差并关闭退役入口。",
+      "related_references": []
+    },
+    {
+      "id": "API10",
+      "title": "不安全地使用第三方 API（Unsafe Consumption of APIs）",
+      "principle": "应用对来自第三方 API 的数据或行为给予了超过其可信度的信任。",
+      "impact": "被攻陷或异常的上游可触发注入、敏感数据泄露或拒绝服务。",
+      "cause": "缺少响应校验、超时和大小限制，盲目跟随重定向或信任下游输入。",
+      "remediation": "把第三方响应视为不可信输入，验证结构和语义，设置资源上限，并隔离凭据与网络权限。",
+      "related_references": []
+    }
+  ]
+}

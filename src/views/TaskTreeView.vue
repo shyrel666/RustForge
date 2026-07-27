@@ -11,7 +11,17 @@ import "@vue-flow/core/dist/theme-default.css";
 import { useTreeStore } from "../stores/tree";
 import { useProjectStore } from "../stores/project";
 import { useSettingsStore } from "../stores/settings";
-import { getTaskFindings, type Finding, type TaskNode } from "../api/tauri";
+import {
+  formatStandardReference,
+  getTaskFindings,
+  previewTaskAi,
+  type AiContextPreview,
+  type Finding,
+  type TaskAiOperation,
+  type TaskNode,
+} from "../api/tauri";
+import AiContextPreviewDialog from "../components/AiContextPreviewDialog.vue";
+import KnowledgeCard from "../components/KnowledgeCard.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import PageHeader from "../components/shell/PageHeader.vue";
 
@@ -23,6 +33,14 @@ const md = new MarkdownIt({ breaks: true, linkify: true });
 const { fitView } = useVueFlow("task-tree");
 
 const projectId = computed(() => project.current?.id ?? null);
+interface PendingTaskAi {
+  operation: TaskAiOperation;
+  projectId: number;
+  nodeId: number | null;
+  replace: boolean;
+}
+const aiPreviewVisible = ref(false);
+const pendingTaskAi = ref<PendingTaskAi | null>(null);
 
 // ---------- 整齐树布局：层 = 深度（左→右），兄弟按 slot 纵向排列 ----------
 const COL_W = 250;
@@ -164,16 +182,69 @@ function onPaneClick() {
   tree.selectedId = null;
 }
 
-async function doGenerate(replace: boolean) {
+function openTaskAiPreview(
+  operation: TaskAiOperation,
+  projectId: number,
+  nodeId: number | null,
+  replace = false
+) {
+  pendingTaskAi.value = { operation, projectId, nodeId, replace };
+  aiPreviewVisible.value = true;
+}
+
+function doGenerate(replace: boolean) {
   const pid = projectId.value;
   if (pid === null) return;
+  openTaskAiPreview("generate", pid, null, replace);
+}
+
+async function loadTaskAiPreview(): Promise<AiContextPreview> {
+  const pending = pendingTaskAi.value;
+  if (!pending) throw new Error("没有待预览的任务规划操作");
+  return previewTaskAi(
+    pending.operation,
+    pending.projectId,
+    pending.nodeId
+  );
+}
+
+async function confirmTaskAi(payload: { inputHash: string }) {
+  const pending = pendingTaskAi.value;
+  if (!pending) return;
   try {
-    await tree.generate(pid, replace);
-    tree.selectedId = null;
-    await fitAll();
-    ElMessage.success(`任务树已生成（${tree.nodes.length} 个节点）`);
-  } catch (e) {
-    ElMessage.error(String(e));
+    if (pending.operation === "generate") {
+      const execution = await tree.generate(
+        pending.projectId,
+        pending.replace,
+        payload.inputHash
+      );
+      tree.selectedId = null;
+      await fitAll();
+      ElMessage.success(
+        `任务树已生成（${tree.nodes.length} 个节点，审计运行 #${execution.analysis_run_id}）`
+      );
+    } else if (pending.operation === "expand" && pending.nodeId !== null) {
+      const execution = await tree.expand(pending.nodeId, payload.inputHash);
+      await fitAll();
+      ElMessage.success(
+        `已展开 ${execution.affected_nodes} 个子任务（审计运行 #${execution.analysis_run_id}）`
+      );
+    } else if (
+      pending.operation === "alternative" &&
+      pending.nodeId !== null
+    ) {
+      const execution = await tree.alternative(
+        pending.nodeId,
+        payload.inputHash
+      );
+      ElMessage.success(
+        `已换一种思路（审计运行 #${execution.analysis_run_id}，节点已重置为「待做」）`
+      );
+    }
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    pendingTaskAi.value = null;
   }
 }
 
@@ -205,23 +276,16 @@ async function onNext() {
   }
 }
 
-async function onExpand(id: number) {
-  try {
-    await tree.expand(id);
-    await fitAll();
-    ElMessage.success("已展开子任务");
-  } catch (e) {
-    ElMessage.error(String(e));
-  }
+function onExpand(id: number) {
+  const pid = projectId.value;
+  if (pid === null) return;
+  openTaskAiPreview("expand", pid, id);
 }
 
-async function onAlternative(id: number) {
-  try {
-    await tree.alternative(id);
-    ElMessage.success("已换一种思路（该节点已重置为「待做」）");
-  } catch (e) {
-    ElMessage.error(String(e));
-  }
+function onAlternative(id: number) {
+  const pid = projectId.value;
+  if (pid === null) return;
+  openTaskAiPreview("alternative", pid, id);
 }
 
 async function onSetStatus(id: number, status: string) {
@@ -428,18 +492,9 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
             class="empty-on-canvas"
             title="还没有任务树"
             description="AI 会读取当前项目的流量侦察摘要，生成引导式任务树。每个节点说明做什么、为什么、怎么手动做、怎样算完成。"
-            action-label="AI 生成任务树"
-            @action="doGenerate(false)"
           >
             <template #icon><el-icon :size="20"><MagicStick /></el-icon></template>
             <template #action>
-              <el-button
-                type="primary"
-                :icon="MagicStick"
-                :loading="tree.aiBusy === 'generate'"
-                :disabled="aiDisabled"
-                @click="doGenerate(false)"
-              >AI 生成任务树</el-button>
               <p class="empty-tip">
                 需先在「流量」页抓取目标流量，并在「设置」页配置 API Key。
               </p>
@@ -488,6 +543,21 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
           <div v-if="tree.selected.verify_criteria" class="field">
             <div class="field-label">怎样算完成</div>
             <div class="md" v-html="md.render(tree.selected.verify_criteria)" />
+          </div>
+
+          <div v-if="tree.selected.standard_references.length" class="field">
+            <div class="field-label">标准引用</div>
+            <div class="reference-list">
+              <el-tag
+                v-for="reference in tree.selected.standard_references"
+                :key="`${reference.framework}@${reference.version}/${reference.id}`"
+                size="small"
+                effect="plain"
+              >
+                {{ formatStandardReference(reference) }}
+              </el-tag>
+            </div>
+            <KnowledgeCard :references="tree.selected.standard_references" />
           </div>
 
           <div v-if="tree.selected.finding_ids.length" class="field">
@@ -572,6 +642,15 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
         <el-button type="primary" @click="submitAdd">添加</el-button>
       </template>
     </el-dialog>
+
+    <AiContextPreviewDialog
+      v-model="aiPreviewVisible"
+      :load-preview="loadTaskAiPreview"
+      :allow-policy-editing="false"
+      confirm-text="确认并调用 AI"
+      description="任务规划只发送下方经过脱敏和长度限制的项目摘要；确认时后端会从数据库重新构建内容，并核对供应商、提示词和消息哈希。"
+      @confirm="confirmTaskAi"
+    />
   </div>
 </template>
 
@@ -807,6 +886,12 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   font-size: 13px;
   line-height: 1.7;
   white-space: pre-wrap;
+}
+.reference-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: var(--rf-space-2);
 }
 .finding-item {
   display: flex;

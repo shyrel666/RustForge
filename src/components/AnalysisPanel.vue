@@ -3,11 +3,16 @@ import { onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import MarkdownIt from "markdown-it";
 import {
+  type AiDataPolicy,
+  type AnalysisRun,
   AnalysisResult,
   analyzeTraffic,
+  formatStandardReference,
   getAnalysis,
+  getAnalysisRun,
 } from "../api/tauri";
 import { useSettingsStore } from "../stores/settings";
+import AiContextPreviewDialog from "./AiContextPreviewDialog.vue";
 
 const props = defineProps<{ trafficId: number }>();
 const settings = useSettingsStore();
@@ -16,6 +21,8 @@ const md = new MarkdownIt({ breaks: true, linkify: true });
 const result = ref<AnalysisResult | null>(null);
 const analyzing = ref(false);
 const loadingCache = ref(false);
+const previewVisible = ref(false);
+const runInfo = ref<AnalysisRun | null>(null);
 
 onMounted(loadCache);
 watch(() => props.trafficId, loadCache);
@@ -23,18 +30,29 @@ watch(() => props.trafficId, loadCache);
 /** 先读缓存，避免重复调用烧 token */
 async function loadCache() {
   result.value = null;
+  runInfo.value = null;
   loadingCache.value = true;
   try {
     result.value = await getAnalysis(props.trafficId);
+    if (result.value?.analysis_run_id) {
+      runInfo.value = await getAnalysisRun(result.value.analysis_run_id);
+    }
   } finally {
     loadingCache.value = false;
   }
 }
 
-async function run() {
+async function run(payload: { policy: AiDataPolicy; inputHash: string }) {
   analyzing.value = true;
   try {
-    result.value = await analyzeTraffic(props.trafficId);
+    result.value = await analyzeTraffic(
+      props.trafficId,
+      payload.policy,
+      payload.inputHash
+    );
+    runInfo.value = result.value.analysis_run_id
+      ? await getAnalysisRun(result.value.analysis_run_id)
+      : null;
     ElMessage.success(
       `分析完成，生成 ${result.value.hypotheses.length} 条待验证假设（见"发现"页）`
     );
@@ -70,7 +88,7 @@ function confidenceType(c: number): string {
         type="primary"
         :loading="analyzing"
         :disabled="!settings.ai_enabled"
-        @click="run"
+        @click="previewVisible = true"
       >
         {{ result ? "重新分析" : "开始 AI 分析" }}
       </el-button>
@@ -89,6 +107,21 @@ function confidenceType(c: number): string {
       <el-alert type="info" :closable="false" class="disclaimer">
         AI 结论仅供学习参考，<b>每一条都需要你按验证步骤人工复核</b>；确认/误报请在"发现"页标记。
       </el-alert>
+
+      <div v-if="runInfo" class="run-meta">
+        <el-tag size="small" effect="plain">Run #{{ runInfo.id }}</el-tag>
+        <el-tooltip
+          :content="`${runInfo.provider_base_url}/chat/completions`"
+          placement="top"
+        >
+          <el-tag size="small" effect="plain">{{ runInfo.provider_id }} / {{ runInfo.model }}</el-tag>
+        </el-tooltip>
+        <el-tag size="small" effect="plain">Prompt v{{ runInfo.prompt_version }}</el-tag>
+        <el-tag size="small" :type="runInfo.schema_applied ? 'success' : 'info'" effect="plain">
+          {{ runInfo.schema_applied ? "Provider JSON Schema" : "后端统一校验" }}
+        </el-tag>
+        <span class="run-hash">输入 {{ runInfo.input_hash.slice(0, 12) }}…</span>
+      </div>
 
       <el-descriptions :column="1" border size="small" class="block">
         <el-descriptions-item label="接口用途">{{ result.purpose }}</el-descriptions-item>
@@ -116,9 +149,19 @@ function confidenceType(c: number): string {
         <div class="hypo-head">
           <span class="hypo-title">#{{ i + 1 }} {{ h.vuln_type }}</span>
           <el-tag size="small" :type="severityTag(h.severity)" effect="dark">{{ h.severity }}</el-tag>
-          <el-tag size="small" type="info" effect="plain">{{ h.owasp }}</el-tag>
-          <el-tag size="small" type="info" effect="plain">{{ h.cwe }}</el-tag>
+          <el-tag
+            v-for="reference in h.standard_references"
+            :key="`${reference.framework}@${reference.version}/${reference.id}`"
+            size="small"
+            type="info"
+            effect="plain"
+          >{{ formatStandardReference(reference) }}</el-tag>
           <el-tag v-if="h.param" size="small" type="warning" effect="plain">参数: {{ h.param }}</el-tag>
+          <el-tag
+            size="small"
+            :type="h.grounding_status === 'grounded' ? 'success' : 'warning'"
+            effect="plain"
+          >{{ h.grounding_status }}</el-tag>
         </div>
         <div class="hypo-conf">
           <span>置信度</span>
@@ -133,6 +176,16 @@ function confidenceType(c: number): string {
           <div class="block-label">🔍 推理过程</div>
           <div class="md" v-html="md.render(h.reasoning)" />
         </div>
+        <div class="evidence-refs">
+          证据引用：{{ h.evidence_refs.length ? h.evidence_refs.join("、") : "无" }}
+        </div>
+        <el-alert
+          v-if="h.validation_notes.length"
+          type="warning"
+          :closable="false"
+          :title="h.validation_notes.join('；')"
+          class="grounding-alert"
+        />
         <div class="hypo-block">
           <div class="block-label">🧪 手动验证步骤</div>
           <div class="md" v-html="md.render(h.verify_steps)" />
@@ -144,6 +197,12 @@ function confidenceType(c: number): string {
       v-else-if="!loadingCache"
       description="尚未分析。点击上方按钮，AI 将解释这个接口并给出漏洞假设。"
       :image-size="48"
+    />
+
+    <AiContextPreviewDialog
+      v-model="previewVisible"
+      :traffic-id="trafficId"
+      @confirm="run"
     />
   </div>
 </template>
@@ -168,6 +227,21 @@ function confidenceType(c: number): string {
 }
 .disclaimer {
   margin-bottom: 12px;
+}
+.run-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 12px;
+}
+.run-hash,
+.evidence-refs {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.grounding-alert {
+  margin-top: 8px;
 }
 .block {
   margin-bottom: 16px;

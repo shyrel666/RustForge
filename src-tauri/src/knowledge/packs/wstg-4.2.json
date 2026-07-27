@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "pack_id": "wstg-4.2",
+  "framework": "wstg",
+  "version": "4.2",
+  "title": "OWASP Web Security Testing Guide 4.2（核心测试知识卡）",
+  "source_url": "https://owasp.org/www-project-web-security-testing-guide/v42/",
+  "published_at": "2020-12-03",
+  "license": {
+    "name": "Creative Commons Attribution-ShareAlike 4.0",
+    "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+  },
+  "content_sha256": "af399f470ca371b4b4ba2e90e3a4cdcc546bb8262dea1b811f9b4c3603ec77f3",
+  "entries": [
+    {
+      "id": "WSTG-INFO-06",
+      "title": "识别应用入口点（Identify Application Entry Points）",
+      "principle": "先建立方法、路径、参数、头部、Cookie 与正文等输入面的完整清单。",
+      "impact": "遗漏入口会让后续测试产生系统性盲区。",
+      "cause": "只观察页面链接，忽略异步请求、替代方法、隐藏字段和不同内容类型。",
+      "remediation": "结合代理流量、客户端代码和文档建立去重端点清单，并记录角色、状态与输入位置。",
+      "related_references": []
+    },
+    {
+      "id": "WSTG-CONF-02",
+      "title": "测试应用平台配置（Test Application Platform Configuration）",
+      "principle": "验证生产平台没有保留默认、调试、样例或不必要功能。",
+      "impact": "错误配置可暴露内部信息、管理能力或已知攻击面。",
+      "cause": "环境漂移、默认安装、调试开关和缺少加固基线。",
+      "remediation": "对照可复现基线检查框架、服务器和中间件配置，并记录版本与偏差。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-1188" }
+      ]
+    },
+    {
+      "id": "WSTG-CONF-04",
+      "title": "检查旧备份和未引用文件中的敏感信息",
+      "principle": "验证公开目录中不存在应用无需暴露的备份、临时或遗留文件。",
+      "impact": "源码、配置、凭据或历史数据可能被直接下载。",
+      "cause": "部署复制多余文件、编辑器临时文件残留或 Web 根与内部存储混用。",
+      "remediation": "在授权范围内枚举典型后缀并人工确认响应；修复时从部署产物排除并限制目录访问。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-538" }
+      ]
+    },
+    {
+      "id": "WSTG-CONF-06",
+      "title": "测试 HTTP 方法（Test HTTP Methods）",
+      "principle": "不同 HTTP 方法和方法覆盖机制应受到一致的路由与授权控制。",
+      "impact": "未预期方法可能绕过访问控制、修改资源或暴露服务器功能。",
+      "cause": "网关与应用方法处理不一致，或只保护常用 GET/POST 路径。",
+      "remediation": "在明确授权下逐端点检查允许方法与覆盖头，比较状态和响应，并只启用业务需要的方法。",
+      "related_references": []
+    },
+    {
+      "id": "WSTG-CONF-07",
+      "title": "测试 HTTP 严格传输安全（HSTS）",
+      "principle": "浏览器应被明确要求在有效期限内只通过 HTTPS 访问受保护站点。",
+      "impact": "首次访问或降级路径可能暴露会话和敏感数据。",
+      "cause": "HSTS 缺失、有效期过短、作用域错误或 HTTPS 配置不完整。",
+      "remediation": "检查 HTTPS 响应的 HSTS 指令、有效期和子域策略，并确保启用前所有覆盖域均支持 TLS。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-319" }
+      ]
+    },
+    {
+      "id": "WSTG-IDNT-04",
+      "title": "测试账号枚举和可猜测账号",
+      "principle": "身份相关流程不应通过响应差异泄露账号是否存在。",
+      "impact": "已知账号列表会显著提升撞库、钓鱼和密码猜测效率。",
+      "cause": "登录、注册、重置或邀请流程返回不同状态、文本、时间或副作用。",
+      "remediation": "用成对样本比较所有身份流程，统一外部响应，并通过受控日志和告警保留运营可见性。",
+      "related_references": []
+    },
+    {
+      "id": "WSTG-ATHN-03",
+      "title": "测试弱账号锁定机制",
+      "principle": "认证流程应限制自动化猜测，同时避免让攻击者轻易锁死他人账号。",
+      "impact": "缺少控制会导致爆破，过度简单的锁定又可能形成拒绝服务。",
+      "cause": "只按账号或 IP 计数、阈值不可观测、解锁流程薄弱或替代渠道未覆盖。",
+      "remediation": "在测试账号上按授权预算验证频率、退避、告警和恢复，采用多信号风险控制。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" }
+      ]
+    },
+    {
+      "id": "WSTG-ATHN-04",
+      "title": "测试认证机制绕过",
+      "principle": "所有需要身份的路径、方法和协议都必须经过相同强度的认证。",
+      "impact": "替代入口或异常流程可能允许未认证访问。",
+      "cause": "中间件覆盖不全、直接对象访问、信任可控头部或错误失败开放。",
+      "remediation": "比较认证前后请求并检查替代路径、方法和参数；修复时采用默认保护与集中认证策略。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-306" }
+      ]
+    },
+    {
+      "id": "WSTG-ATHN-09",
+      "title": "测试弱密码修改与重置功能",
+      "principle": "恢复和改密必须可靠绑定目标账号、用户意图和一次性状态。",
+      "impact": "流程绕过可直接导致账号接管。",
+      "cause": "令牌可猜测或复用、账号绑定错误、敏感响应泄露或缺少会话失效。",
+      "remediation": "使用测试账号验证令牌熵、绑定、期限、单次使用和完成后的会话处理，并统一防枚举响应。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" }
+      ]
+    },
+    {
+      "id": "WSTG-ATHZ-01",
+      "title": "测试目录穿越与文件包含",
+      "principle": "文件路径输入必须被限制在业务允许的资源集合和根目录。",
+      "impact": "可能读取系统文件、包含服务端内容或覆盖应用数据。",
+      "cause": "路径拼接、编码规范化差异和扩展名或分隔符过滤不足。",
+      "remediation": "在授权范围内使用无害测试文件验证编码变体；修复时采用内部 ID、规范化边界校验和存储隔离。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-22" }
+      ]
+    },
+    {
+      "id": "WSTG-ATHZ-02",
+      "title": "测试授权机制绕过",
+      "principle": "对相同资源和功能，应比较不同角色、对象和请求变体的服务端授权结果。",
+      "impact": "可发现水平越权、垂直越权和规则覆盖不一致。",
+      "cause": "只校验登录状态、端点级授权遗漏或对象归属依赖客户端。",
+      "remediation": "使用隔离测试账号建立角色矩阵，逐项比较允许与拒绝结果，并避免访问非测试主体真实数据。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-639" }
+      ]
+    },
+    {
+      "id": "WSTG-SESS-02",
+      "title": "测试 Cookie 属性（Testing for Cookies Attributes）",
+      "principle": "Cookie 的 Secure、HttpOnly、SameSite、Path、Domain 和期限应与其敏感度匹配。",
+      "impact": "属性过宽会扩大窃取、跨站发送、覆盖和意外泄露风险。",
+      "cause": "框架默认值不安全、不同响应设置不一致或 Cookie 用途未分类。",
+      "remediation": "逐个 Set-Cookie 独立检查属性，不能把多个 Cookie 合并后作全局判断。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-614" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-1004" }
+      ]
+    },
+    {
+      "id": "WSTG-SESS-03",
+      "title": "测试会话固定（Testing for Session Fixation）",
+      "principle": "身份或权限提升后应轮换会话标识，使认证前标识不能继续代表认证后会话。",
+      "impact": "攻击者可能预先获知或植入会话标识并在受害者登录后接管会话。",
+      "cause": "登录后沿用旧会话、接受 URL 会话标识或会话轮换不完整。",
+      "remediation": "比较认证前后标识并验证旧值失效；在所有权限变化点原子轮换会话。",
+      "related_references": []
+    },
+    {
+      "id": "WSTG-SESS-05",
+      "title": "测试跨站请求伪造（Testing for CSRF）",
+      "principle": "状态变更请求应证明来自预期应用并体现当前用户意图。",
+      "impact": "恶意站点可借受害者浏览器凭据执行敏感操作。",
+      "cause": "Cookie 自动认证而缺少防伪令牌、来源约束或适当 SameSite。",
+      "remediation": "用无害状态变更验证防伪控制，修复时采用会话绑定令牌、SameSite 和高风险操作确认。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-352" }
+      ]
+    },
+    {
+      "id": "WSTG-INPV-01",
+      "title": "测试反射型跨站脚本",
+      "principle": "检查请求数据是否未经正确上下文编码就反射进可执行页面位置。",
+      "impact": "诱导链接可能在受害者浏览器执行攻击者控制的脚本。",
+      "cause": "输出编码缺失或与 HTML、属性、脚本、URL 等实际上下文不匹配。",
+      "remediation": "使用可辨识的无害标记定位反射上下文；修复时采用自动转义、上下文编码和 CSP。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-79" }
+      ]
+    },
+    {
+      "id": "WSTG-INPV-05",
+      "title": "测试 SQL 注入",
+      "principle": "通过受控输入与响应差异判断数据库查询是否保持数据和语法分离。",
+      "impact": "确认的注入可能导致数据泄露、篡改或认证绕过。",
+      "cause": "动态拼接查询、错误 ORM 用法或数据库错误直接返回。",
+      "remediation": "先使用低影响差异测试并保留证据；修复时全面参数化并最小化数据库权限。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-89" }
+      ]
+    },
+    {
+      "id": "WSTG-INPV-12",
+      "title": "测试命令注入",
+      "principle": "判断用户输入是否影响服务端系统命令的结构或参数边界。",
+      "impact": "确认后通常意味着应用主机上的代码执行风险。",
+      "cause": "通过 shell 拼接命令、黑名单不足或把文件名等输入直接当作参数。",
+      "remediation": "仅在明确授权和低影响方式下测试；修复时移除 shell、使用参数化进程 API 与严格白名单。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-78" }
+      ]
+    },
+    {
+      "id": "WSTG-INPV-19",
+      "title": "测试服务端请求伪造",
+      "principle": "识别服务端可控请求点，并验证目标限制是否覆盖解析、重定向和不同地址表示。",
+      "impact": "可能访问内网、元数据和本机服务。",
+      "cause": "只检查原始 URL 字符串，或出站组件权限和网络范围过宽。",
+      "remediation": "优先使用自有测试服务观察回连；修复时实施逐跳 Scope、解析后 IP 校验和出站隔离。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "WSTG-ERRH-02",
+      "title": "测试堆栈跟踪泄露",
+      "principle": "异常响应不应向调用方暴露调用栈、路径、组件或内部状态。",
+      "impact": "详细实现信息可帮助攻击者选择后续路径或定位敏感文件。",
+      "cause": "生产调试模式、未捕获异常或代理直接转发下游错误。",
+      "remediation": "用无害异常输入检查响应差异；修复时统一外部错误并把脱敏详情留在受控日志。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-209" }
+      ]
+    },
+    {
+      "id": "WSTG-CRYP-01",
+      "title": "测试弱传输层安全",
+      "principle": "验证协议版本、密码套件、证书和所有访问路径共同提供预期传输保护。",
+      "impact": "弱 TLS 或验证错误可导致窃听、中间人攻击和身份冒用。",
+      "cause": "旧协议保留、证书链错误、主机名验证缺失或替代端口配置漂移。",
+      "remediation": "在授权范围内枚举 TLS 配置和证书属性，禁用旧协议与弱算法并持续监控到期和漂移。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-319" }
+      ]
+    }
+  ]
+}

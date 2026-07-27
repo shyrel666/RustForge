@@ -42,36 +42,43 @@ export const useTreeStore = defineStore("tree", {
       }
     },
 
-    async generate(projectId: number, replace: boolean) {
+    async generate(projectId: number, replace: boolean, expectedInputHash: string) {
       this.aiBusy = "generate";
       try {
-        await generateTaskTree(projectId, replace);
+        const execution = await generateTaskTree(
+          projectId,
+          replace,
+          expectedInputHash
+        );
         await this.refresh(projectId);
+        return execution;
       } finally {
         this.aiBusy = "";
       }
     },
 
-    async expand(nodeId: number) {
+    async expand(nodeId: number, expectedInputHash: string) {
       this.aiBusy = "expand";
       try {
-        await expandTaskNode(nodeId);
+        const execution = await expandTaskNode(nodeId, expectedInputHash);
         const node = this.nodes.find((n) => n.id === nodeId);
         if (node) await this.refresh(node.project_id);
         // 展开后自动打开折叠
         this.collapsed.delete(nodeId);
         this.collapsed = new Set(this.collapsed);
+        return execution;
       } finally {
         this.aiBusy = "";
       }
     },
 
-    async alternative(nodeId: number) {
+    async alternative(nodeId: number, expectedInputHash: string) {
       this.aiBusy = "alternative";
       try {
-        await alternativeTaskNode(nodeId);
+        const execution = await alternativeTaskNode(nodeId, expectedInputHash);
         const node = this.nodes.find((n) => n.id === nodeId);
         if (node) await this.refresh(node.project_id);
+        return execution;
       } finally {
         this.aiBusy = "";
       }

@@ -3,12 +3,13 @@
 //!   Proxy::builder().with_listener(..).with_ca(..).with_rustls_connector(..)
 //!     .with_http_handler(..).with_graceful_shutdown(oneshot).build() → proxy.start().await
 
+pub mod body_capture;
 pub mod ca;
 pub mod interceptor;
 
 use crate::storage::db::Pool;
-use hudsucker::Proxy;
 use hudsucker::rustls::crypto::aws_lc_rs;
+use hudsucker::Proxy;
 use interceptor::{TauriSink, TrafficHandler};
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -37,7 +38,10 @@ pub struct ProxyManager {
 impl Default for ProxyManager {
     fn default() -> Self {
         Self {
-            inner: Mutex::new(ProxyInner { shutdown: None, port: 0 }),
+            inner: Mutex::new(ProxyInner {
+                shutdown: None,
+                port: 0,
+            }),
         }
     }
 }
@@ -45,8 +49,14 @@ impl Default for ProxyManager {
 impl ProxyManager {
     pub fn status(&self) -> ProxyStatus {
         match self.inner.lock() {
-            Ok(i) => ProxyStatus { running: i.shutdown.is_some(), port: i.port },
-            Err(_) => ProxyStatus { running: false, port: 0 },
+            Ok(i) => ProxyStatus {
+                running: i.shutdown.is_some(),
+                port: i.port,
+            },
+            Err(_) => ProxyStatus {
+                running: false,
+                port: 0,
+            },
         }
     }
 
@@ -107,7 +117,10 @@ impl ProxyManager {
                     }
                     state.proxy.status()
                 }
-                None => ProxyStatus { running: false, port: 0 },
+                None => ProxyStatus {
+                    running: false,
+                    port: 0,
+                },
             };
             let _ = app2.emit("proxy:status", status);
             if let Err(e) = result {

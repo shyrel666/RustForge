@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "pack_id": "asvs-5.0.0",
+  "framework": "asvs",
+  "version": "5.0.0",
+  "title": "OWASP Application Security Verification Standard 5.0.0（核心控制知识卡）",
+  "source_url": "https://github.com/OWASP/ASVS/tree/v5.0.0_release/5.0",
+  "published_at": "2025-05-30",
+  "license": {
+    "name": "Creative Commons Attribution-ShareAlike 4.0",
+    "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+  },
+  "content_sha256": "19ab780cf7bccbe4d891e2aa7e208373f71de64f3589b9ab08064b568ffb04d5",
+  "entries": [
+    {
+      "id": "1.2.1",
+      "title": "按输出上下文编码 HTTP、HTML 与 XML 内容",
+      "principle": "进入文档或消息结构的数据必须按最终解释上下文编码，不能让数据改变结构。",
+      "impact": "编码错误可能形成 XSS、响应拆分或其他内容注入。",
+      "cause": "复用通用转义、过早编码或忽略属性、注释、CSS 与响应头等不同上下文。",
+      "remediation": "在最终输出点使用框架提供的上下文编码器，并以危险字符和组合上下文测试。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-79" }
+      ]
+    },
+    {
+      "id": "1.2.4",
+      "title": "数据库查询防注入",
+      "principle": "数据选择和数据库查询应保持参数与查询结构分离。",
+      "impact": "数据库注入可造成读写越权、认证绕过和数据破坏。",
+      "cause": "拼接 SQL、HQL、NoSQL 或存储过程文本，或误用 ORM 原生查询。",
+      "remediation": "使用参数化查询、正确使用 ORM，并对白名单化的动态标识符单独映射。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-89" }
+      ]
+    },
+    {
+      "id": "1.2.5",
+      "title": "操作系统调用防命令注入",
+      "principle": "系统调用应通过参数化接口传递数据，避免不可信值进入命令语法。",
+      "impact": "命令注入通常可获得应用进程级代码执行能力。",
+      "cause": "拼接 shell 命令或依赖不完整的字符过滤。",
+      "remediation": "避免 shell，使用参数数组 API，并对可选命令和参数做严格业务白名单。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-78" }
+      ]
+    },
+    {
+      "id": "1.3.6",
+      "title": "服务端请求伪造防护",
+      "principle": "由应用发起的请求必须把协议、域名、路径与端口限制在明确允许范围。",
+      "impact": "SSRF 可把应用变成访问内网、元数据或本机服务的跳板。",
+      "cause": "目标由用户控制，或验证没有覆盖 DNS 解析与重定向后的真实连接地址。",
+      "remediation": "对目标各组成部分和每次重定向做允许列表校验，并隔离出站网络与凭据。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "1.5.2",
+      "title": "安全处理不可信数据反序列化",
+      "principle": "不可信数据不应选择任意对象类型或触发隐式行为。",
+      "impact": "危险反序列化可能导致代码执行、权限提升或拒绝服务。",
+      "cause": "使用原生对象序列化、开放类型元数据或缺少大小和深度限制。",
+      "remediation": "优先使用显式 DTO；必要时限制类型、资源和行为，并拒绝已知不安全机制。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-502" }
+      ]
+    },
+    {
+      "id": "3.3.1",
+      "title": "Cookie Secure 与安全名称前缀",
+      "principle": "敏感 Cookie 只能通过受保护信道发送，并应利用浏览器前缀约束其设置方式。",
+      "impact": "错误属性可能使会话在降级请求中泄露或被不安全来源覆盖。",
+      "cause": "缺少 Secure，或 Cookie 名称和作用域未使用适当安全约束。",
+      "remediation": "设置 Secure，并按适用场景采用 __Host- 或 __Secure- 前缀，同时强制 HTTPS。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-614" }
+      ]
+    },
+    {
+      "id": "3.3.2",
+      "title": "按 Cookie 用途配置 SameSite",
+      "principle": "Cookie 的跨站发送范围应与其业务用途和浏览器请求伪造风险一致。",
+      "impact": "过宽策略会增加 CSRF 和界面诱导攻击面。",
+      "cause": "统一使用宽松 SameSite，或没有分析第三方跳转和嵌入场景。",
+      "remediation": "逐 Cookie 选择 Strict、Lax 或必要的 None，并配合防伪令牌与来源校验。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-352" }
+      ]
+    },
+    {
+      "id": "3.5.1",
+      "title": "敏感浏览器请求的来源与防伪校验",
+      "principle": "不能由 CORS 预检充分保护的敏感请求，需要额外证明来自预期应用。",
+      "impact": "攻击者网站可能诱导已登录浏览器执行状态变更。",
+      "cause": "只依赖 Cookie、误解 CORS 或缺少防伪令牌和非简单请求约束。",
+      "remediation": "验证防伪令牌或受控自定义头，并结合 SameSite 与来源信息实施纵深防御。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-352" }
+      ]
+    },
+    {
+      "id": "5.2.1",
+      "title": "限制可处理的上传文件大小",
+      "principle": "应用只应接受能够在既定资源预算内安全处理的文件。",
+      "impact": "超大或高压缩比文件可耗尽内存、CPU、磁盘或下游服务。",
+      "cause": "只依赖客户端声明，或限制发生在完整缓冲和解压之后。",
+      "remediation": "在入口流式计数并尽早拒绝，同时限制解压后大小、并发和处理时间。",
+      "related_references": []
+    },
+    {
+      "id": "5.3.2",
+      "title": "安全构造文件路径",
+      "principle": "文件操作应使用内部生成的路径，必须使用外部名称时需严格校验和净化。",
+      "impact": "路径穿越、文件包含或某些服务端请求路径可能越过预期目录。",
+      "cause": "直接拼接文件名、只过滤 ../ 或忽略平台规范化差异。",
+      "remediation": "生成内部文件标识，规范化后验证根目录边界，并隔离文件处理权限。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-22" }
+      ]
+    },
+    {
+      "id": "6.2.1",
+      "title": "用户口令最低长度",
+      "principle": "口令长度下限应抵抗常见猜测，同时允许用户采用更长的口令短语。",
+      "impact": "过短口令更容易被在线或离线猜测。",
+      "cause": "沿用低长度限制，或以复杂度规则替代足够的长度和泄露口令检测。",
+      "remediation": "至少接受标准要求的长度，优先鼓励更长口令，并结合防自动化、多因素和泄露口令检查。",
+      "related_references": []
+    },
+    {
+      "id": "7.4.1",
+      "title": "会话终止后禁止继续使用",
+      "principle": "退出、过期或管理员撤销后，原会话必须失去访问能力。",
+      "impact": "被窃取或已终止的令牌可能继续访问受保护资源。",
+      "cause": "只清理客户端状态，或自包含令牌没有撤销与短生命周期策略。",
+      "remediation": "后端使有状态会话失效；自包含令牌采用短期、轮换和可审计的撤销机制。",
+      "related_references": []
+    },
+    {
+      "id": "8.2.1",
+      "title": "显式限制功能级访问",
+      "principle": "每项功能只能由被明确授予相应权限的主体调用。",
+      "impact": "普通用户可能执行管理或高风险业务操作。",
+      "cause": "依赖页面隐藏、路径约定或默认允许。",
+      "remediation": "集中定义能力与角色映射，在服务端逐功能执行默认拒绝授权并测试负面路径。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-306" }
+      ]
+    },
+    {
+      "id": "8.3.1",
+      "title": "在可信服务层实施授权",
+      "principle": "授权决策必须发生在调用方无法篡改的服务端边界。",
+      "impact": "依赖客户端控制会导致功能或对象访问绕过。",
+      "cause": "把 JavaScript、隐藏字段或客户端角色声明当作最终授权依据。",
+      "remediation": "服务端根据可信身份和资源状态重新计算权限，客户端判断仅用于界面体验。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-639" }
+      ]
+    },
+    {
+      "id": "11.1.1",
+      "title": "密码密钥管理策略与生命周期",
+      "principle": "密钥从生成到销毁都应遵循明确、可审计且避免过度共享的策略。",
+      "impact": "密钥泄露或长期不轮换会使大范围数据和身份保证同时失效。",
+      "cause": "密钥散落、多人共享、缺少轮换撤销或环境复用。",
+      "remediation": "使用密钥管理系统，定义生成、分发、使用、轮换、备份、撤销和销毁责任。",
+      "related_references": []
+    },
+    {
+      "id": "12.2.1",
+      "title": "外部 HTTP 服务全面使用 TLS",
+      "principle": "客户端与外部 HTTP 服务之间的连接不得回退到明文通信。",
+      "impact": "凭据和业务数据可能在网络路径上被观察或篡改。",
+      "cause": "混合内容、重定向到 HTTP、替代端口或错误失败回退。",
+      "remediation": "只允许 HTTPS，验证证书和主机名，拒绝不安全重定向与回退。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-319" }
+      ]
+    },
+    {
+      "id": "13.1.1",
+      "title": "记录应用通信需求与外部目标",
+      "principle": "所有对外通信及用户可影响的外部目标都应有清晰、可审查的资产记录。",
+      "impact": "未知出站路径会扩大供应链、数据泄露和 SSRF 风险。",
+      "cause": "服务依赖、Webhook、回调与用户提供 URL 未纳入架构和威胁模型。",
+      "remediation": "维护通信清单，记录数据、身份、目标和所有者，并将其转化为最小化网络策略。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "14.2.1",
+      "title": "敏感数据不得进入 URL 查询字符串",
+      "principle": "URL 会被多层记录和传播，不适合作为秘密载体。",
+      "impact": "API Key、会话令牌和个人数据可能进入历史、日志、代理和 Referer。",
+      "cause": "把认证或敏感业务数据设计为查询参数。",
+      "remediation": "将敏感数据放入受保护的请求体或头部，并清理日志、追踪和缓存中的现有值。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-598" }
+      ]
+    },
+    {
+      "id": "16.2.1",
+      "title": "日志包含可重建事件的必要元数据",
+      "principle": "安全日志应能回答何时、何地、何人执行了何事。",
+      "impact": "缺少上下文会阻碍事件关联、影响判断和责任追踪。",
+      "cause": "日志格式不统一、主体或对象标识缺失，或时间来源不可靠。",
+      "remediation": "定义统一事件 schema，记录可信时间、主体、动作、对象和结果，同时避免写入秘密。",
+      "related_references": []
+    },
+    {
+      "id": "16.3.1",
+      "title": "记录全部认证操作",
+      "principle": "成功与失败的认证尝试都应形成可关联的安全事件。",
+      "impact": "撞库、爆破、异常因素切换和账号接管可能无法被及时发现。",
+      "cause": "只记录成功登录、不同认证渠道日志不一致或缺少因素和结果元数据。",
+      "remediation": "集中记录所有认证结果及必要上下文，建立异常检测和告警，并保护日志完整性。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" }
+      ]
+    }
+  ]
+}

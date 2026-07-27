@@ -19,8 +19,11 @@
 - 人在回路的「验证」工具：由用户**主动触发**、可自由改 method/url/header/body 后重发
 - pentest 工具惯例：`danger_accept_invalid_certs`（忽略证书错误）、`redirect=none`（不自动跟随重定向，
   便于观察 3xx/鉴权跳转）、30s 超时；`content-length`/`host` 交给底层按实际计算避免冲突
+- 必须携带当前项目 ID；后端与代理共用 `ScopePolicy`，在创建 HTTP 客户端和 socket 前拒绝
+  无项目、空 Scope、越界目标、userinfo、非法 URL 和非 HTTP(S) scheme
 - 返回结构化响应：状态码 + 原因短语、响应头、响应体（UTF-8 文本或 base64）、耗时、大小
-- **红线**：不做自动扫描/爆破，只是「一次一发」的手动验证；UI 醒目提示「会真实发包，请确保目标已授权」
+- **红线**：不做自动扫描/爆破，只是「一次一发」的手动验证；UI 使用后端无网络预检禁用越界发送，
+  真正发包时后端再次校验
 
 ### 三、学习报告（src-tauri/src/report.rs）
 
@@ -36,7 +39,7 @@
 
 ### 前端
 
-- `src/api/tauri.ts` — 新增 `getKnowledgeCards / replayRequest / buildReport / exportReport` 绑定与类型
+- `src/api/tauri.ts` — 提供 `authorizeReplayTarget / replayRequest` 等绑定与 Scope 判定类型
 - `src/components/KnowledgeCard.vue` — 按 finding 的 owasp/cwe 拉卡片，渲染四段（修复段绿色高亮）
 - `src/views/FindingsView.vue` — 展开行新增「📚 知识卡片」；工具栏新增「📄 生成报告」→
   Markdown 预览弹框（markdown-it 渲染）+「导出 .md 到下载目录」

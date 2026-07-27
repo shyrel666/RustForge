@@ -6,34 +6,20 @@
 //! 每个请求都会 clone 一次 handler，同一请求的 handle_request/handle_response
 //! 作用于同一个 clone，因此可以用 self.pending 暂存请求侧数据。
 
+use crate::authorization::{load_current_project_policy, AuthorizationError};
+use crate::knowledge;
+use crate::proxy::body_capture::{
+    tee_body, tee_body_with_callback, BodyMetadata, CaptureHandle, CapturedBody,
+};
 use crate::rules::engine::{self, Severity, TrafficView};
+use crate::secrets::redact_sensitive;
 use crate::storage::db::Pool;
 use crate::storage::models::{Finding, TrafficSummary};
-use hudsucker::hyper::body::Bytes;
 use hudsucker::hyper::{Request, Response};
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
-use http_body_util::BodyExt;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
-
-/// 单个方向 body 的最大存储字节数，超出截断（防止大文件下载撑爆数据库）
-const MAX_STORED_BODY: usize = 1024 * 1024;
-
-/// 单方向 body 声明大小（Content-Length）超过此值时，只记录元数据、原始流直接透传，
-/// 不缓冲进内存也不入库——防止大文件传输撑爆内存。未声明长度（分块）的仍按常规缓冲。
-const MAX_CAPTURE_BODY: usize = 16 * 1024 * 1024;
-
-/// 解析 Content-Length 头为字节数（缺失或非法时 None）
-fn declared_len(headers: &hudsucker::hyper::HeaderMap) -> Option<usize> {
-    headers
-        .get("content-length")?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<usize>()
-        .ok()
-}
 
 /// 流量产出回调：Tauri 运行时推事件给前端，测试时收集断言。
 /// 抽这个 trait 是为了让拦截管线可以在无 GUI 环境下做端到端测试。
@@ -66,8 +52,8 @@ struct PendingReq {
     path: String,
     url: String,
     req_headers: String,
-    req_body: Vec<u8>,
-    req_size: usize,
+    req_body_metadata: BodyMetadata,
+    req_capture: CaptureHandle,
     start: Instant,
 }
 
@@ -80,39 +66,19 @@ pub struct TrafficHandler {
 
 impl TrafficHandler {
     pub fn new(db: Pool, sink: Arc<dyn FlowSink>) -> Self {
-        Self { db, sink, pending: None }
-    }
-
-    /// 当前项目 + Scope。没有打开的项目 = 没有授权目标 = 一律不拦截
-    fn current_project_scope(&self) -> Option<(i64, Vec<String>)> {
-        let db = self.db.get().ok()?;
-        let project_id: i64 = db
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'current_project_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()?
-            .parse()
-            .ok()?;
-        let scope_json: String = db
-            .query_row(
-                "SELECT scope FROM projects WHERE id = ?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .ok()?;
-        let scope: Vec<String> = serde_json::from_str(&scope_json).unwrap_or_default();
-        Some((project_id, scope))
-    }
-
-    fn in_scope(&self, host: &str) -> Option<i64> {
-        let (project_id, scope) = self.current_project_scope()?;
-        if host_matches_scope(&scope, host) {
-            Some(project_id)
-        } else {
-            None
+        Self {
+            db,
+            sink,
+            pending: None,
         }
+    }
+
+    /// 当前项目 + Scope。没有打开的项目、Scope 为空或配置损坏时严格失败关闭。
+    fn authorize_host(&self, host: &str) -> Result<i64, AuthorizationError> {
+        let db = self.db.get().map_err(AuthorizationError::storage)?;
+        let (project_id, policy) = load_current_project_policy(&db)?;
+        policy.authorize_host(host)?;
+        Ok(project_id)
     }
 
     /// 合成完整记录写库并推送事件；随后跑被动规则：打标 + 中危以上建 Finding
@@ -121,20 +87,15 @@ impl TrafficHandler {
         p: PendingReq,
         status: Option<u16>,
         resp_headers: Option<String>,
-        resp_body: Option<Vec<u8>>,
-        resp_size: usize,
+        content_type: Option<String>,
+        resp_body: Option<CapturedBody>,
     ) {
         let duration_ms = p.start.elapsed().as_millis() as i64;
-        let content_type = resp_headers
-            .as_deref()
-            .and_then(|h| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(h).ok())
-            .and_then(|m| {
-                m.get("content-type")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            });
-        let req_body_stored = truncate(p.req_body, MAX_STORED_BODY);
-        let resp_body_stored = resp_body.map(|b| truncate(b, MAX_STORED_BODY));
+        let req_capture = p.req_capture.finish(&p.req_body_metadata);
+        let response_received = resp_body.is_some();
+        let resp_capture = resp_body.unwrap_or_else(CapturedBody::not_received);
+        let req_body_stored = req_capture.bytes;
+        let resp_body_stored = response_received.then_some(resp_capture.bytes);
 
         let Ok(db) = self.db.get() else { return };
         // 流量 + 打标 + 建 Finding 放进一个事务，避免中途失败留下半截数据
@@ -145,31 +106,72 @@ impl TrafficHandler {
         let res = tx.execute(
             "INSERT INTO traffic(project_id, method, scheme, host, port, path, url,
                                  req_headers, req_body, status, resp_headers, resp_body,
-                                 content_type, req_size, resp_size, duration_ms)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                                 content_type, req_wire_size, resp_wire_size,
+                                 req_captured_size, resp_captured_size,
+                                 req_truncated, resp_truncated,
+                                 req_decode_status, resp_decode_status, duration_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
+                    ?17,?18,?19,?20,?21,?22)",
             rusqlite::params![
-                p.project_id, p.method, p.scheme, p.host, p.port, p.path, p.url,
-                p.req_headers, req_body_stored, status, resp_headers, resp_body_stored,
-                content_type, p.req_size as i64, resp_size as i64, duration_ms,
+                p.project_id,
+                p.method,
+                p.scheme,
+                p.host,
+                p.port,
+                p.path,
+                p.url,
+                p.req_headers,
+                req_body_stored,
+                status,
+                resp_headers,
+                resp_body_stored,
+                content_type,
+                req_capture.wire_size,
+                resp_capture.wire_size,
+                req_capture.captured_size,
+                resp_capture.captured_size,
+                req_capture.truncated,
+                resp_capture.truncated,
+                req_capture.decode_status.as_str(),
+                resp_capture.decode_status.as_str(),
+                duration_ms,
             ],
         );
         let id = match res {
             Ok(_) => tx.last_insert_rowid(),
             Err(e) => {
-                eprintln!("[proxy] 流量写库失败: {e}");
+                eprintln!(
+                    "[proxy] 流量写库失败: {}",
+                    redact_sensitive(&e.to_string(), &[])
+                );
                 return;
             }
         };
 
         // ---- 被动规则：AI 分析前的本地初筛 ----
         let view = TrafficView {
+            method: &p.method,
             url: &p.url,
             req_headers: &p.req_headers,
             resp_headers: resp_headers.as_deref(),
             req_body: &req_body_stored,
             resp_body: resp_body_stored.as_deref(),
+            status,
+            content_type: content_type.as_deref(),
+            req_truncated: req_capture.truncated,
+            resp_truncated: resp_capture.truncated,
+            req_decode_status: req_capture.decode_status.as_str(),
+            resp_decode_status: resp_capture.decode_status.as_str(),
         };
-        let hits = engine::evaluate(&view);
+        let evaluation = engine::evaluate(&view);
+        for diagnostic in &evaluation.diagnostics {
+            eprintln!(
+                "[rules] {}: {}",
+                diagnostic.code,
+                redact_sensitive(&diagnostic.message, &[])
+            );
+        }
+        let hits = evaluation.hits;
         let rule_tags: Vec<String> = hits.iter().map(|h| h.rule.tag.to_string()).collect();
         if !rule_tags.is_empty() {
             let _ = tx.execute(
@@ -185,37 +187,72 @@ impl TrafficHandler {
             if rule.severity < Severity::Medium {
                 continue;
             }
-            let reasoning = format!("{}（命中位置：{}）", rule.description, hit.location);
+            let completeness = if hit.incomplete_evidence {
+                "；捕获正文已截断，仅能作为不完整证据"
+            } else {
+                ""
+            };
+            let reasoning = format!(
+                "{}（规则：{}@{}；命中位置：{}；脱敏证据：{}；指纹：{}{completeness}）",
+                rule.description,
+                rule.rule_id,
+                rule.version,
+                hit.field_path,
+                hit.evidence,
+                hit.fingerprint
+            );
+            let standard_references = match knowledge::validate_references(&rule.references) {
+                Ok(references) => references,
+                Err(error) => {
+                    eprintln!(
+                        "[proxy] 内置规则 `{}` 的标准引用无效，已跳过 Finding: {}",
+                        rule.rule_id,
+                        redact_sensitive(&error, &[])
+                    );
+                    continue;
+                }
+            };
+            let standard_references_json =
+                serde_json::to_string(&standard_references).unwrap_or_else(|_| "[]".to_string());
             let exec = tx.execute(
                 "INSERT INTO findings(project_id, traffic_id, source, title, vuln_type,
-                                      owasp, cwe, severity, confidence, reasoning, verify_steps)
-                 VALUES(?1,?2,'rule',?3,?4,?5,?6,?7,?8,?9,?10)",
+                                      standard_references, severity, confidence, reasoning, verify_steps)
+                 VALUES(?1,?2,'rule',?3,?4,?5,?6,?7,?8,?9)",
                 rusqlite::params![
-                    p.project_id, id, rule.name, rule.vuln_type, rule.owasp, rule.cwe,
-                    rule.severity.as_str(), rule.confidence as i64, reasoning, rule.verify_hint,
+                    p.project_id,
+                    id,
+                    &rule.name,
+                    &rule.vuln_type,
+                    standard_references_json,
+                    rule.severity.as_str(),
+                    hit.confidence as i64,
+                    &reasoning,
+                    &rule.verify_hint,
                 ],
             );
-            if let Ok(_) = exec {
+            if exec.is_ok() {
                 new_findings.push(Finding {
                     id: tx.last_insert_rowid(),
                     project_id: p.project_id,
                     traffic_id: Some(id),
                     source: "rule".into(),
-                    title: rule.name.into(),
-                    vuln_type: rule.vuln_type.into(),
-                    owasp: rule.owasp.into(),
-                    cwe: rule.cwe.into(),
+                    title: rule.name.clone(),
+                    vuln_type: rule.vuln_type.clone(),
+                    standard_references,
                     severity: rule.severity.as_str().into(),
-                    confidence: rule.confidence as i64,
+                    confidence: hit.confidence as i64,
                     reasoning,
-                    verify_steps: rule.verify_hint.into(),
+                    verify_steps: rule.verify_hint.clone(),
                     status: "pending".into(),
                     created_at: created_at.clone(),
                 });
             }
         }
         if let Err(e) = tx.commit() {
-            eprintln!("[proxy] 事务提交失败: {e}");
+            eprintln!(
+                "[proxy] 事务提交失败: {}",
+                redact_sensitive(&e.to_string(), &[])
+            );
             return;
         }
         drop(db);
@@ -231,8 +268,14 @@ impl TrafficHandler {
             url: p.url,
             status,
             content_type,
-            req_size: p.req_size as i64,
-            resp_size: resp_size as i64,
+            req_wire_size: req_capture.wire_size,
+            resp_wire_size: resp_capture.wire_size,
+            req_captured_size: req_capture.captured_size,
+            resp_captured_size: resp_capture.captured_size,
+            req_truncated: req_capture.truncated,
+            resp_truncated: resp_capture.truncated,
+            req_decode_status: req_capture.decode_status.to_string(),
+            resp_decode_status: resp_capture.decode_status.to_string(),
             duration_ms,
             rule_tags,
             created_at,
@@ -261,7 +304,7 @@ impl HttpHandler for TrafficHandler {
             .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
         // Scope 外：静默转发，不记录也不缓冲 body（原始流直接透传，白名单红线）
-        let Some(project_id) = self.in_scope(&host) else {
+        let Ok(project_id) = self.authorize_host(&host) else {
             return Request::from_parts(parts, body).into();
         };
 
@@ -273,34 +316,8 @@ impl HttpHandler for TrafficHandler {
         let url = uri.to_string();
         let method = parts.method.to_string();
         let req_headers = headers_to_json(&parts.headers);
-
-        // 大请求体（按 Content-Length 判断）：只记录元数据，原始流透传不缓冲，
-        // 避免大文件上传把整包读进内存
-        if let Some(declared) = declared_len(&parts.headers).filter(|n| *n > MAX_CAPTURE_BODY) {
-            self.pending = Some(PendingReq {
-                project_id,
-                method,
-                scheme,
-                host,
-                port,
-                path,
-                url,
-                req_headers,
-                req_size: declared,
-                req_body: Vec::new(),
-                start: Instant::now(),
-            });
-            return Request::from_parts(parts, body).into();
-        }
-
-        // 常规：收全 body 才能既记录又原样转发
-        let body_bytes = match body.collect().await {
-            Ok(c) => c.to_bytes(),
-            Err(e) => {
-                eprintln!("[proxy] 请求体读取失败: {e}");
-                Bytes::new()
-            }
-        };
+        let req_body_metadata = BodyMetadata::from_headers(&parts.headers);
+        let (body, req_capture) = tee_body(body);
         self.pending = Some(PendingReq {
             project_id,
             method,
@@ -310,64 +327,38 @@ impl HttpHandler for TrafficHandler {
             path,
             url,
             req_headers,
-            req_size: body_bytes.len(),
-            req_body: body_bytes.to_vec(),
+            req_body_metadata,
+            req_capture,
             start: Instant::now(),
         });
 
-        Request::from_parts(parts, Body::from(body_bytes)).into()
+        Request::from_parts(parts, body).into()
     }
 
-    async fn handle_response(
-        &mut self,
-        _ctx: &HttpContext,
-        res: Response<Body>,
-    ) -> Response<Body> {
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         // 没有暂存 = Scope 外的流量，直接透传
         let Some(p) = self.pending.take() else {
             return res;
         };
 
         let status = res.status().as_u16();
-
-        // 大响应（按 Content-Length 判断）：只记录元数据（含响应头），body 原始流透传，
-        // 不缓冲/不解压/不入库，避免大文件下载把整包读进内存
-        if let Some(declared) = declared_len(res.headers()).filter(|n| *n > MAX_CAPTURE_BODY) {
-            let resp_headers = headers_to_json(res.headers());
-            self.store_and_emit(p, Some(status), Some(resp_headers), None, declared);
-            return res;
-        }
-
-        // 记录 Content-Encoding：入库/规则/AI/展示用解压后的副本，转发给浏览器的仍是原始字节
-        let encoding = res
-            .headers()
-            .get("content-encoding")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_ascii_lowercase());
+        let resp_headers = headers_to_json(res.headers());
+        let resp_body_metadata = BodyMetadata::from_headers(res.headers());
+        let content_type = resp_body_metadata.content_type().map(str::to_owned);
         let (parts, body) = res.into_parts();
-        let body_bytes = match body.collect().await {
-            Ok(c) => c.to_bytes(),
-            Err(e) => {
-                eprintln!("[proxy] 响应体读取失败: {e}");
-                Bytes::new()
-            }
-        };
-        // resp_size 记录线上（压缩后）字节数；stored_body 为解压后的内容
-        let wire_size = body_bytes.len();
-        let stored_body = decode_body(&body_bytes, encoding.as_deref());
-        // 是否确实发生了解压（识别到的编码且长度变化）——据此校正入库头
-        let decoded = encoding.is_some() && stored_body.len() != body_bytes.len();
-        let resp_headers = headers_to_json_for_storage(&parts.headers, decoded, stored_body.len());
+        let handler = self.clone();
+        let (body, _capture) = tee_body_with_callback(body, move |capture| {
+            let captured = capture.finish(&resp_body_metadata);
+            handler.store_and_emit(
+                p,
+                Some(status),
+                Some(resp_headers),
+                content_type,
+                Some(captured),
+            );
+        });
 
-        self.store_and_emit(
-            p,
-            Some(status),
-            Some(resp_headers),
-            Some(stored_body),
-            wire_size,
-        );
-
-        Response::from_parts(parts, Body::from(body_bytes))
+        Response::from_parts(parts, body)
     }
 
     async fn handle_error(
@@ -377,8 +368,11 @@ impl HttpHandler for TrafficHandler {
     ) -> Response<Body> {
         // 上游连接/请求失败：请求已发出但没拿到响应，仍然落库（status 为空）
         if let Some(p) = self.pending.take() {
-            eprintln!("[proxy] 上游请求失败: {err}");
-            self.store_and_emit(p, None, None, None, 0);
+            eprintln!(
+                "[proxy] 上游请求失败: {}",
+                redact_sensitive(&err.to_string(), &[])
+            );
+            self.store_and_emit(p, None, None, None, None);
         }
         Response::builder()
             .status(hudsucker::hyper::StatusCode::BAD_GATEWAY)
@@ -386,66 +380,32 @@ impl HttpHandler for TrafficHandler {
             .expect("build 502 response")
     }
 
-    async fn should_intercept_connect(
-        &mut self,
-        _ctx: &HttpContext,
-        req: &Request<Body>,
-    ) -> bool {
+    async fn should_intercept_connect(&mut self, _ctx: &HttpContext, req: &Request<Body>) -> bool {
         // CONNECT 的 URI 是 authority 形式（host:port）
         let host = req.uri().host().unwrap_or_default();
-        self.in_scope(host).is_some()
+        self.authorize_host(host).is_ok()
     }
 }
 
-/// host 是否命中 Scope。规则：精确匹配，或 `*.example.com` 通配（同时覆盖 apex）。
-/// 模式先归一化：允许用户粘贴完整 URL（`https://a.b/path`）、带端口、大小写混杂。
-pub fn host_matches_scope(scope: &[String], host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_lowercase();
-    scope.iter().any(|raw| {
-        let pat = normalize_scope_pattern(raw);
-        if pat.is_empty() {
-            return false;
-        }
-        if let Some(suffix) = pat.strip_prefix("*.") {
-            host == suffix || host.ends_with(&format!(".{suffix}"))
-        } else {
-            host == pat
-        }
-    })
-}
-
-/// 把用户输入归一化成纯 host 模式：
-/// 去空白/大小写 → 去 scheme（`://` 前缀）→ 去路径 → 去端口 → 去结尾点号
-fn normalize_scope_pattern(raw: &str) -> String {
-    let mut s = raw.trim().to_lowercase();
-    if let Some(idx) = s.find("://") {
-        s = s[idx + 3..].to_string();
-    }
-    if let Some(idx) = s.find('/') {
-        s.truncate(idx);
-    }
-    // 通配前缀后再谈端口：*.example.com 无冒号，example.com:8443 去掉 :8443
-    if let Some(idx) = s.rfind(':') {
-        // IPv6 不支持（方括号形式 [::1]），原样保留
-        if !s.contains(']') {
-            s.truncate(idx);
-        }
-    }
-    s.trim_end_matches('.').to_string()
-}
-
-/// HeaderMap → JSON 对象（同名头合并）。除 Set-Cookie 外按 HTTP 惯例逗号合并；
-/// Set-Cookie 的值可能自带逗号（如 Expires），逗号合并会破坏其边界，故用换行分隔。
-fn headers_to_map(headers: &hudsucker::hyper::HeaderMap) -> serde_json::Map<String, serde_json::Value> {
+/// HeaderMap → JSON object. A repeated name becomes an array whose item order
+/// matches HeaderMap iteration, so Set-Cookie boundaries are never collapsed.
+fn headers_to_map(
+    headers: &hudsucker::hyper::HeaderMap,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     for (name, value) in headers.iter() {
         let key = name.as_str().to_string();
         let val = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        let sep = if key.eq_ignore_ascii_case("set-cookie") { "\n" } else { ", " };
         map.entry(key)
             .and_modify(|e: &mut serde_json::Value| {
-                if let Some(s) = e.as_str() {
-                    *e = serde_json::Value::String(format!("{s}{sep}{val}"));
+                if let serde_json::Value::Array(values) = e {
+                    values.push(serde_json::Value::String(val.clone()));
+                } else {
+                    let first = std::mem::take(e);
+                    *e = serde_json::Value::Array(vec![
+                        first,
+                        serde_json::Value::String(val.clone()),
+                    ]);
                 }
             })
             .or_insert(serde_json::Value::String(val));
@@ -457,147 +417,25 @@ fn headers_to_json(headers: &hudsucker::hyper::HeaderMap) -> String {
     serde_json::Value::Object(headers_to_map(headers)).to_string()
 }
 
-/// 入库副本专用：当响应体已被解压时，剥掉 content-encoding 并把 content-length
-/// 改写为解压后长度，避免"头声明 gzip、体是明文、长度对不上"的展示错乱。
-/// （转发给浏览器的响应仍用原始头与原始压缩字节，不受影响。）
-fn headers_to_json_for_storage(
-    headers: &hudsucker::hyper::HeaderMap,
-    decoded: bool,
-    decoded_len: usize,
-) -> String {
-    if !decoded {
-        return headers_to_json(headers);
-    }
-    let mut map = headers_to_map(headers);
-    map.remove("content-encoding");
-    map.insert(
-        "content-length".to_string(),
-        serde_json::Value::String(decoded_len.to_string()),
-    );
-    serde_json::Value::Object(map).to_string()
-}
-
-fn truncate(data: Vec<u8>, max: usize) -> Vec<u8> {
-    if data.len() > max {
-        data[..max].to_vec()
-    } else {
-        data
-    }
-}
-
-/// 解压上限：防 zip 炸弹撑爆内存（最终入库还会再截到 MAX_STORED_BODY）
-const MAX_DECOMPRESSED: u64 = 8 * 1024 * 1024;
-
-/// 按 Content-Encoding 解压响应体，供入库/规则/AI/展示使用；失败或未知编码时原样返回。
-/// 只处理最外层编码（覆盖 gzip / br / deflate 绝大多数真实场景）。
-fn decode_body(raw: &[u8], encoding: Option<&str>) -> Vec<u8> {
-    let Some(enc) = encoding else {
-        return raw.to_vec();
-    };
-    // Content-Encoding 可能是列表（如 "gzip, br"），取最外层（最后一个）
-    let enc = enc.split(',').map(|s| s.trim()).last().unwrap_or("");
-    let decoded = match enc {
-        "gzip" | "x-gzip" => gunzip(raw),
-        "br" => brotli_decode(raw),
-        "deflate" => inflate(raw),
-        _ => None, // identity / 未知 / 空 → 原样
-    };
-    decoded.unwrap_or_else(|| raw.to_vec())
-}
-
-fn gunzip(data: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut out = Vec::new();
-    flate2::read::GzDecoder::new(data)
-        .take(MAX_DECOMPRESSED)
-        .read_to_end(&mut out)
-        .ok()?;
-    (!out.is_empty()).then_some(out)
-}
-
-fn inflate(data: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Read;
-    // HTTP "deflate" 多为 zlib 包裹，少数是裸 deflate：先按 zlib，失败再按裸流
-    let mut out = Vec::new();
-    if flate2::read::ZlibDecoder::new(data)
-        .take(MAX_DECOMPRESSED)
-        .read_to_end(&mut out)
-        .is_ok()
-        && !out.is_empty()
-    {
-        return Some(out);
-    }
-    out.clear();
-    flate2::read::DeflateDecoder::new(data)
-        .take(MAX_DECOMPRESSED)
-        .read_to_end(&mut out)
-        .ok()?;
-    (!out.is_empty()).then_some(out)
-}
-
-fn brotli_decode(data: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut out = Vec::new();
-    brotli::Decompressor::new(data, 4096)
-        .take(MAX_DECOMPRESSED)
-        .read_to_end(&mut out)
-        .ok()?;
-    (!out.is_empty()).then_some(out)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::host_matches_scope;
+    use super::headers_to_json;
+    use hudsucker::hyper::header::{HeaderValue, SET_COOKIE};
+    use hudsucker::hyper::HeaderMap;
 
     #[test]
-    fn scope_matching() {
-        let scope = vec![
-            "example.com".to_string(),
-            "*.test.cn".to_string(),
-            "192.168.1.1".to_string(),
-        ];
-        assert!(host_matches_scope(&scope, "example.com"));
-        assert!(!host_matches_scope(&scope, "www.example.com"));
-        assert!(host_matches_scope(&scope, "api.test.cn"));
-        assert!(host_matches_scope(&scope, "test.cn"));
-        assert!(host_matches_scope(&scope, "192.168.1.1"));
-        assert!(!host_matches_scope(&scope, "evil.com"));
-        assert!(!host_matches_scope(&[], "example.com"));
-    }
+    fn repeated_set_cookie_values_remain_distinct() {
+        let mut headers = HeaderMap::new();
+        headers.append(SET_COOKIE, HeaderValue::from_static("a=1; Path=/"));
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("b=2; Expires=Wed, 21 Oct 2030 07:28:00 GMT"),
+        );
 
-    #[test]
-    fn scope_matching_tolerates_user_input() {
-        // 用户粘贴 URL / 带端口 / 大小写混杂都应命中
-        let scope = vec![
-            "https://opencode.ai".to_string(),
-            "http://Sub.Example.com:8443/login".to_string(),
-            "*.foo.bar/".to_string(),
-            " HTTPS://a.b/c ".to_string(),
-        ];
-        assert!(host_matches_scope(&scope, "opencode.ai"));
-        assert!(host_matches_scope(&scope, "sub.example.com"));
-        assert!(host_matches_scope(&scope, "x.foo.bar"));
-        assert!(host_matches_scope(&scope, "foo.bar"));
-        assert!(host_matches_scope(&scope, "a.b"));
-    }
-
-    #[test]
-    fn decodes_gzip_and_passthrough() {
-        use super::decode_body;
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let plain = b"<html>You have an error in your SQL syntax near 'x'</html>";
-        let mut e = GzEncoder::new(Vec::new(), Compression::default());
-        e.write_all(plain).unwrap();
-        let gz = e.finish().unwrap();
-
-        assert_eq!(decode_body(&gz, Some("gzip")), plain.to_vec(), "gzip 应被解开成原文");
-        // 未知 / 无编码：原样返回
-        assert_eq!(decode_body(plain, Some("identity")), plain.to_vec());
-        assert_eq!(decode_body(plain, None), plain.to_vec());
-        // 声明 gzip 但内容并非 gzip：降级为原始字节，绝不 panic
-        assert_eq!(decode_body(b"not gzip at all", Some("gzip")), b"not gzip at all".to_vec());
+        let json: serde_json::Value = serde_json::from_str(&headers_to_json(&headers)).unwrap();
+        assert_eq!(
+            json["set-cookie"],
+            serde_json::json!(["a=1; Path=/", "b=2; Expires=Wed, 21 Oct 2030 07:28:00 GMT"])
+        );
     }
 }

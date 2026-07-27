@@ -2,6 +2,16 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { getVersion } from "@tauri-apps/api/app";
+import VChart from "vue-echarts";
+import { use } from "echarts/core";
+import { CanvasRenderer } from "echarts/renderers";
+import { LineChart } from "echarts/charts";
+import {
+  TitleComponent,
+  TooltipComponent,
+  LegendComponent,
+  GridComponent,
+} from "echarts/components";
 import {
   Link,
   Document,
@@ -19,20 +29,40 @@ import PageHeader from "../components/shell/PageHeader.vue";
 import BrandMark from "../components/brand/BrandMark.vue";
 import {
   getPromptTemplate,
+  listPromptVersions,
   setPromptTemplate,
+  copyPromptTemplate,
+  rollbackPromptTemplate,
   resetPromptTemplate,
+  getAiDataPolicy,
+  setAiDataPolicy,
   getTokenUsage,
   resetTokenUsage,
   fetchModels,
+  setProviderApiKey,
+  deleteProviderApiKey,
   openUrl,
   proxyStatus,
   getCaInfo,
   getRuntimeInfo,
   revealAppDataDir,
+  getUsageTrend,
   type TokenUsage,
+  type UsageTrendPoint,
   type RuntimeInfo,
+  type AiDataPolicy,
+  type PromptTemplateVersion,
 } from "../api/tauri";
 import type { ThemeMode } from "../utils/theme";
+
+use([
+  CanvasRenderer,
+  LineChart,
+  TitleComponent,
+  TooltipComponent,
+  LegendComponent,
+  GridComponent,
+]);
 
 const settings = useSettingsStore();
 const updater = useAppUpdater();
@@ -181,16 +211,23 @@ async function recheckUpdate() {
 }
 
 // 常用供应商预设：选择后自动填充名称/端点/默认模型，只需再填 API Key
-const PRESETS: { label: string; name: string; base_url: string; model: string }[] = [
-  { label: "DeepSeek", name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
-  { label: "Kimi (Moonshot)", name: "Kimi", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
-  { label: "通义千问（百炼）", name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
-  { label: "智谱 GLM", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
-  { label: "OpenAI", name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { label: "OpenRouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
-  { label: "硅基流动 SiliconFlow", name: "SiliconFlow", base_url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V3" },
-  { label: "MiniMax", name: "MiniMax", base_url: "https://api.minimax.io/v1", model: "MiniMax-M3" },
-  { label: "自定义", name: "", base_url: "", model: "" },
+const PRESETS: {
+  label: string;
+  name: string;
+  base_url: string;
+  model: string;
+  supports_json_schema: boolean;
+}[] = [
+  { label: "深度求索 DeepSeek", name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash", supports_json_schema: false },
+  { label: "月之暗面 Kimi", name: "Kimi", base_url: "https://api.moonshot.cn/v1", model: "kimi-k3", supports_json_schema: false },
+  { label: "通义千问 Qwen", name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-max", supports_json_schema: false },
+  { label: "智谱 GLM", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-5.2", supports_json_schema: false },
+  { label: "MiniMax", name: "MiniMax", base_url: "https://api.minimax.io/v1", model: "MiniMax-M3", supports_json_schema: false },
+  { label: "Xiaomi MiMo", name: "Xiaomi MiMo", base_url: "https://api.xiaomimimo.com/v1", model: "mimo-v2.5-pro", supports_json_schema: false },
+  { label: "OpenAI", name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-5.6", supports_json_schema: true },
+  { label: "OpenRouter", name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-5.6", supports_json_schema: false },
+  { label: "硅基流动 SiliconFlow", name: "SiliconFlow", base_url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V4-Pro", supports_json_schema: false },
+  { label: "自定义", name: "", base_url: "", model: "", supports_json_schema: false },
 ];
 
 // ---------- 供应商增改对话框 ----------
@@ -200,15 +237,33 @@ const presetKey = ref("");
 const modelOptions = ref<string[]>([]);
 const fetchingModels = ref(false);
 const testing = ref(false);
-const form = reactive<Omit<AiProvider, "id">>({
+interface ProviderForm {
+  name: string;
+  base_url: string;
+  api_key: string;
+  model: string;
+  note: string;
+  supports_json_schema: boolean;
+}
+
+const form = reactive<ProviderForm>({
   name: "",
   base_url: "",
   api_key: "",
   model: "",
   note: "",
+  supports_json_schema: false,
 });
 
 const dialogTitle = computed(() => (editingId.value ? "编辑供应商" : "添加供应商"));
+const editingProvider = computed(() =>
+  editingId.value
+    ? settings.providers.find((provider) => provider.id === editingId.value) ?? null
+    : null
+);
+const providerHasStoredKey = computed(
+  () => editingProvider.value?.has_api_key === true
+);
 
 // 模型下拉候选：已获取模型 ∪ 当前已填模型（避免自定义值被下拉覆盖）
 const modelSelectOptions = computed(() => {
@@ -223,6 +278,7 @@ function resetForm() {
   form.api_key = "";
   form.model = "";
   form.note = "";
+  form.supports_json_schema = false;
   presetKey.value = "";
   modelOptions.value = [];
 }
@@ -237,9 +293,11 @@ function openEdit(p: AiProvider) {
   editingId.value = p.id;
   form.name = p.name;
   form.base_url = p.base_url;
-  form.api_key = p.api_key;
+  // 系统凭据库里的 Key 永不回填到前端。
+  form.api_key = "";
   form.model = p.model;
   form.note = p.note;
+  form.supports_json_schema = p.supports_json_schema;
   presetKey.value = "";
   modelOptions.value = p.model ? [p.model] : [];
   dialogVisible.value = true;
@@ -251,17 +309,29 @@ function applyPreset(label: string) {
   if (preset.name) form.name = preset.name;
   form.base_url = preset.base_url;
   form.model = preset.model;
+  form.supports_json_schema = preset.supports_json_schema;
   modelOptions.value = preset.model ? [preset.model] : [];
 }
 
 async function doFetchModels() {
-  if (!form.base_url.trim() || !form.api_key.trim()) {
-    ElMessage.warning("请先填写 Base URL 和 API Key");
+  if (!form.base_url.trim()) {
+    ElMessage.warning("请先填写 Base URL");
+    return;
+  }
+  const providerId = editingId.value;
+  if (!providerId) {
+    ElMessage.warning("新增供应商请先保存，再编辑并获取模型");
+    return;
+  }
+  const stored = settings.providers.find((provider) => provider.id === providerId);
+  if (!stored || stored.base_url.replace(/\/+$/, "") !== form.base_url.trim().replace(/\/+$/, "")) {
+    ElMessage.warning("Base URL 已修改，请先保存供应商后再获取模型");
     return;
   }
   fetchingModels.value = true;
   try {
-    const list = await fetchModels(form.base_url.trim(), form.api_key.trim());
+    await persistDraftKey(providerId);
+    const list = await fetchModels(providerId);
     modelOptions.value = list;
     if (!form.model && list.length) form.model = list[0];
     ElMessage.success(`获取到 ${list.length} 个模型`);
@@ -274,13 +344,24 @@ async function doFetchModels() {
 
 // 复用 /models 端点校验 Base URL + API Key 是否可用（免费、不烧 token）
 async function testConnection() {
-  if (!form.base_url.trim() || !form.api_key.trim()) {
-    ElMessage.warning("请先填写 Base URL 和 API Key");
+  if (!form.base_url.trim()) {
+    ElMessage.warning("请先填写 Base URL");
+    return;
+  }
+  const providerId = editingId.value;
+  if (!providerId) {
+    ElMessage.warning("新增供应商请先保存，再编辑并测试连接");
+    return;
+  }
+  const stored = settings.providers.find((provider) => provider.id === providerId);
+  if (!stored || stored.base_url.replace(/\/+$/, "") !== form.base_url.trim().replace(/\/+$/, "")) {
+    ElMessage.warning("Base URL 已修改，请先保存供应商后再测试连接");
     return;
   }
   testing.value = true;
   try {
-    const list = await fetchModels(form.base_url.trim(), form.api_key.trim());
+    await persistDraftKey(providerId);
+    const list = await fetchModels(providerId);
     ElMessage.success(`连接成功：鉴权通过，可用模型 ${list.length} 个`);
   } catch (e) {
     ElMessage.error(`连接失败：${String(e)}`);
@@ -289,13 +370,57 @@ async function testConnection() {
   }
 }
 
+async function persistDraftKey(providerId: string) {
+  const draftKey = form.api_key.trim();
+  if (draftKey) {
+    // Key 只在这次专用 IPC 写入期间短暂存在，立即清空响应式表单。
+    form.api_key = "";
+    const status = await setProviderApiKey(providerId, draftKey);
+    settings.setProviderKeyStatus(providerId, status.has_api_key);
+    return;
+  }
+  if (!settings.providers.find((provider) => provider.id === providerId)?.has_api_key) {
+    throw new Error("当前供应商未配置 API Key");
+  }
+}
+
+async function clearCurrentApiKey() {
+  const providerId = editingId.value;
+  if (!providerId) return;
+  try {
+    await ElMessageBox.confirm(
+      "确定从系统凭据库删除这个供应商的 API Key？",
+      "删除 API Key",
+      { type: "warning" }
+    );
+  } catch {
+    return;
+  }
+  try {
+    const status = await deleteProviderApiKey(providerId);
+    settings.setProviderKeyStatus(providerId, status.has_api_key);
+    form.api_key = "";
+    ElMessage.success("API Key 已从系统凭据库删除");
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+}
+
 async function saveProvider() {
   if (!form.base_url.trim()) {
     ElMessage.warning("请填写 Base URL");
     return;
   }
-  if (!form.api_key.trim()) {
-    ElMessage.warning("请填写 API Key");
+  if (!editingId.value && !form.api_key.trim()) {
+    ElMessage.warning("新增供应商时请填写 API Key");
+    return;
+  }
+  if (
+    editingId.value &&
+    !providerHasStoredKey.value &&
+    !form.api_key.trim()
+  ) {
+    ElMessage.warning("当前供应商尚未配置 API Key");
     return;
   }
   // 名称留空时用端点主机名兜底
@@ -310,20 +435,37 @@ async function saveProvider() {
   const payload = {
     name,
     base_url: form.base_url.trim(),
-    api_key: form.api_key.trim(),
     model: form.model.trim(),
     note: form.note.trim(),
+    supports_json_schema: form.supports_json_schema,
   };
-  if (editingId.value) {
-    settings.updateProvider(editingId.value, payload);
+  const existingId = editingId.value;
+  let providerId: string;
+  if (existingId) {
+    settings.updateProvider(existingId, payload);
+    providerId = existingId;
   } else {
-    settings.addProvider(payload);
+    providerId = settings.addProvider(payload);
   }
   try {
     await settings.save();
+    if (!existingId) {
+      // 元数据已存在后立即切换为编辑态；即使凭据库写入失败，重试也不会重复新增。
+      editingId.value = providerId;
+    }
+    await persistDraftKey(providerId);
     ElMessage.success("供应商已保存");
     dialogVisible.value = false;
   } catch (e) {
+    // 重新读取后端真值：若仅 Key 写入失败，保留已落库的无 Key 供应商供重试；
+    // 若元数据写入失败，则恢复修改前状态。
+    await settings.load().catch(() => undefined);
+    if (
+      !existingId &&
+      settings.providers.some((provider) => provider.id === providerId)
+    ) {
+      editingId.value = providerId;
+    }
     ElMessage.error(String(e));
   }
 }
@@ -346,34 +488,63 @@ async function confirmDelete(p: AiProvider) {
   } catch {
     return; // 用户取消
   }
+  const previousProviders = [...settings.providers];
+  const previousCurrent = settings.current_provider_id;
   settings.removeProvider(p.id);
   try {
     await settings.save();
     ElMessage.success("已删除");
   } catch (e) {
+    settings.providers = previousProviders;
+    settings.current_provider_id = previousCurrent;
+    await settings.load().catch(() => undefined);
     ElMessage.error(String(e));
   }
-}
-
-/** 打码显示 Key，避免明文暴露在列表 */
-function maskKey(k: string): string {
-  if (!k) return "（未填）";
-  if (k.length <= 8) return "••••";
-  return `${k.slice(0, 4)}••••${k.slice(-4)}`;
 }
 
 // ---------- 提示词模板 ----------
 const template = ref("");
 const templateSaving = ref(false);
 const templateDirty = ref(false);
+const promptState = ref<PromptTemplateVersion | null>(null);
+const promptVersions = ref<PromptTemplateVersion[]>([]);
+
+const aiPolicy = reactive<AiDataPolicy>({
+  redact_query_values: true,
+  redact_sensitive_headers: true,
+  redact_body_secrets: true,
+  include_truncated_bodies: false,
+  include_binary_bodies: false,
+  include_decode_failed_bodies: false,
+  request_body_max_bytes: 8 * 1024,
+  response_body_max_bytes: 12 * 1024,
+  total_context_max_bytes: 32 * 1024,
+});
+const policyRelaxed = computed(
+  () =>
+    !aiPolicy.redact_query_values ||
+    !aiPolicy.redact_sensitive_headers ||
+    !aiPolicy.redact_body_secrets ||
+    aiPolicy.include_truncated_bodies ||
+    aiPolicy.include_binary_bodies ||
+    aiPolicy.include_decode_failed_bodies ||
+    aiPolicy.request_body_max_bytes > 8 * 1024 ||
+    aiPolicy.response_body_max_bytes > 12 * 1024 ||
+    aiPolicy.total_context_max_bytes > 32 * 1024
+);
+
+function applyPromptState(state: PromptTemplateVersion) {
+  promptState.value = state;
+  template.value = state.content;
+  templateDirty.value = false;
+}
+
+async function refreshPromptVersions() {
+  promptVersions.value = await listPromptVersions();
+}
 
 // ---------- 用量统计 ----------
 const usage = ref<TokenUsage>({ calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
-const estCost = computed(() =>
-  settings.price_per_mtok > 0
-    ? ((usage.value.total_tokens / 1_000_000) * settings.price_per_mtok).toFixed(4)
-    : ""
-);
 
 async function refreshUsage() {
   try {
@@ -382,6 +553,69 @@ async function refreshUsage() {
     ElMessage.error(String(e));
   }
 }
+
+// ---------- 使用趋势 ----------
+const trendGranularity = ref<'day' | 'month'>('day');
+const trendData = ref<UsageTrendPoint[]>([]);
+const trendLoading = ref(false);
+
+async function refreshTrend() {
+  trendLoading.value = true;
+  try {
+    trendData.value = await getUsageTrend(trendGranularity.value);
+  } catch (e) {
+    ElMessage.error(String(e));
+  } finally {
+    trendLoading.value = false;
+  }
+}
+
+watch(trendGranularity, refreshTrend);
+
+const chartOption = computed(() => ({
+  tooltip: { trigger: 'axis' as const },
+  legend: { data: ['总 Token', '输入 Token', '输出 Token'], bottom: 0 },
+  grid: { left: 60, right: 20, top: 20, bottom: 40 },
+  xAxis: {
+    type: 'category' as const,
+    data: trendData.value.map((d) => d.period),
+    axisLabel: { fontSize: 11 },
+  },
+  yAxis: {
+    type: 'value' as const,
+    name: 'Tokens',
+    axisLabel: {
+      formatter: (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)),
+    },
+  },
+  series: [
+    {
+      name: '总 Token',
+      type: 'line',
+      data: trendData.value.map((d) => d.total_tokens),
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { width: 2 },
+      areaStyle: { opacity: 0.08 },
+    },
+    {
+      name: '输入 Token',
+      type: 'line',
+      data: trendData.value.map((d) => d.prompt_tokens),
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { width: 1.5, type: 'dashed' as const },
+    },
+    {
+      name: '输出 Token',
+      type: 'line',
+      data: trendData.value.map((d) => d.completion_tokens),
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { width: 1.5, type: 'dotted' as const },
+    },
+  ],
+}));
 
 async function doResetUsage() {
   try {
@@ -394,8 +628,11 @@ async function doResetUsage() {
 }
 
 onMounted(async () => {
-  template.value = await getPromptTemplate();
+  applyPromptState(await getPromptTemplate());
+  await refreshPromptVersions();
+  Object.assign(aiPolicy, await getAiDataPolicy());
   await refreshUsage();
+  await refreshTrend();
   try {
     appVersion.value = await getVersion();
   } catch {
@@ -409,9 +646,9 @@ onMounted(async () => {
 async function saveTemplate() {
   templateSaving.value = true;
   try {
-    await setPromptTemplate(template.value);
-    templateDirty.value = false;
-    ElMessage.success("模板已保存，下次分析生效");
+    applyPromptState(await setPromptTemplate(template.value));
+    await refreshPromptVersions();
+    ElMessage.success("已保存为新的提示词版本，下次预览生效");
   } catch (e) {
     ElMessage.error(String(e));
   } finally {
@@ -421,10 +658,38 @@ async function saveTemplate() {
 
 async function resetTemplate() {
   try {
-    await resetPromptTemplate();
-    template.value = await getPromptTemplate();
-    templateDirty.value = false;
+    applyPromptState(await resetPromptTemplate());
+    await refreshPromptVersions();
     ElMessage.success("已恢复内置默认模板");
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+}
+
+async function copyTemplateVersion(source: PromptTemplateVersion) {
+  try {
+    applyPromptState(await copyPromptTemplate(source.id));
+    await refreshPromptVersions();
+    ElMessage.success("已复制为新的活动版本");
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+}
+
+async function rollbackTemplateVersion(source: PromptTemplateVersion) {
+  try {
+    await ElMessageBox.confirm(
+      `将 v${source.version} 的内容复制为一个新的活动版本？历史版本不会被覆盖。`,
+      "回滚提示词",
+      { type: "warning" }
+    );
+  } catch {
+    return;
+  }
+  try {
+    applyPromptState(await rollbackPromptTemplate(source.id));
+    await refreshPromptVersions();
+    ElMessage.success("回滚完成，已创建新的活动版本");
   } catch (e) {
     ElMessage.error(String(e));
   }
@@ -433,7 +698,7 @@ async function resetTemplate() {
 async function save() {
   saving.value = true;
   try {
-    await settings.save();
+    await Promise.all([settings.save(), setAiDataPolicy({ ...aiPolicy })]);
     ElMessage.success("设置已保存");
   } catch (e) {
     ElMessage.error(String(e));
@@ -490,7 +755,7 @@ async function save() {
         <div class="setting-head">
           <h2 class="rf-section-title">AI 供应商</h2>
           <p class="rf-section-desc">
-            OpenAI 兼容接口，用户自带 Key。可添加多个供应商并一键切换「当前」。
+            OpenAI 兼容接口，用户自带 Key。Key 只保存在系统凭据库，不写入本地数据库。
           </p>
         </div>
         <div class="rf-card control-card">
@@ -521,10 +786,21 @@ async function save() {
                     effect="dark"
                     type="success"
                   >当前</el-tag>
+                  <el-tag
+                    v-if="row.supports_json_schema"
+                    size="small"
+                    effect="plain"
+                    type="success"
+                  >JSON Schema</el-tag>
                 </div>
                 <div class="provider-meta mono">{{ row.model || "未指定模型" }}</div>
                 <div class="provider-url">{{ row.base_url }}</div>
-                <div class="provider-key mono">{{ maskKey(row.api_key) }}</div>
+                <div
+                  class="provider-key"
+                  :class="{ configured: row.has_api_key }"
+                >
+                  系统凭据库：{{ row.has_api_key ? "已配置" : "未配置" }}
+                </div>
               </div>
               <div class="provider-actions">
                 <el-button
@@ -561,38 +837,115 @@ async function save() {
       </section>
 
       <section class="setting-block">
-        <div class="setting-head with-action">
-          <div>
-            <h2 class="rf-section-title">AI 用量</h2>
-            <p class="rf-section-desc">本机累计的调用次数与 Token 统计，仅供参考。</p>
-          </div>
-          <el-button link type="primary" @click="refreshUsage">刷新</el-button>
+        <div class="setting-head">
+          <h2 class="rf-section-title">AI 默认数据策略</h2>
+          <p class="rf-section-desc">
+            每次分析仍会显示最终发送预览；这里控制预览初始值。正文和总上下文上限由后端强制校验。
+          </p>
         </div>
+        <el-alert
+          v-if="policyRelaxed"
+          type="warning"
+          :closable="false"
+          title="当前默认策略放宽了至少一项最小披露保护；每次发送仍需在预览页再次确认。"
+          class="policy-warning"
+        />
         <div class="rf-card control-card">
           <div class="row-item">
-            <div class="row-label"><div class="row-title">调用次数</div></div>
-            <div class="row-value">{{ usage.calls }}</div>
+            <div class="row-label">
+              <div class="row-title">遮盖 URL 查询值</div>
+              <div class="row-desc">保留 scheme、host、path 与参数名</div>
+            </div>
+            <el-switch v-model="aiPolicy.redact_query_values" />
           </div>
           <div class="row-item">
             <div class="row-label">
-              <div class="row-title">Token 用量</div>
-              <div class="row-desc">输入 {{ usage.prompt_tokens }} · 输出 {{ usage.completion_tokens }}</div>
+              <div class="row-title">遮盖敏感 Header</div>
+              <div class="row-desc">Authorization、Cookie、Set-Cookie 与常见 Token Header</div>
             </div>
-            <div class="row-value">{{ usage.total_tokens }}</div>
+            <el-switch v-model="aiPolicy.redact_sensitive_headers" />
           </div>
           <div class="row-item">
             <div class="row-label">
-              <div class="row-title">每百万单价</div>
-              <div class="row-desc">按所用模型价格填写，0 表示不估算</div>
+              <div class="row-title">结构化正文秘密脱敏</div>
+              <div class="row-desc">JSON、表单、multipart、秘密格式和高熵值</div>
             </div>
-            <el-input-number v-model="settings.price_per_mtok" :min="0" :precision="2" :step="0.5" />
+            <el-switch v-model="aiPolicy.redact_body_secrets" />
           </div>
-          <div v-if="estCost" class="row-item">
+          <div class="row-item">
             <div class="row-label">
-              <div class="row-title">预估成本</div>
-              <div class="row-desc">仅本地估算，以服务商账单为准</div>
+              <div class="row-title">异常正文显式放宽</div>
+              <div class="row-desc">默认不发送截断、二进制或解码/流异常正文</div>
             </div>
-            <div class="row-value">{{ estCost }}</div>
+            <div class="inline-switches">
+              <el-checkbox v-model="aiPolicy.include_truncated_bodies">截断</el-checkbox>
+              <el-checkbox v-model="aiPolicy.include_binary_bodies">二进制</el-checkbox>
+              <el-checkbox v-model="aiPolicy.include_decode_failed_bodies">解码异常</el-checkbox>
+            </div>
+          </div>
+          <div class="row-item">
+            <div class="row-label">
+              <div class="row-title">请求 / 响应正文上限</div>
+              <div class="row-desc">每方向最高 24 KiB</div>
+            </div>
+            <div class="inline-limits">
+              <el-input-number v-model="aiPolicy.request_body_max_bytes" :min="0" :max="24576" :step="1024" />
+              <span>/</span>
+              <el-input-number v-model="aiPolicy.response_body_max_bytes" :min="0" :max="24576" :step="1024" />
+            </div>
+          </div>
+          <div class="row-item">
+            <div class="row-label">
+              <div class="row-title">总上下文硬上限</div>
+              <div class="row-desc">包含 system 与 user 消息，范围 16–64 KiB</div>
+            </div>
+            <el-input-number v-model="aiPolicy.total_context_max_bytes" :min="16384" :max="65536" :step="1024" />
+          </div>
+        </div>
+      </section>
+
+      <section class="setting-block">
+        <div class="setting-head with-action">
+          <div>
+            <h2 class="rf-section-title">Token 统计</h2>
+            <p class="rf-section-desc">本机累计的 AI 调用次数与 Token 消耗统计。</p>
+          </div>
+          <el-button link type="primary" @click="refreshUsage(); refreshTrend()">刷新</el-button>
+        </div>
+
+        <!-- 统计卡片 -->
+        <div class="stats-cards">
+          <div class="stat-card">
+            <div class="stat-label">调用次数</div>
+            <div class="stat-value">{{ usage.calls }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">输入 Token</div>
+            <div class="stat-value">{{ usage.prompt_tokens.toLocaleString() }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">输出 Token</div>
+            <div class="stat-value">{{ usage.completion_tokens.toLocaleString() }}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">总 Token</div>
+            <div class="stat-value">{{ usage.total_tokens.toLocaleString() }}</div>
+          </div>
+        </div>
+
+        <!-- 使用趋势 -->
+        <div class="trend-section">
+          <div class="trend-head">
+            <h3 class="trend-title">使用趋势</h3>
+            <el-radio-group v-model="trendGranularity" size="small">
+              <el-radio-button label="day">日</el-radio-button>
+              <el-radio-button label="month">月</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div v-loading="trendLoading" class="trend-chart-wrapper">
+            <div v-if="trendLoading" class="trend-empty">加载中...</div>
+            <div v-else-if="trendData.length === 0" class="trend-empty">暂无使用数据</div>
+            <v-chart v-else :option="chartOption" autoresize style="height: 280px; width: 100%" />
           </div>
         </div>
       </section>
@@ -608,8 +961,14 @@ async function save() {
         <h2 class="rf-section-title">提示词模板</h2>
         <p class="rf-section-desc">
           可用占位符：{METHOD} {URL} {HOST} {STATUS} {REQUEST} {RESPONSE} {RULE_TAGS}。
-          REQUEST/RESPONSE 已自动脱敏并截断。
+          REQUEST/RESPONSE 的实际内容由每次预览的 policy 与 manifest 决定；两者必须且只能各出现一次。
         </p>
+      </div>
+      <div v-if="promptState" class="prompt-current">
+        <el-tag :type="promptState.source === 'builtin' ? 'info' : 'success'" effect="plain">
+          当前：{{ promptState.source }} · v{{ promptState.version }}
+        </el-tag>
+        <span>{{ promptState.prompt_id }}</span>
       </div>
       <div class="rf-card control-card tpl-card">
         <el-input
@@ -622,10 +981,38 @@ async function save() {
       </div>
       <div class="save-row">
         <el-button type="primary" :loading="templateSaving" :disabled="!templateDirty" @click="saveTemplate">
-          保存模板
+          保存为新版本
         </el-button>
+        <el-button v-if="promptState" @click="copyTemplateVersion(promptState)">复制当前版本</el-button>
         <el-button @click="resetTemplate">恢复默认</el-button>
       </div>
+
+      <div class="setting-head version-head">
+        <h3 class="rf-section-title">版本历史</h3>
+        <p class="rf-section-desc">版本不可覆盖；回滚会复制所选内容并生成新的活动版本。</p>
+      </div>
+      <el-table :data="promptVersions" size="small" border row-key="version">
+        <el-table-column label="版本" width="100">
+          <template #default="scope">v{{ scope.row.version }}</template>
+        </el-table-column>
+        <el-table-column prop="source" label="来源" width="100" />
+        <el-table-column prop="operation" label="操作" width="100" />
+        <el-table-column prop="created_at" label="创建时间" min-width="170">
+          <template #default="scope">{{ scope.row.created_at || "内置" }}</template>
+        </el-table-column>
+        <el-table-column label="状态 / 操作" min-width="230" align="right">
+          <template #default="scope">
+            <el-tag v-if="scope.row.active" type="success" size="small" effect="plain">活动</el-tag>
+            <el-button link type="primary" @click="copyTemplateVersion(scope.row)">复制</el-button>
+            <el-button
+              v-if="!scope.row.active"
+              link
+              type="warning"
+              @click="rollbackTemplateVersion(scope.row)"
+            >回滚</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
 
     <section v-show="activeTab === 'about'" class="block">
@@ -743,7 +1130,12 @@ async function save() {
       </p>
     </section>
 
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="520px">
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogTitle"
+      width="520px"
+      @closed="form.api_key = ''"
+    >
       <el-form label-width="90px">
         <el-form-item label="预设">
           <el-select v-model="presetKey" placeholder="选择预设自动填充（可选）" clearable style="width: 100%" @change="applyPreset">
@@ -757,22 +1149,67 @@ async function save() {
           <el-input v-model="form.base_url" placeholder="https://api.deepseek.com" />
         </el-form-item>
         <el-form-item label="API Key">
-          <el-input v-model="form.api_key" type="password" show-password placeholder="sk-..." />
+          <div class="key-field">
+            <div class="key-row">
+              <el-input
+                v-model="form.api_key"
+                type="password"
+                show-password
+                :placeholder="
+                  providerHasStoredKey
+                    ? '留空则保留系统凭据库中的现有 Key'
+                    : '输入后将写入系统凭据库'
+                "
+              />
+              <el-button
+                v-if="editingId && providerHasStoredKey"
+                type="danger"
+                plain
+                @click="clearCurrentApiKey"
+              >
+                清除
+              </el-button>
+            </div>
+            <div class="key-hint">
+              {{
+                providerHasStoredKey
+                  ? "已配置；完整 Key 不会回填到界面"
+                  : "尚未配置"
+              }}
+            </div>
+          </div>
         </el-form-item>
         <el-form-item label="模型">
           <div class="model-row">
             <el-select v-model="form.model" filterable allow-create default-first-option placeholder="deepseek-chat / gpt-4o-mini ..." style="flex: 1">
               <el-option v-for="m in modelSelectOptions" :key="m" :label="m" :value="m" />
             </el-select>
-            <el-button :loading="fetchingModels" @click="doFetchModels">获取模型</el-button>
+            <el-button
+              :loading="fetchingModels"
+              :disabled="!editingId"
+              @click="doFetchModels"
+            >
+              获取模型
+            </el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="结构化输出">
+          <div class="schema-option">
+            <el-switch v-model="form.supports_json_schema" />
+            <span>仅在供应商明确支持 OpenAI JSON Schema `response_format` 时开启</span>
           </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="form.note" placeholder="可选：用途 / 套餐 / 到期时间" />
         </el-form-item>
       </el-form>
+      <p v-if="!editingId" class="dialog-hint">
+        新增供应商先保存元数据和 Key；之后可重新编辑并获取模型或测试连接。
+      </p>
       <template #footer>
-        <el-button :loading="testing" @click="testConnection">测试连接</el-button>
+        <el-button :loading="testing" :disabled="!editingId" @click="testConnection">
+          测试连接
+        </el-button>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="saveProvider">保存</el-button>
       </template>
@@ -966,6 +1403,9 @@ async function save() {
   font-size: 12px;
   color: var(--rf-text-muted);
 }
+.provider-key.configured {
+  color: var(--rf-success);
+}
 .provider-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1017,6 +1457,57 @@ async function save() {
   display: flex;
   gap: 8px;
   width: 100%;
+}
+.schema-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.policy-warning {
+  margin-bottom: 10px;
+}
+.inline-switches,
+.inline-limits {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prompt-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.version-head {
+  margin-top: 28px;
+}
+.key-field {
+  width: 100%;
+}
+.key-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.key-row .el-input {
+  flex: 1;
+}
+.key-hint,
+.dialog-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--rf-text-muted);
+}
+.dialog-hint {
+  margin: 0 0 4px 90px;
 }
 .mono { font-family: var(--rf-font-mono); }
 .tpl-editor :deep(textarea) {
@@ -1157,5 +1648,67 @@ async function save() {
 }
 .env-val.warn {
   color: var(--rf-warning, #e6a23c);
+}
+
+.stats-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--rf-bg-panel);
+  border: 1px solid var(--rf-border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--rf-text-secondary);
+  margin-bottom: 8px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--rf-text);
+}
+
+.trend-section {
+  margin-top: 8px;
+}
+
+.trend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.trend-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--rf-text);
+}
+
+.trend-chart-wrapper {
+  background: var(--rf-bg-panel);
+  border: 1px solid var(--rf-border);
+  border-radius: 8px;
+  padding: 16px;
+  min-height: 320px;
+}
+
+.trend-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 280px;
+  color: var(--rf-text-secondary);
+  font-size: 14px;
 }
 </style>

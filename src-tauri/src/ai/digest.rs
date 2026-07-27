@@ -2,6 +2,7 @@
 //! 成本控制红线：只给聚合摘要，不给全量流量——端点 Top N、标签计数、
 //! Finding 摘要，总长控制在 ~2K token 内。
 
+use super::redaction::{redact_fallback_text, RedactionManifest};
 use rusqlite::Connection;
 
 /// 端点聚合行
@@ -16,8 +17,36 @@ struct EndpointRow {
 const MAX_ENDPOINTS: usize = 30;
 const MAX_PATH_LEN: usize = 60;
 
+fn redact_path_query(path: &str, location: &str, manifest: &mut RedactionManifest) -> String {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let mut redacted = route.to_string();
+    if !query.is_empty() {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (name, _) in url::form_urlencoded::parse(query.as_bytes()) {
+            serializer.append_pair(&name, "[REDACTED:query_value]");
+            manifest.record_redaction(&format!("{location}.query.{name}"), "query_value");
+        }
+        let query = serializer.finish();
+        if !query.is_empty() {
+            redacted.push('?');
+            redacted.push_str(&query);
+        }
+    }
+    redact_fallback_text(&redacted, location, true, manifest)
+}
+
 /// 构造项目流量摘要文本
 pub fn build_digest(conn: &Connection, project_id: i64) -> Result<String, String> {
+    build_redacted_digest(conn, project_id, &mut RedactionManifest::default())
+}
+
+/// 构造可发送给任务规划器的摘要。查询值和秘密格式在聚合前后均不会
+/// 原样进入 prompt，所有处理都会记录到与预览一同持久化的 manifest。
+pub fn build_redacted_digest(
+    conn: &Connection,
+    project_id: i64,
+    manifest: &mut RedactionManifest,
+) -> Result<String, String> {
     let total: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM traffic WHERE project_id = ?1",
@@ -110,19 +139,38 @@ pub fn build_digest(conn: &Connection, project_id: i64) -> Result<String, String
         }
     }
 
+    let target = redact_fallback_text(&target, "planner.target", true, manifest);
     let mut out = format!(
         "目标: {}\n已抓取流量: {} 条\n\n## 端点聚合（按频次）\n",
-        if target.is_empty() { "（未填写）" } else { &target },
+        if target.is_empty() {
+            "（未填写）"
+        } else {
+            &target
+        },
         total
     );
-    for e in &endpoints {
-        let path: String = e.path.chars().take(MAX_PATH_LEN).collect();
+    for (index, e) in endpoints.iter().enumerate() {
+        let location = format!("planner.endpoint[{index}].path");
+        let path = redact_path_query(&e.path, &location, manifest);
+        let path: String = path.chars().take(MAX_PATH_LEN).collect();
+        let host = redact_fallback_text(
+            &e.host,
+            &format!("planner.endpoint[{index}].host"),
+            true,
+            manifest,
+        );
         let tags = if e.tags.is_empty() || e.tags == "[]" {
             String::new()
         } else {
-            format!(" 标签: {}", e.tags.replace("[", "").replace("]", "").replace("\"", ""))
+            format!(
+                " 标签: {}",
+                e.tags.replace("[", "").replace("]", "").replace("\"", "")
+            )
         };
-        out.push_str(&format!("- {} {} {} ({}次){}\n", e.method, e.host, path, e.count, tags));
+        out.push_str(&format!(
+            "- {} {} {} ({}次){}\n",
+            e.method, host, path, e.count, tags
+        ));
     }
     if !tag_counts.is_empty() {
         out.push_str("\n## 被动规则命中分布\n");
@@ -132,7 +180,12 @@ pub fn build_digest(conn: &Connection, project_id: i64) -> Result<String, String
     }
     if !findings_text.is_empty() {
         out.push_str("\n## 已有发现（可在任务节点用 finding_ids 关联）\n");
-        out.push_str(&findings_text);
+        out.push_str(&redact_fallback_text(
+            &findings_text,
+            "planner.findings",
+            true,
+            manifest,
+        ));
     }
     Ok(out)
 }
@@ -159,7 +212,15 @@ mod tests {
                 .execute(
                     "INSERT INTO traffic(project_id, method, host, path, url, rule_tags)
                      VALUES(?1, 'GET', 't.cn', ?2, 'https://t.cn/x', ?3)",
-                    rusqlite::params![pid, format!("/a{i}"), if i == 0 { "[\"JWT\"]" } else { "[]" }],
+                    rusqlite::params![
+                        pid,
+                        if i == 0 {
+                            "/a0?token=secret&next=%2Fhome".to_string()
+                        } else {
+                            format!("/a{i}")
+                        },
+                        if i == 0 { "[\"JWT\"]" } else { "[]" }
+                    ],
                 )
                 .unwrap();
         }
@@ -167,11 +228,15 @@ mod tests {
         assert!(text.contains("已抓取流量: 3 条"));
         assert!(text.contains("GET t.cn /a0"));
         assert!(text.contains("JWT: 1 次"));
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("%2Fhome"));
+        assert!(text.contains("REDACTED"));
     }
 
     #[test]
     fn digest_empty_project_errors() {
-        let dir = std::env::temp_dir().join(format!("rustforge-digest-empty-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rustforge-digest-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("t.db")).unwrap();
         db.conn

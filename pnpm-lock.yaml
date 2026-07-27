@@ -20,6 +20,9 @@ importers:
       '@vue-flow/core':
         specifier: ^1.48.2
         version: 1.48.2(vue@3.5.40(typescript@5.7.3))
+      echarts:
+        specifier: ^5.6.0
+        version: 5.6.0
       element-plus:
         specifier: ^2.9.3
         version: 2.14.3(vue@3.5.40(typescript@5.7.3))
@@ -32,6 +35,9 @@ importers:
       vue:
         specifier: ^3.5.13
         version: 3.5.40(typescript@5.7.3)
+      vue-echarts:
+        specifier: ^7.0.0
+        version: 7.0.3(@vue/runtime-core@3.5.40)(echarts@5.6.0)(vue@3.5.40(typescript@5.7.3))
       vue-router:
         specifier: ^4.5.0
         version: 4.6.4(vue@3.5.40(typescript@5.7.3))
@@ -597,6 +603,9 @@ packages:
   dayjs@1.11.21:
     resolution: {integrity: sha512-98IT+HOahAisibz/yjKbzuOBwYcjJ7BCLPzARyHiyEBmRz4fatF+KPJszEHXsGYjUG234aH/cOjW1wwTbKUZlA==}
 
+  echarts@5.6.0:
+    resolution: {integrity: sha512-oTbVTsXfKuEhxftHqL5xprgLoc0k7uScAwtryCgWF6hPYFLRwOUHiFmHGCBKP5NPFNkDVopOieyUqYGH8Fa3kA==}
+
   element-plus@2.14.3:
     resolution: {integrity: sha512-pJcvxcpZjYruNzuJhAeVwnbYjfNgzBKnWHwSVEhwzM2/kcLI3brzmtIBxtPqd4hQWJfD1PRnjoc1WipLw2eBGg==}
     peerDependencies:
@@ -706,6 +715,9 @@ packages:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
+  tslib@2.3.0:
+    resolution: {integrity: sha512-N82ooyxVNm6h1riLCoyS9e3fuJ3AMG2zIZs2Gd1ATcSFjSA23Q0fzjjZeh0jbJvWVDZ0cJT8yaNNaaXHzueNjg==}
+
   typescript@5.7.3:
     resolution: {integrity: sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==}
     engines: {node: '>=14.17'}
@@ -757,6 +769,17 @@ packages:
   vue-component-type-helpers@3.3.7:
     resolution: {integrity: sha512-Skkhw9agYSgsWqv7bxSOGJZa9SaiJbZVGdXuFWnrzKaQYHnw9qbjD630rw6RyMqDbp54nfLCLw5SZA55if7JLg==}
 
+  vue-demi@0.13.11:
+    resolution: {integrity: sha512-IR8HoEEGM65YY3ZJYAjMlKygDQn25D5ajNFNoKh9RSDMQtlzCxtfQjdQgv9jjK+m3377SsJXY8ysq8kLCZL25A==}
+    engines: {node: '>=12'}
+    hasBin: true
+    peerDependencies:
+      '@vue/composition-api': ^1.0.0-rc.1
+      vue: ^3.0.0-0 || ^2.6.0
+    peerDependenciesMeta:
+      '@vue/composition-api':
+        optional: true
+
   vue-demi@0.14.10:
     resolution: {integrity: sha512-nMZBOwuzabUO0nLgIcc6rycZEebF6eeUfaiQx9+WSk8e29IbLvPU9feI6tqW4kTo3hvoYAJkMh8n8D0fuISphg==}
     engines: {node: '>=12'}
@@ -766,6 +789,16 @@ packages:
       vue: ^3.0.0-0 || ^2.6.0
     peerDependenciesMeta:
       '@vue/composition-api':
+        optional: true
+
+  vue-echarts@7.0.3:
+    resolution: {integrity: sha512-/jSxNwOsw5+dYAUcwSfkLwKPuzTQ0Cepz1LxCOpj2QcHrrmUa/Ql0eQqMmc1rTPQVrh2JQ29n2dhq75ZcHvRDw==}
+    peerDependencies:
+      '@vue/runtime-core': ^3.0.0
+      echarts: ^5.5.1
+      vue: ^2.7.0 || ^3.1.1
+    peerDependenciesMeta:
+      '@vue/runtime-core':
         optional: true
 
   vue-router@4.6.4:
@@ -780,6 +813,9 @@ packages:
     peerDependenciesMeta:
       typescript:
         optional: true
+
+  zrender@5.6.1:
+    resolution: {integrity: sha512-OFXkDJKcrlx5su2XbzJvj/34Q3m6PvyCZkVPHGYpcCJ52ek4U/ymZyfuV1nKE23AyBJ51E/6Yr0mhZ7xGTO4ag==}
 
 snapshots:
 
@@ -1183,6 +1219,11 @@ snapshots:
 
   dayjs@1.11.21: {}
 
+  echarts@5.6.0:
+    dependencies:
+      tslib: 2.3.0
+      zrender: 5.6.1
+
   element-plus@2.14.3(vue@3.5.40(typescript@5.7.3)):
     dependencies:
       '@ctrl/tinycolor': 4.2.0
@@ -1339,6 +1380,8 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.5)
       picomatch: 4.0.5
 
+  tslib@2.3.0: {}
+
   typescript@5.7.3: {}
 
   uc.micro@2.1.0: {}
@@ -1356,9 +1399,23 @@ snapshots:
 
   vue-component-type-helpers@3.3.7: {}
 
+  vue-demi@0.13.11(vue@3.5.40(typescript@5.7.3)):
+    dependencies:
+      vue: 3.5.40(typescript@5.7.3)
+
   vue-demi@0.14.10(vue@3.5.40(typescript@5.7.3)):
     dependencies:
       vue: 3.5.40(typescript@5.7.3)
+
+  vue-echarts@7.0.3(@vue/runtime-core@3.5.40)(echarts@5.6.0)(vue@3.5.40(typescript@5.7.3)):
+    dependencies:
+      echarts: 5.6.0
+      vue: 3.5.40(typescript@5.7.3)
+      vue-demi: 0.13.11(vue@3.5.40(typescript@5.7.3))
+    optionalDependencies:
+      '@vue/runtime-core': 3.5.40
+    transitivePeerDependencies:
+      - '@vue/composition-api'
 
   vue-router@4.6.4(vue@3.5.40(typescript@5.7.3)):
     dependencies:
@@ -1374,3 +1431,7 @@ snapshots:
       '@vue/shared': 3.5.40
     optionalDependencies:
       typescript: 5.7.3
+
+  zrender@5.6.1:
+    dependencies:
+      tslib: 2.3.0

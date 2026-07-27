@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "pack_id": "regex-bomb",
+  "version": "1.0.0",
+  "source": "fixture",
+  "description": "源码很短但展开后极其庞大的正则：必须被编译体积上限拦住，不能进到求值阶段。",
+  "rules": [
+    {
+      "rule_id": "regex-bomb",
+      "version": "1.0.0",
+      "source": "fixture",
+      "name": "超复杂正则",
+      "description": "嵌套重复导致编译体积爆炸",
+      "verify_hint": "不应加载",
+      "severity": "low",
+      "confidence": 50,
+      "tag": "fixture",
+      "vuln_type": "fixture",
+      "references": [{ "framework": "cwe", "version": "4.20", "id": "CWE-200" }],
+      "condition": {
+        "operator": "regex",
+        "selector": { "target": "response_body" },
+        "pattern": "((a{1000}){1000}){1000}"
+      }
+    }
+  ]
+}

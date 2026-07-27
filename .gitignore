@@ -23,6 +23,7 @@ yarn-error.log*
 .vscode/*
 !.vscode/extensions.json
 .superpowers/
+.zcode/
 *.suo
 *.ntvs*
 *.njsproj

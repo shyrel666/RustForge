@@ -7,16 +7,17 @@ import {
 } from "../utils/theme";
 
 /**
- * AI 供应商（CC-switch 风格）：一套完整的 API 配置三件套 + 名称/备注。
+ * AI 供应商元数据。API Key 只保存在系统凭据库，前端只接收布尔状态。
  * 多个供应商并存于列表，任一时刻只有一个「当前」供应商被 AI 调用使用。
  */
 export interface AiProvider {
   id: string;
   name: string;
   base_url: string;
-  api_key: string;
   model: string;
   note: string;
+  supports_json_schema: boolean;
+  has_api_key: boolean;
 }
 
 export interface AppSettings {
@@ -27,8 +28,6 @@ export interface AppSettings {
   current_provider_id: string;
   // 代理
   proxy_port: number;
-  // 成本提示：每百万 token 单价（货币自定，0=不估算）
-  price_per_mtok: number;
   // 首次启动授权声明
   consent_accepted: boolean;
   // 外观：浅色 / 深色 / 跟随系统
@@ -38,7 +37,6 @@ export interface AppSettings {
 const DEFAULTS = {
   ai_enabled: true,
   proxy_port: 8080,
-  price_per_mtok: 0,
   consent_accepted: false,
   theme: "dark" as ThemeMode,
 };
@@ -54,7 +52,6 @@ export const useSettingsStore = defineStore("settings", {
     providers: [],
     current_provider_id: "",
     proxy_port: DEFAULTS.proxy_port,
-    price_per_mtok: DEFAULTS.price_per_mtok,
     consent_accepted: DEFAULTS.consent_accepted,
     theme: DEFAULTS.theme,
   }),
@@ -73,7 +70,6 @@ export const useSettingsStore = defineStore("settings", {
       const all = await getAllSettings();
       this.ai_enabled = all.ai_enabled !== "false";
       this.proxy_port = Number(all.proxy_port) || DEFAULTS.proxy_port;
-      this.price_per_mtok = Number(all.price_per_mtok) || DEFAULTS.price_per_mtok;
       this.consent_accepted = all.consent_accepted === "true";
       this.theme = parseThemeMode(all.theme);
       applyTheme(this.theme);
@@ -85,31 +81,21 @@ export const useSettingsStore = defineStore("settings", {
           const arr = JSON.parse(all.ai_providers);
           if (Array.isArray(arr)) {
             providers = arr.map((p: Partial<AiProvider>) => ({
-              id: String(p.id ?? genId()),
+              id: String(p.id ?? ""),
               name: String(p.name ?? ""),
               base_url: String(p.base_url ?? ""),
-              api_key: String(p.api_key ?? ""),
               model: String(p.model ?? ""),
               note: String(p.note ?? ""),
+              supports_json_schema: p.supports_json_schema === true,
+              has_api_key: p.has_api_key === true,
             }));
+            if (providers.some((provider) => !provider.id || !provider.base_url)) {
+              throw new Error("AI 供应商配置缺少必填元数据");
+            }
           }
         } catch {
           /* 忽略损坏的 JSON，按空列表处理 */
         }
-      }
-
-      // 迁移：老版本单供应商设置 → 自动生成一个供应商
-      if (providers.length === 0 && (all.api_key || all.base_url || all.model)) {
-        providers = [
-          {
-            id: genId(),
-            name: "默认供应商",
-            base_url: all.base_url || "https://api.deepseek.com",
-            api_key: all.api_key || "",
-            model: all.model || "deepseek-chat",
-            note: "",
-          },
-        ];
       }
 
       this.providers = providers;
@@ -120,12 +106,22 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     async save() {
+      const providerMetadata = this.providers.map(
+        ({ id, name, base_url, model, note, supports_json_schema }) => ({
+          id,
+          name,
+          base_url,
+          model,
+          note,
+          supports_json_schema,
+        })
+      );
+      // 供应商列表先落库，专用 Key 命令才能校验 providerId；布尔状态也不落 SQLite。
+      await setSetting("ai_providers", JSON.stringify(providerMetadata));
       await Promise.all([
         setSetting("ai_enabled", String(this.ai_enabled)),
-        setSetting("ai_providers", JSON.stringify(this.providers)),
         setSetting("ai_current", this.current_provider_id),
         setSetting("proxy_port", String(this.proxy_port)),
-        setSetting("price_per_mtok", String(this.price_per_mtok)),
         setSetting("consent_accepted", String(this.consent_accepted)),
         setSetting("theme", this.theme),
       ]);
@@ -138,16 +134,24 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     /** 新增供应商，返回其 id；若此前无当前项则自动设为当前 */
-    addProvider(p: Omit<AiProvider, "id">): string {
+    addProvider(p: Omit<AiProvider, "id" | "has_api_key">): string {
       const id = genId();
-      this.providers.push({ ...p, id });
+      this.providers.push({ ...p, id, has_api_key: false });
       if (!this.current_provider_id) this.current_provider_id = id;
       return id;
     },
 
-    updateProvider(id: string, patch: Partial<Omit<AiProvider, "id">>) {
+    updateProvider(
+      id: string,
+      patch: Partial<Omit<AiProvider, "id" | "has_api_key">>
+    ) {
       const idx = this.providers.findIndex((x) => x.id === id);
       if (idx >= 0) this.providers[idx] = { ...this.providers[idx], ...patch, id };
+    },
+
+    setProviderKeyStatus(id: string, hasApiKey: boolean) {
+      const provider = this.providers.find((item) => item.id === id);
+      if (provider) provider.has_api_key = hasApiKey;
     },
 
     removeProvider(id: string) {

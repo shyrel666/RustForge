@@ -1,0 +1,566 @@
+{
+  "description": "内置规则包 builtin@1.0.0 的样本流量。每条旧规则至少一个正例、一个反例和一个边界样本；expect_hit 只针对该条 rule_id，其它规则是否命中不影响断言。",
+  "pack_id": "builtin",
+  "samples": [
+    {
+      "rule_id": "sensitive-param-in-url",
+      "kind": "positive",
+      "note": "查询参数名就是 api_key",
+      "expect_hit": true,
+      "expect_field_path": "request.query.api_key[0].name",
+      "traffic": { "url": "https://api.test/v1/login?api_key=abc123&lang=zh" }
+    },
+    {
+      "rule_id": "sensitive-param-in-url",
+      "kind": "negative",
+      "note": "普通分页参数",
+      "expect_hit": false,
+      "traffic": { "url": "https://api.test/v1/items?page=2&sort=name" }
+    },
+    {
+      "rule_id": "sensitive-param-in-url",
+      "kind": "boundary",
+      "note": "参数名只是包含敏感词，整名不等于敏感词，不应命中",
+      "expect_hit": false,
+      "traffic": { "url": "https://api.test/v1/items?password_hint=1&tokenizer=on" }
+    },
+    {
+      "rule_id": "sensitive-param-in-url",
+      "kind": "boundary",
+      "note": "参数名大写，匹配必须大小写不敏感",
+      "expect_hit": true,
+      "traffic": { "url": "https://api.test/v1/items?TOKEN=abc" }
+    },
+
+    {
+      "rule_id": "password-in-request-body",
+      "kind": "positive",
+      "note": "表单字段名为 password",
+      "expect_hit": true,
+      "traffic": {
+        "method": "POST",
+        "url": "https://api.test/v1/login",
+        "req_headers": { "content-type": "application/x-www-form-urlencoded" },
+        "req_body": "user=alice&password=hunter2"
+      }
+    },
+    {
+      "rule_id": "password-in-request-body",
+      "kind": "negative",
+      "note": "登录请求但没有口令字段",
+      "expect_hit": false,
+      "traffic": {
+        "method": "POST",
+        "url": "https://api.test/v1/session",
+        "req_headers": { "content-type": "application/json" },
+        "req_body": "{\"username\":\"alice\",\"remember\":true}"
+      }
+    },
+    {
+      "rule_id": "password-in-request-body",
+      "kind": "boundary",
+      "note": "JSON 里的 password 字段（走文本分支）",
+      "expect_hit": true,
+      "traffic": {
+        "method": "POST",
+        "url": "https://api.test/v1/login",
+        "req_headers": { "content-type": "application/json" },
+        "req_body": "{\"username\":\"alice\",\"password\":\"hunter2\"}"
+      }
+    },
+    {
+      "rule_id": "password-in-request-body",
+      "kind": "boundary",
+      "note": "password_hint 不是口令字段，不应命中",
+      "expect_hit": false,
+      "traffic": {
+        "method": "POST",
+        "url": "https://api.test/v1/profile",
+        "req_headers": { "content-type": "application/json" },
+        "req_body": "{\"password_hint\":\"my first dog\"}"
+      }
+    },
+
+    {
+      "rule_id": "jwt-exposed",
+      "kind": "positive",
+      "note": "Authorization 头携带 JWT",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://api.test/v1/me",
+        "req_headers": {
+          "authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        }
+      }
+    },
+    {
+      "rule_id": "jwt-exposed",
+      "kind": "negative",
+      "note": "Basic 认证不是 JWT",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/me",
+        "req_headers": { "authorization": "Basic dXNlcjpwYXNzd29yZA==" }
+      }
+    },
+    {
+      "rule_id": "jwt-exposed",
+      "kind": "boundary",
+      "note": "三段式但每段太短，达不到最小长度",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/me",
+        "req_headers": { "x-token": "eyJhbGciOiJ.eyJzdWIiOiJ.sig12" }
+      }
+    },
+    {
+      "rule_id": "jwt-exposed",
+      "kind": "boundary",
+      "note": "JWT 出现在请求体而不是请求头",
+      "expect_hit": true,
+      "traffic": {
+        "method": "POST",
+        "url": "https://api.test/v1/refresh",
+        "req_headers": { "content-type": "application/json" },
+        "req_body": "{\"refresh\":\"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U\"}"
+      }
+    },
+
+    {
+      "rule_id": "sql-error-leak",
+      "kind": "positive",
+      "note": "MySQL 语法错误原文",
+      "expect_hit": true,
+      "expect_field_path": "response.body",
+      "traffic": {
+        "url": "https://shop.test/item?id=1%27",
+        "status": 500,
+        "content_type": "text/html",
+        "resp_headers": { "content-type": "text/html" },
+        "resp_body": "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+      }
+    },
+    {
+      "rule_id": "sql-error-leak",
+      "kind": "negative",
+      "note": "正常 JSON 响应",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/item?id=1",
+        "resp_headers": { "content-type": "application/json" },
+        "resp_body": "{\"ok\":true,\"items\":[]}"
+      }
+    },
+    {
+      "rule_id": "sql-error-leak",
+      "kind": "boundary",
+      "note": "ORA 编号不足 4 位，不构成 Oracle 报错特征",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/item?id=1",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "reference ORA-123 in the internal ticket system"
+      }
+    },
+    {
+      "rule_id": "sql-error-leak",
+      "kind": "boundary",
+      "note": "ORA 编号刚好 5 位，命中 Oracle 报错",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/item?id=1",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "ORA-01234: table or view does not exist"
+      }
+    },
+
+    {
+      "rule_id": "stack-trace-leak",
+      "kind": "positive",
+      "note": "Python traceback",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://svc.test/report",
+        "status": 500,
+        "resp_headers": { "content-type": "text/html" },
+        "resp_body": "Traceback (most recent call last):\n  File \"app.py\", line 10, in handler"
+      }
+    },
+    {
+      "rule_id": "stack-trace-leak",
+      "kind": "negative",
+      "note": "普通 404 页面",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://svc.test/missing",
+        "status": 404,
+        "resp_headers": { "content-type": "text/html" },
+        "resp_body": "<html><body>Not Found</body></html>"
+      }
+    },
+    {
+      "rule_id": "stack-trace-leak",
+      "kind": "boundary",
+      "note": "Java 栈帧形态",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://svc.test/report",
+        "status": 500,
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "at com.acme.Service.run(Service.java:88)"
+      }
+    },
+    {
+      "rule_id": "stack-trace-leak",
+      "kind": "boundary",
+      "note": "以 at 开头的普通英文句子不是栈帧",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://svc.test/help",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "Look at the beginning of the file for usage notes."
+      }
+    },
+
+    {
+      "rule_id": "debug-actuator-endpoint",
+      "kind": "positive",
+      "note": "Spring Boot actuator 环境变量端点",
+      "expect_hit": true,
+      "expect_field_path": "request.url",
+      "traffic": { "url": "https://svc.test/actuator/env" }
+    },
+    {
+      "rule_id": "debug-actuator-endpoint",
+      "kind": "negative",
+      "note": "普通业务接口",
+      "expect_hit": false,
+      "traffic": { "url": "https://svc.test/api/v1/users" }
+    },
+    {
+      "rule_id": "debug-actuator-endpoint",
+      "kind": "boundary",
+      "note": "metrics 只是路径段前缀的一部分，不应命中",
+      "expect_hit": false,
+      "traffic": { "url": "https://svc.test/metricsdashboard" }
+    },
+    {
+      "rule_id": "debug-actuator-endpoint",
+      "kind": "boundary",
+      "note": "路径以 /metrics 结尾，命中",
+      "expect_hit": true,
+      "traffic": { "url": "https://svc.test/metrics" }
+    },
+
+    {
+      "rule_id": "admin-console-path",
+      "kind": "positive",
+      "note": "典型后台登录路径",
+      "expect_hit": true,
+      "traffic": { "url": "https://shop.test/admin/login" }
+    },
+    {
+      "rule_id": "admin-console-path",
+      "kind": "negative",
+      "note": "普通商品列表",
+      "expect_hit": false,
+      "traffic": { "url": "https://shop.test/products/list" }
+    },
+    {
+      "rule_id": "admin-console-path",
+      "kind": "boundary",
+      "note": "administrators 是更长的词，不应命中",
+      "expect_hit": false,
+      "traffic": { "url": "https://shop.test/administrators" }
+    },
+    {
+      "rule_id": "admin-console-path",
+      "kind": "boundary",
+      "note": "路径段后紧跟查询串，命中",
+      "expect_hit": true,
+      "traffic": { "url": "https://shop.test/console?tab=1" }
+    },
+
+    {
+      "rule_id": "sensitive-file-access",
+      "kind": "positive",
+      "note": ".git 目录泄露",
+      "expect_hit": true,
+      "traffic": { "url": "https://shop.test/.git/config" }
+    },
+    {
+      "rule_id": "sensitive-file-access",
+      "kind": "negative",
+      "note": "普通静态资源",
+      "expect_hit": false,
+      "traffic": { "url": "https://shop.test/assets/logo.png" }
+    },
+    {
+      "rule_id": "sensitive-file-access",
+      "kind": "boundary",
+      "note": ".bak 结尾的备份文件，命中",
+      "expect_hit": true,
+      "traffic": { "url": "https://shop.test/backup.bak" }
+    },
+    {
+      "rule_id": "sensitive-file-access",
+      "kind": "boundary",
+      "note": ".bakery 不是备份扩展名，不应命中",
+      "expect_hit": false,
+      "traffic": { "url": "https://shop.test/notes.bakery" }
+    },
+
+    {
+      "rule_id": "path-traversal-param",
+      "kind": "positive",
+      "note": "明文 ../ 穿越",
+      "expect_hit": true,
+      "traffic": { "url": "https://files.test/download?path=../../etc/passwd" }
+    },
+    {
+      "rule_id": "path-traversal-param",
+      "kind": "negative",
+      "note": "正常绝对路径参数",
+      "expect_hit": false,
+      "traffic": { "url": "https://files.test/download?path=/reports/2026.pdf" }
+    },
+    {
+      "rule_id": "path-traversal-param",
+      "kind": "boundary",
+      "note": "URL 编码形态 %2e%2e",
+      "expect_hit": true,
+      "traffic": { "url": "https://files.test/download?path=%2e%2e%2fetc" }
+    },
+    {
+      "rule_id": "path-traversal-param",
+      "kind": "boundary",
+      "note": "文件名里的连续点后面不是分隔符，不应命中",
+      "expect_hit": false,
+      "traffic": { "url": "https://files.test/v1/download?name=report..pdf" }
+    },
+
+    {
+      "rule_id": "cors-wildcard",
+      "kind": "positive",
+      "note": "ACAO 为通配符",
+      "expect_hit": true,
+      "expect_field_path": "response.header.access-control-allow-origin[0]",
+      "traffic": {
+        "url": "https://api.test/v1/profile",
+        "resp_headers": { "access-control-allow-origin": "*" }
+      }
+    },
+    {
+      "rule_id": "cors-wildcard",
+      "kind": "negative",
+      "note": "ACAO 指定了具体来源",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/profile",
+        "resp_headers": { "access-control-allow-origin": "https://app.test" }
+      }
+    },
+    {
+      "rule_id": "cors-wildcard",
+      "kind": "boundary",
+      "note": "值前后有空白，仍然只是通配符",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://api.test/v1/profile",
+        "resp_headers": { "access-control-allow-origin": " * " }
+      }
+    },
+    {
+      "rule_id": "cors-wildcard",
+      "kind": "boundary",
+      "note": "通配子域不是完整通配符；旧的整段正则会在这里误报",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/profile",
+        "resp_headers": { "access-control-allow-origin": "*.example.com" }
+      }
+    },
+
+    {
+      "rule_id": "cookie-no-httponly",
+      "kind": "positive",
+      "note": "会话 Cookie 缺 HttpOnly",
+      "expect_hit": true,
+      "expect_field_path": "response.cookie.set-cookie[0].attribute.httponly",
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "session=abc; Path=/" }
+      }
+    },
+    {
+      "rule_id": "cookie-no-httponly",
+      "kind": "negative",
+      "note": "属性齐全",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "session=abc; Path=/; Secure; HttpOnly" }
+      }
+    },
+    {
+      "rule_id": "cookie-no-httponly",
+      "kind": "boundary",
+      "note": "两条 Cookie 只有一条缺 HttpOnly；旧的全局 must_absent 会整条放过",
+      "expect_hit": true,
+      "expect_field_path": "response.cookie.set-cookie[0].attribute.httponly",
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": {
+          "set-cookie": [
+            "session=abc; Path=/; Secure",
+            "theme=dark; Path=/; Secure; HttpOnly"
+          ]
+        }
+      }
+    },
+    {
+      "rule_id": "cookie-no-httponly",
+      "kind": "boundary",
+      "note": "Cookie 值里出现 httponly 字样，但属性确实缺失",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "sid=this-httponly-value; Path=/" }
+      }
+    },
+
+    {
+      "rule_id": "cookie-no-secure",
+      "kind": "positive",
+      "note": "会话 Cookie 缺 Secure",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "session=abc; Path=/; HttpOnly" }
+      }
+    },
+    {
+      "rule_id": "cookie-no-secure",
+      "kind": "negative",
+      "note": "属性齐全",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "session=abc; Path=/; Secure; HttpOnly" }
+      }
+    },
+    {
+      "rule_id": "cookie-no-secure",
+      "kind": "boundary",
+      "note": "Cookie 值里出现 secure 字样，但属性确实缺失",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": { "set-cookie": "sid=very-secure-token; Path=/; HttpOnly" }
+      }
+    },
+    {
+      "rule_id": "cookie-no-secure",
+      "kind": "boundary",
+      "note": "三条 Cookie 中只有中间一条带 Secure",
+      "expect_hit": true,
+      "expect_field_path": "response.cookie.set-cookie[0].attribute.secure",
+      "traffic": {
+        "url": "https://shop.test/login",
+        "resp_headers": {
+          "set-cookie": [
+            "a=1; Path=/; HttpOnly",
+            "b=2; Path=/; Secure; HttpOnly",
+            "c=3; Path=/; HttpOnly"
+          ]
+        }
+      }
+    },
+
+    {
+      "rule_id": "server-version-leak",
+      "kind": "positive",
+      "note": "Server 头带完整版本号",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/",
+        "resp_headers": { "server": "nginx/1.25.3" }
+      }
+    },
+    {
+      "rule_id": "server-version-leak",
+      "kind": "negative",
+      "note": "Server 头不含版本号",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/",
+        "resp_headers": { "server": "nginx" }
+      }
+    },
+    {
+      "rule_id": "server-version-leak",
+      "kind": "boundary",
+      "note": "版本号在 X-Powered-By 上",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://shop.test/",
+        "resp_headers": { "server": "cloudflare", "x-powered-by": "PHP/8.2.1" }
+      }
+    },
+    {
+      "rule_id": "server-version-leak",
+      "kind": "boundary",
+      "note": "其它响应头里的数字不算版本泄露",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://shop.test/",
+        "resp_headers": { "server": "cloudflare", "x-request-id": "12.34" }
+      }
+    },
+
+    {
+      "rule_id": "internal-ip-leak",
+      "kind": "positive",
+      "note": "响应体暴露 10.0.0.0/8 内网地址",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://api.test/v1/health",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "upstream 10.0.3.14 timed out after 5s"
+      }
+    },
+    {
+      "rule_id": "internal-ip-leak",
+      "kind": "negative",
+      "note": "公网地址不是内网泄露",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/health",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "public resolver 8.8.8.8 responded in 12ms"
+      }
+    },
+    {
+      "rule_id": "internal-ip-leak",
+      "kind": "boundary",
+      "note": "172.32 超出 RFC1918 的 172.16-172.31 区间",
+      "expect_hit": false,
+      "traffic": {
+        "url": "https://api.test/v1/health",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "edge node 172.32.0.1 reachable"
+      }
+    },
+    {
+      "rule_id": "internal-ip-leak",
+      "kind": "boundary",
+      "note": "172.16 是区间下界，命中",
+      "expect_hit": true,
+      "traffic": {
+        "url": "https://api.test/v1/health",
+        "resp_headers": { "content-type": "text/plain" },
+        "resp_body": "edge node 172.16.0.1 reachable"
+      }
+    }
+  ]
+}

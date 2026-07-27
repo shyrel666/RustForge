@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "pack_id": "owasp-top10-2025",
+  "framework": "owasp-top10",
+  "version": "2025",
+  "title": "OWASP Top 10:2025",
+  "source_url": "https://owasp.org/Top10/2025/",
+  "published_at": "2025",
+  "license": {
+    "name": "Creative Commons Attribution 3.0",
+    "url": "https://creativecommons.org/licenses/by/3.0/"
+  },
+  "content_sha256": "dc53c1d09e6df1ae4f2d529b81ecabc7bdb5d7948538c8a00b6523f8d89e259d",
+  "entries": [
+    {
+      "id": "A01",
+      "title": "失效的访问控制（Broken Access Control）",
+      "principle": "授权边界没有在可信服务层一致执行；2025 版还把服务端请求伪造纳入这一风险类别。",
+      "impact": "攻击者可能越权访问数据或功能，也可能借服务端网络权限访问受限目标。",
+      "cause": "对象和功能授权不完整、默认允许、跨请求策略不一致，以及服务端出站目标缺少约束。",
+      "remediation": "集中实施默认拒绝的授权策略，对对象、功能及所有服务端出站目标逐次校验并记录判定。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-639" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-918" }
+      ]
+    },
+    {
+      "id": "A02",
+      "title": "安全配置错误（Security Misconfiguration）",
+      "principle": "系统行为由配置驱动，但默认值、权限、功能开关或部署环境没有形成安全基线。",
+      "impact": "调试信息、管理能力、云资源或跨域访问可能意外暴露。",
+      "cause": "配置资产不可见、环境漂移、多余功能、宽松策略以及缺少自动化检查。",
+      "remediation": "采用最小化、可复现的配置基线，将配置审查纳入交付流水线并持续检测漂移。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-942" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-1188" }
+      ]
+    },
+    {
+      "id": "A03",
+      "title": "软件供应链失效（Software Supply Chain Failures）",
+      "principle": "软件从开发工具、依赖、构建、制品到更新的供应链任一环节失去来源、完整性或治理保证。",
+      "impact": "受污染的依赖、工具或制品可把恶意代码大范围带入生产环境。",
+      "cause": "缺少 SBOM、来源验证、签名、职责分离、变更审计和及时的风险驱动升级。",
+      "remediation": "记录并锁定供应链资产，验证来源与签名，隔离和最小化流水线权限，采用分阶段发布并持续监测组件风险。",
+      "related_references": []
+    },
+    {
+      "id": "A04",
+      "title": "加密机制失效（Cryptographic Failures）",
+      "principle": "敏感数据和密钥未获得适合其生命周期与威胁模型的密码学保护。",
+      "impact": "可能泄露或篡改凭据、隐私、业务数据和信任材料。",
+      "cause": "明文传输、弱算法、错误证书校验、密钥共享过度或生命周期管理缺失。",
+      "remediation": "减少敏感数据留存，使用现代协议和库，并对密钥实施生成、存储、轮换、撤销和访问审计。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-319" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-614" }
+      ]
+    },
+    {
+      "id": "A05",
+      "title": "注入（Injection）",
+      "principle": "数据进入 SQL、脚本、命令、模板等解释上下文时突破了数据与指令边界。",
+      "impact": "可导致敏感数据读写、浏览器脚本执行、命令执行或服务端控制。",
+      "cause": "字符串拼接、动态执行、上下文编码错误和缺少参数化。",
+      "remediation": "使用参数化与类型安全接口，避免动态解释不可信文本，并在最终输出上下文执行正确编码。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-78" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-79" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-89" }
+      ]
+    },
+    {
+      "id": "A06",
+      "title": "不安全的设计（Insecure Design）",
+      "principle": "安全需求和业务不变量未进入架构设计，导致实现即使按规格工作仍可被滥用。",
+      "impact": "业务流程、资源限额、角色边界或关键决策可能被系统性绕过。",
+      "cause": "缺少威胁建模、滥用用例、安全参考架构和设计级验证。",
+      "remediation": "在设计评审中明确威胁、信任边界和不可破坏的业务规则，并用纵深控制和测试验证。",
+      "related_references": []
+    },
+    {
+      "id": "A07",
+      "title": "认证失效（Authentication Failures）",
+      "principle": "系统无法可靠建立或维持调用方身份，或认证强度与被保护操作不匹配。",
+      "impact": "可能发生账号接管、会话冒用、凭据填充和恢复流程绕过。",
+      "cause": "弱凭据策略、缺少多因素、防自动化不足、会话处理错误或认证路径不一致。",
+      "remediation": "使用成熟身份协议和组件，启用风险相称的多因素、防自动化与安全会话生命周期。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-287" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-306" }
+      ]
+    },
+    {
+      "id": "A08",
+      "title": "软件或数据完整性失效（Software or Data Integrity Failures）",
+      "principle": "低层信任边界没有验证代码、更新或关键数据是否来自预期主体且保持完整。",
+      "impact": "恶意数据、插件、更新或反序列化对象可能被当作可信内容执行或采纳。",
+      "cause": "签名和来源校验缺失、信任范围过宽、危险反序列化或关键数据缺少完整性保护。",
+      "remediation": "验证制品和关键数据的来源与签名，缩小信任边界，并拒绝危险的不可信对象反序列化。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-345" },
+        { "framework": "cwe", "version": "4.20", "id": "CWE-502" }
+      ]
+    },
+    {
+      "id": "A09",
+      "title": "安全日志和告警失效（Security Logging and Alerting Failures）",
+      "principle": "安全事件即使被记录，也没有及时转化为可理解、可关联和可行动的告警。",
+      "impact": "入侵发现延迟，响应团队难以重建时间线或判断影响范围。",
+      "cause": "事件覆盖不足、上下文缺失、日志分散、告警规则无效或没人响应。",
+      "remediation": "建立事件与告警目录，确保日志含主体、动作、对象和时间，集中保护并定期验证告警到响应的完整链路。",
+      "related_references": []
+    },
+    {
+      "id": "A10",
+      "title": "异常条件处理不当（Mishandling of Exceptional Conditions）",
+      "principle": "系统遇到错误、资源耗尽、部分失败或意外状态时没有安全地失败。",
+      "impact": "可能泄露信息、绕过控制、产生不一致状态、拒绝服务或扩大后续攻击。",
+      "cause": "异常路径未建模、错误被吞掉、失败开放、回滚不完整和边界值处理不足。",
+      "remediation": "为异常和部分失败建立明确状态机，默认安全失败，保证事务性清理，并对错误路径做故障注入和边界测试。",
+      "related_references": [
+        { "framework": "cwe", "version": "4.20", "id": "CWE-209" }
+      ]
+    }
+  ]
+}

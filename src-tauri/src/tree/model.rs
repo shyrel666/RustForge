@@ -1,3 +1,4 @@
+use crate::knowledge::StandardReference;
 use serde::{Deserialize, Serialize};
 
 /// 任务树节点：一次渗透过程的一个步骤。
@@ -16,6 +17,9 @@ pub struct TaskNode {
     pub how_to: String,
     /// 完成判定标准
     pub verify_criteria: String,
+    /// Version-pinned references shared with Finding and report models.
+    #[serde(default)]
+    pub standard_references: Vec<StandardReference>,
     /// todo / in_progress / done / blocked
     pub status: String,
     pub sort_order: i64,
@@ -38,6 +42,8 @@ pub struct PlannedNode {
     pub how_to: String,
     #[serde(default)]
     pub verify_criteria: String,
+    #[serde(default)]
+    pub standard_references: Vec<StandardReference>,
     #[serde(default)]
     pub children: Vec<PlannedNode>,
     /// 关联的已有 Finding id（AI 给出，插入前校验存在性）

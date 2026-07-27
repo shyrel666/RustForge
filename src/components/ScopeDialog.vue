@@ -22,7 +22,7 @@ async function save() {
   if (!project.current) return;
   saving.value = true;
   try {
-    // 粘贴 URL/带端口也能用：入库前统一清洗成纯 host 模式
+    // 前端只去空/去重；后端 ScopePolicy 负责权威规范化与校验。
     await project.updateScope(project.current.id, normalizeScopeList(scope.value));
     ElMessage.success("Scope 已更新，即刻生效");
     emit("update:modelValue", false);

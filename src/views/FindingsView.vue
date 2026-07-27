@@ -5,7 +5,11 @@ import { Document, FolderOpened } from "@element-plus/icons-vue";
 import MarkdownIt from "markdown-it";
 import { useFindingsStore } from "../stores/findings";
 import { useProjectStore } from "../stores/project";
-import { buildReport, exportReport } from "../api/tauri";
+import {
+  buildReport,
+  exportReport,
+  formatStandardReference,
+} from "../api/tauri";
 import KnowledgeCard from "../components/KnowledgeCard.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import PageHeader from "../components/shell/PageHeader.vue";
@@ -196,9 +200,9 @@ function statusTag(s: string): { text: string; type: string } {
               <div class="label">手动验证步骤</div>
               <div class="md" v-html="md.render(row.verify_steps || '（无）')" />
             </div>
-            <div v-if="row.owasp || row.cwe" class="block">
+            <div v-if="row.standard_references.length" class="block">
               <div class="label">知识卡片</div>
-              <KnowledgeCard :owasp="row.owasp" :cwe="row.cwe" />
+              <KnowledgeCard :references="row.standard_references" />
             </div>
           </div>
         </template>
@@ -229,10 +233,19 @@ function statusTag(s: string): { text: string; type: string } {
           />
         </template>
       </el-table-column>
-      <el-table-column label="OWASP / CWE" min-width="180" show-overflow-tooltip>
+      <el-table-column label="标准引用" min-width="220">
         <template #default="{ row }">
-          <div class="cell-sub">{{ row.owasp || "—" }}</div>
-          <div class="cell-sub">{{ row.cwe || "—" }}</div>
+          <div v-if="row.standard_references.length" class="reference-list">
+            <el-tag
+              v-for="reference in row.standard_references"
+              :key="`${reference.framework}@${reference.version}/${reference.id}`"
+              size="small"
+              effect="plain"
+            >
+              {{ formatStandardReference(reference) }}
+            </el-tag>
+          </div>
+          <span v-else class="cell-sub">—</span>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="90">
@@ -294,6 +307,11 @@ function statusTag(s: string): { text: string; type: string } {
   display: flex;
   gap: 6px;
   align-items: center;
+}
+.reference-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 .tid {
   font-family: var(--rf-font-mono);

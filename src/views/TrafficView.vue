@@ -147,15 +147,68 @@ function shortTime(ts: string): string {
   return ts.split(" ")[1] ?? ts;
 }
 
-/** headers JSON 字符串 → kv 数组（详情抽屉用） */
+/** headers JSON 字符串 → kv 数组；重复 header 逐项展示。 */
 function headerPairs(json: string | null): { k: string; v: string }[] {
   if (!json) return [];
   try {
-    const obj = JSON.parse(json) as Record<string, string>;
-    return Object.entries(obj).map(([k, v]) => ({ k, v }));
+    const obj = JSON.parse(json) as Record<string, string | string[]>;
+    return Object.entries(obj).flatMap(([k, value]) =>
+      (Array.isArray(value) ? value : [value]).map((v) => ({ k, v }))
+    );
   } catch {
     return [];
   }
+}
+
+function decodeStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    not_received: "未收到正文",
+    empty: "空正文",
+    identity_text: "文本正文",
+    identity_binary: "非文本正文",
+    decoded_text: "已解压文本",
+    decoded_binary: "已解压非文本",
+    decode_failed: "正文解码失败",
+    unsupported_encoding: "不支持的正文编码",
+    encoded_truncated: "压缩正文在线缆上已截断，未解压",
+    decode_truncated: "多层解压达到上限，未完成全部解码",
+    stream_error: "正文流读取失败",
+    stream_incomplete: "正文流未完整结束",
+  };
+  return labels[status] ?? `未知正文状态：${status}`;
+}
+
+function captureNotice(
+  wireSize: number,
+  capturedSize: number,
+  truncated: boolean,
+  decodeStatus: string
+): string {
+  const size = `线缆 ${fmtSize(wireSize)}，已保存 ${fmtSize(capturedSize)}`;
+  return `${decodeStatusLabel(decodeStatus)}；${size}${truncated ? "；已截断" : ""}`;
+}
+
+function captureAlertType(
+  truncated: boolean,
+  decodeStatus: string
+): "info" | "warning" | "error" {
+  if (decodeStatus === "decode_failed" || decodeStatus === "stream_error") return "error";
+  if (
+    truncated ||
+    ["unsupported_encoding", "encoded_truncated", "decode_truncated", "stream_incomplete"].includes(
+      decodeStatus
+    )
+  ) {
+    return "warning";
+  }
+  return "info";
+}
+
+function shouldShowCaptureAlert(truncated: boolean, decodeStatus: string): boolean {
+  return (
+    truncated ||
+    !["empty", "identity_text", "decoded_text", "not_received"].includes(decodeStatus)
+  );
 }
 </script>
 
@@ -305,10 +358,14 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
         </template>
       </el-table-column>
       <el-table-column label="请求" width="90" align="right">
-        <template #default="{ row }">{{ fmtSize(row.req_size) }}</template>
+        <template #default="{ row }">
+          {{ fmtSize(row.req_wire_size) }}<span v-if="row.req_truncated" class="truncated-mark"> *</span>
+        </template>
       </el-table-column>
       <el-table-column label="响应" width="90" align="right">
-        <template #default="{ row }">{{ fmtSize(row.resp_size) }}</template>
+        <template #default="{ row }">
+          {{ fmtSize(row.resp_wire_size) }}<span v-if="row.resp_truncated" class="truncated-mark"> *</span>
+        </template>
       </el-table-column>
       <el-table-column label="耗时" width="90" align="right">
         <template #default="{ row }">{{ row.duration_ms }} ms</template>
@@ -350,7 +407,8 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
           </el-descriptions-item>
           <el-descriptions-item label="耗时">{{ traffic.detail.duration_ms }} ms</el-descriptions-item>
           <el-descriptions-item label="请求/响应">
-            {{ fmtSize(traffic.detail.req_size) }} / {{ fmtSize(traffic.detail.resp_size) }}
+            {{ fmtSize(traffic.detail.req_wire_size) }} /
+            {{ fmtSize(traffic.detail.resp_wire_size) }}
           </el-descriptions-item>
           <el-descriptions-item label="时间">{{ traffic.detail.created_at }}</el-descriptions-item>
         </el-descriptions>
@@ -363,9 +421,17 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
             </el-table>
           </el-tab-pane>
           <el-tab-pane label="请求体">
+            <el-alert
+              v-if="shouldShowCaptureAlert(traffic.detail.req_truncated, traffic.detail.req_decode_status)"
+              :type="captureAlertType(traffic.detail.req_truncated, traffic.detail.req_decode_status)"
+              :title="captureNotice(traffic.detail.req_wire_size, traffic.detail.req_captured_size, traffic.detail.req_truncated, traffic.detail.req_decode_status)"
+              :closable="false"
+              show-icon
+              class="body-state"
+            />
             <pre v-if="traffic.detail.req_body_text !== null" class="body-view">{{ traffic.detail.req_body_text || "(空)" }}</pre>
             <el-alert v-else-if="traffic.detail.req_body_base64" type="info" :closable="false">
-              二进制内容（{{ fmtSize(traffic.detail.req_size) }}），Base64：
+              已保存的非文本内容（{{ fmtSize(traffic.detail.req_captured_size) }}），Base64：
               <pre class="body-view">{{ traffic.detail.req_body_base64.slice(0, 2000) }}…</pre>
             </el-alert>
             <el-empty v-else description="无请求体" :image-size="40" />
@@ -377,9 +443,17 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
             </el-table>
           </el-tab-pane>
           <el-tab-pane label="响应体">
+            <el-alert
+              v-if="shouldShowCaptureAlert(traffic.detail.resp_truncated, traffic.detail.resp_decode_status)"
+              :type="captureAlertType(traffic.detail.resp_truncated, traffic.detail.resp_decode_status)"
+              :title="captureNotice(traffic.detail.resp_wire_size, traffic.detail.resp_captured_size, traffic.detail.resp_truncated, traffic.detail.resp_decode_status)"
+              :closable="false"
+              show-icon
+              class="body-state"
+            />
             <pre v-if="traffic.detail.resp_body_text !== null" class="body-view">{{ traffic.detail.resp_body_text || "(空)" }}</pre>
             <el-alert v-else-if="traffic.detail.resp_body_base64" type="info" :closable="false">
-              二进制或压缩内容（{{ fmtSize(traffic.detail.resp_size) }}），Base64：
+              已保存的非文本或未解码内容（{{ fmtSize(traffic.detail.resp_captured_size) }}），Base64：
               <pre class="body-view">{{ traffic.detail.resp_body_base64.slice(0, 2000) }}…</pre>
             </el-alert>
             <el-empty v-else description="无响应体" :image-size="40" />
@@ -402,6 +476,15 @@ function headerPairs(json: string | null): { k: string; v: string }[] {
 }
 .f-status {
   width: 90px;
+}
+
+.truncated-mark {
+  color: var(--el-color-warning);
+  font-weight: 700;
+}
+
+.body-state {
+  margin-bottom: 10px;
 }
 .f-search {
   width: 200px;

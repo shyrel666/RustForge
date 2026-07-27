@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "pack_id": "overlong-regex",
+  "version": "1.0.0",
+  "source": "fixture",
+  "description": "正则源码超过 MAX_REGEX_PATTERN_BYTES 的规则包：超长正则无法人工审计，必须在加载期拒绝。",
+  "rules": [
+    {
+      "rule_id": "overlong-regex",
+      "version": "1.0.0",
+      "source": "fixture",
+      "name": "超长正则",
+      "description": "正则源码长度超过上限",
+      "verify_hint": "不应加载",
+      "severity": "low",
+      "confidence": 50,
+      "tag": "fixture",
+      "vuln_type": "fixture",
+      "references": [{ "framework": "cwe", "version": "4.20", "id": "CWE-200" }],
+      "condition": {
+        "operator": "regex",
+        "selector": { "target": "url" },
+        "pattern": "(?i)abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"
+      }
+    }
+  ]
+}

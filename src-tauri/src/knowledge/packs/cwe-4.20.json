@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "pack_id": "cwe-4.20",
+  "framework": "cwe",
+  "version": "4.20",
+  "title": "MITRE CWE 4.20（RustForge 精选知识卡）",
+  "source_url": "https://cwe.mitre.org/data/index.html",
+  "published_at": "2026-04-30",
+  "license": {
+    "name": "CWE Terms of Use",
+    "url": "https://cwe.mitre.org/about/termsofuse.html"
+  },
+  "content_sha256": "03ade89c914f203d9edc9b14d5e8e2bba32b4a910a726987e0ceed13d3187103",
+  "entries": [
+    {
+      "id": "CWE-22",
+      "title": "路径名限制不当（Path Traversal）",
+      "principle": "外部输入影响文件路径，却未被约束在预期根目录内。",
+      "impact": "可能读取、覆盖或删除应用权限可访问的任意文件。",
+      "cause": "直接拼接路径，或规范化后没有再次验证目标仍位于允许目录。",
+      "remediation": "使用服务端生成的文件标识；必须接收路径时先规范化，再以路径组件边界验证允许根目录。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-78",
+      "title": "操作系统命令注入",
+      "principle": "不可信数据进入系统命令并改变了命令结构。",
+      "impact": "攻击者可能以应用进程权限执行任意命令。",
+      "cause": "拼接 shell 字符串、调用解释器或对参数只做黑名单过滤。",
+      "remediation": "避免 shell，使用参数数组形式的安全 API，对允许值做语义白名单并最小化进程权限。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-79",
+      "title": "跨站脚本（Cross-site Scripting）",
+      "principle": "不可信数据未经对应上下文编码就进入浏览器可执行内容。",
+      "impact": "可窃取会话、冒用用户操作或篡改页面。",
+      "cause": "HTML、属性、URL、CSS 或 JavaScript 上下文编码错误，或富文本净化不足。",
+      "remediation": "采用自动转义模板，按最终上下文编码，使用成熟净化器，并以 CSP 降低残余影响。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-89",
+      "title": "SQL 注入",
+      "principle": "不可信输入改变了数据库查询的语法结构。",
+      "impact": "可读取或篡改数据、绕过认证，严重时影响数据库主机。",
+      "cause": "字符串拼接查询、动态构造标识符或错误使用 ORM 原生查询。",
+      "remediation": "使用参数化查询；动态标识符采用严格映射；数据库账号遵循最小权限。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-200",
+      "title": "向未授权主体暴露敏感信息",
+      "principle": "系统把敏感数据提供给无权获知该信息的主体。",
+      "impact": "可能泄露个人数据、令牌、内部结构或为后续攻击提供情报。",
+      "cause": "响应字段过多、授权过滤缺失、调试信息暴露或错误的缓存与日志策略。",
+      "remediation": "按数据分类与最小披露设计响应，在服务端执行字段级授权，并统一脱敏错误与日志。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-209",
+      "title": "错误消息包含敏感信息",
+      "principle": "异常响应向调用方暴露了内部实现或敏感上下文。",
+      "impact": "堆栈、路径、查询或配置细节可帮助攻击者定位可利用点。",
+      "cause": "生产环境返回原始异常、调试页或下游错误文本。",
+      "remediation": "对外使用稳定错误码和最小信息；详细异常只写入受控、脱敏且可审计的内部日志。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-287",
+      "title": "认证不当（Improper Authentication）",
+      "principle": "系统没有正确证明某主体就是其声明的身份。",
+      "impact": "攻击者可能冒充用户或服务并访问受保护资源。",
+      "cause": "认证逻辑可绕过、令牌验证不完整或信任客户端身份声明。",
+      "remediation": "使用成熟认证组件，集中校验令牌全部安全属性，并为敏感操作重新确认身份。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-306",
+      "title": "关键功能缺少认证",
+      "principle": "高价值功能在执行前没有要求并验证调用方身份。",
+      "impact": "匿名调用方可能访问管理、数据修改或其他关键能力。",
+      "cause": "新路由漏接认证中间件、只依赖前端入口或不同协议保护不一致。",
+      "remediation": "默认要求认证，以集中策略覆盖所有关键端点，并用未认证集成测试验证拒绝行为。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-319",
+      "title": "敏感信息明文传输",
+      "principle": "敏感数据经过可被观察或篡改的通信信道传输。",
+      "impact": "网络路径上的攻击者可能窃取凭据、令牌或隐私数据。",
+      "cause": "允许 HTTP 回退、TLS 配置不完整或敏感数据进入未保护的替代信道。",
+      "remediation": "对全部敏感通信强制现代 TLS，拒绝明文回退，并验证证书、主机名和协议策略。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-345",
+      "title": "数据真实性验证不足",
+      "principle": "系统没有可靠确认数据或制品来自预期主体且未被替换。",
+      "impact": "攻击者可注入伪造配置、更新、消息或关键业务数据。",
+      "cause": "缺少签名、MAC、可信传输绑定或验证结果未影响处理流程。",
+      "remediation": "对需要真实性的数据使用适当签名或认证码，安全管理密钥，并在失败时拒绝处理。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-352",
+      "title": "跨站请求伪造（CSRF）",
+      "principle": "浏览器自动携带身份凭据时，服务端未确认状态变更请求来自预期站点和用户意图。",
+      "impact": "受害者可能在不知情时执行转账、改密或其他敏感操作。",
+      "cause": "只依赖 Cookie 认证，缺少防伪令牌、来源校验或合适的 SameSite 策略。",
+      "remediation": "采用不可预测且绑定会话的防伪令牌，配置 SameSite，并对高风险操作增加用户确认。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-434",
+      "title": "危险类型文件上传不受限",
+      "principle": "系统接受并处理了可能被解释执行或危害下游的文件。",
+      "impact": "可能导致恶意代码执行、存储型攻击、拒绝服务或内容欺骗。",
+      "cause": "只校验扩展名、信任 Content-Type、上传目录可执行或下游解析器权限过大。",
+      "remediation": "按业务允许列表验证内容和大小，重命名并隔离存储，在不可执行域提供下载。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-502",
+      "title": "反序列化不可信数据",
+      "principle": "应用把外部数据恢复成可触发行为的对象图。",
+      "impact": "可能造成代码执行、权限绕过、对象篡改或拒绝服务。",
+      "cause": "使用危险原生序列化格式、允许客户端选择类型或缺少完整性验证。",
+      "remediation": "改用只表达数据的格式和显式 DTO；必要时限制类型、大小和深度并验证真实性。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-538",
+      "title": "敏感信息写入外部可访问文件或目录",
+      "principle": "应用把秘密或内部数据写入了可被非预期主体读取的位置。",
+      "impact": "备份、日志、临时文件或配置副本可能被直接下载。",
+      "cause": "存储目录与 Web 根混用、文件权限过宽或生成产物未清理。",
+      "remediation": "把敏感文件保存在非公开目录，设置最小权限，限制备份与临时文件生命周期并持续扫描暴露。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-598",
+      "title": "在 GET 查询字符串中使用敏感信息",
+      "principle": "敏感值被放入 URL，因而进入浏览器历史、代理、日志和引用来源。",
+      "impact": "令牌、个人数据或 API Key 可能通过多个非预期渠道泄露。",
+      "cause": "把认证或敏感业务参数设计为查询参数。",
+      "remediation": "敏感值放在受保护的消息体或头部，避免 URL 携带秘密，并清理已有日志与缓存。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-611",
+      "title": "XML 外部实体限制不当",
+      "principle": "XML 解析器允许不可信文档解析外部实体或 DTD。",
+      "impact": "可能读取本地文件、发起服务端请求或消耗大量资源。",
+      "cause": "使用不安全默认解析配置，或未禁用外部实体与网络访问。",
+      "remediation": "禁用 DTD、外部实体和解析器网络访问，限制文档资源，并优先采用更简单的数据格式。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-614",
+      "title": "HTTPS 会话 Cookie 缺少 Secure 属性",
+      "principle": "敏感 Cookie 可在非加密请求中被浏览器发送。",
+      "impact": "网络观察者可能截获会话标识并冒用用户身份。",
+      "cause": "Cookie 未设置 Secure，或站点仍允许明文入口与降级路径。",
+      "remediation": "为敏感 Cookie 设置 Secure，强制 HTTPS 与 HSTS，并验证所有子域和跳转路径。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-639",
+      "title": "通过用户可控键绕过授权",
+      "principle": "系统根据调用方提供的对象键取数，却未验证该主体对对象的权限。",
+      "impact": "可形成水平或垂直越权，并可能被批量枚举。",
+      "cause": "把对象标识当作授权证明，或授权校验只覆盖列表不覆盖详情和修改端点。",
+      "remediation": "每次对象操作都校验主体、对象和动作；不可预测 ID 仅作为辅助防护。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-798",
+      "title": "使用硬编码凭据",
+      "principle": "凭据被固定在源码、镜像、固件或默认配置中。",
+      "impact": "一处泄露可能让所有部署实例被直接访问，且难以安全轮换。",
+      "cause": "为部署便利嵌入密钥，或不同环境复用固定默认凭据。",
+      "remediation": "使用凭据管理系统按实例注入和轮换秘密，扫描代码与制品，并撤销所有已暴露凭据。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-918",
+      "title": "服务端请求伪造（SSRF）",
+      "principle": "外部输入控制服务端请求目标，从而借用服务器的网络位置与身份。",
+      "impact": "可能访问内网、云元数据、本机服务或绕过出站策略。",
+      "cause": "未限制协议、目标、解析后 IP 和重定向，或验证与实际连接结果不一致。",
+      "remediation": "使用明确允许列表，对每次解析与重定向重新授权，限制出站网络并避免向目标转发敏感头。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-942",
+      "title": "对不可信域使用宽松跨域策略",
+      "principle": "跨域策略允许非预期站点读取受保护响应。",
+      "impact": "恶意网页可能利用受害者会话读取敏感 API 数据。",
+      "cause": "反射任意 Origin、允许过宽通配范围，或把 CORS 当作服务端授权。",
+      "remediation": "维护精确来源允许列表，谨慎允许凭据，按响应动态设置 Vary，并保持服务端授权独立生效。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-1004",
+      "title": "敏感 Cookie 缺少 HttpOnly 属性",
+      "principle": "承载敏感状态的 Cookie 可被客户端脚本读取。",
+      "impact": "一旦发生 XSS，攻击脚本更容易窃取会话标识。",
+      "cause": "会话 Cookie 未设置 HttpOnly，或把前端无需读取的令牌暴露给 JavaScript。",
+      "remediation": "对无需脚本访问的敏感 Cookie 设置 HttpOnly，并结合输出编码和 CSP 降低 XSS 风险。",
+      "related_references": []
+    },
+    {
+      "id": "CWE-1188",
+      "title": "资源的不安全默认初始化",
+      "principle": "资源创建后的默认权限或安全状态比业务所需更宽松。",
+      "impact": "新部署的存储、账号、接口或服务可能在未显式加固前暴露。",
+      "cause": "依赖厂商默认值、初始化脚本缺少安全参数或失败后继续运行。",
+      "remediation": "采用默认拒绝和最小权限的基础设施模板，在创建时原子应用安全配置并验证失败即停止。",
+      "related_references": []
+    }
+  ]
+}

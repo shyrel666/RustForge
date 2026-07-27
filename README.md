@@ -33,7 +33,7 @@ RustForge 面向「已获授权但不知从何下手」的渗透初学者：内�
 | **AI 分析引擎** | 选中请求 → 接口用途 / 可疑参数 / 漏洞假设（**类型 + OWASP + CWE + 置信度 + 推理 + 验证步骤**）；提示词模板可定制，凭据类头自动脱敏 |
 | **渗透任务树** | AI 基于流量摘要生成引导树；每个节点回答四问（做什么/为什么/怎么做/怎样算完成）；**下一步 / 展开子任务 / 换个思路 / 手动标记状态**；与「发现」双向关联；vue-flow 可视化 |
 | **知识库** | OWASP Top 10 (2021) + 常见 CWE 中文卡片（原理 / 危害 / 成因 / 修复建议） |
-| **Repeater** | 手动改包重发，观察响应做人工验证（忽略证书错误、不自动跟随重定向） |
+| **Repeater** | 手动改包重发；后端强制 Scope 校验并保留判定快照（忽略证书错误、不自动跟随重定向） |
 | **发现管理** | 待验证 / 已确认 / 误报 状态流转，按来源(AI/规则)·严重度·置信度筛选 |
 | **学习报告** | 一键导出 Markdown：发现列表（含复现与修复建议）+ 渗透过程时间线 + 任务树概览 |
 | **设置中心** | BYO API Key / Base URL / 模型、代理端口、Scope、AI 全局开关、**token 用量与成本估算** |
@@ -42,7 +42,7 @@ RustForge 面向「已获授权但不知从何下手」的渗透初学者：内�
 
 - **人在回路**：AI 只做分析、解释、建议，绝不自动对目标发送攻击载荷；所有验证动作由你手动执行。
 - **误报素养**：每个 AI/规则结论都带置信度 + 推理过程 + 手动验证步骤；发现默认「待验证」，人工复核后才可标记确认。
-- **授权优先**：启动授权声明 + Scope 白名单 + 隐私开关（可全局禁用 AI，流量不外发）。
+- **授权优先**：代理与 Repeater 共用后端 `ScopePolicy`，无项目、空 Scope 或越界目标均拒绝；隐私开关可全局禁用 AI。
 
 ## 工作闭环
 
@@ -71,8 +71,8 @@ RustForge 面向「已获授权但不知从何下手」的渗透初学者：内�
 ## 快速开始
 
 **前置依赖**
-- [Node.js](https://nodejs.org/) 18+ 与 [pnpm](https://pnpm.io/)
-- [Rust](https://www.rust-lang.org/) 1.86+（stable 工具链）
+- [Node.js](https://nodejs.org/) 22.22.3 与 [pnpm](https://pnpm.io/) 9.15.9（版本由仓库固定）
+- [Rust](https://www.rust-lang.org/) 1.88+（日常开发工具链固定为 1.93.0）
 - Windows 10/11（自带 WebView2 运行时）
 - 其余 Tauri 前置见官方文档：<https://v2.tauri.app/start/prerequisites/>
 
@@ -80,6 +80,15 @@ RustForge 面向「已获授权但不知从何下手」的渗透初学者：内�
 ```bash
 pnpm install
 pnpm tauri dev
+```
+
+**提交前质量检查**
+```bash
+pnpm check
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+cargo +1.88.0 check --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
 **打包（生成安装包）**
@@ -98,11 +107,11 @@ pnpm tauri build   # 产物在 src-tauri/target/release/bundle/
 
 | 服务 | Base URL | 示例模型 |
 |------|----------|----------|
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
-| Kimi (Moonshot) | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
-| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
-| OpenRouter | `https://openrouter.ai/api/v1` | 任意兼容模型 |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-v4-flash` |
+| Kimi (Moonshot) | `https://api.moonshot.cn/v1` | `kimi-k3` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-max` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-5.6` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-5.6` |
 
 > 也可在设置中**全局禁用 AI**，此时任何数据都不会外发。
 
