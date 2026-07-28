@@ -2,7 +2,16 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { MagicStick, Refresh, Plus, Delete, Aim, FolderOpened, FullScreen } from "@element-plus/icons-vue";
+import {
+  MagicStick,
+  Refresh,
+  Plus,
+  Delete,
+  Edit,
+  Aim,
+  FolderOpened,
+  FullScreen,
+} from "@element-plus/icons-vue";
 import MarkdownIt from "markdown-it";
 import { VueFlow, useVueFlow, Handle, Position } from "@vue-flow/core";
 import type { Node, Edge } from "@vue-flow/core";
@@ -16,11 +25,16 @@ import {
   getTaskFindings,
   previewTaskAi,
   type AiContextPreview,
+  type CreateTaskNodeInput,
   type Finding,
   type TaskAiOperation,
   type TaskNode,
+  type TaskNodeType,
+  type TaskStatus,
+  type UpdateTaskNodeInput,
 } from "../api/tauri";
 import AiContextPreviewDialog from "../components/AiContextPreviewDialog.vue";
+import TaskPlanDiffDialog from "../components/TaskPlanDiffDialog.vue";
 import KnowledgeCard from "../components/KnowledgeCard.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import PageHeader from "../components/shell/PageHeader.vue";
@@ -37,10 +51,10 @@ interface PendingTaskAi {
   operation: TaskAiOperation;
   projectId: number;
   nodeId: number | null;
-  replace: boolean;
 }
 const aiPreviewVisible = ref(false);
 const pendingTaskAi = ref<PendingTaskAi | null>(null);
+const proposalVisible = ref(false);
 
 // ---------- 整齐树布局：层 = 深度（左→右），兄弟按 slot 纵向排列 ----------
 const COL_W = 250;
@@ -106,6 +120,18 @@ function buildFlow(): { nodes: Node[]; edges: Edge[] } {
         type: "smoothstep",
       });
     }
+    for (const prerequisiteId of n.prerequisite_ids) {
+      if (!pos.has(prerequisiteId)) continue;
+      edges.push({
+        id: `prerequisite-${prerequisiteId}-${n.id}`,
+        source: String(prerequisiteId),
+        target: String(n.id),
+        type: "smoothstep",
+        label: "前置",
+        style: { strokeDasharray: "5 4" },
+        labelStyle: { fontSize: 9 },
+      });
+    }
   }
   return { nodes, edges };
 }
@@ -142,12 +168,12 @@ onMounted(async () => {
 
 // 切换项目：重置选中并重新拉取
 watch(projectId, async (id) => {
-  tree.selectedId = null;
-  tree.lastNextId = null;
+  tree.activateProject(id);
+  pendingTaskAi.value = null;
+  aiPreviewVisible.value = false;
+  proposalVisible.value = false;
   if (id !== null) {
     await tree.refresh(id);
-  } else {
-    tree.nodes = [];
   }
   rebuild();
   await fitAll();
@@ -156,20 +182,37 @@ watch(projectId, async (id) => {
 // ---------- 选中节点的关联发现（双向关联展示） ----------
 const nodeFindings = ref<Finding[]>([]);
 const findingsLoading = ref(false);
+let nodeFindingsGeneration = 0;
 watch(
-  () => tree.selectedId,
-  async (id) => {
+  () => [tree.selectedId, projectId.value] as const,
+  async ([id, activeProjectId]) => {
+    const generation = ++nodeFindingsGeneration;
     nodeFindings.value = [];
-    if (id === null) return;
+    findingsLoading.value = false;
+    if (id === null || activeProjectId === null) return;
     const node = tree.nodes.find((n) => n.id === id);
-    if (!node || node.finding_ids.length === 0) return;
+    if (
+      !node ||
+      node.project_id !== activeProjectId ||
+      node.finding_ids.length === 0
+    )
+      return;
     findingsLoading.value = true;
     try {
-      nodeFindings.value = await getTaskFindings(id);
+      const result = await getTaskFindings(id);
+      if (
+        generation === nodeFindingsGeneration &&
+        projectId.value === activeProjectId &&
+        tree.selectedId === id
+      ) {
+        nodeFindings.value = result;
+      }
     } catch {
       /* 忽略，面板仅退化为不显示关联发现 */
     } finally {
-      findingsLoading.value = false;
+      if (generation === nodeFindingsGeneration) {
+        findingsLoading.value = false;
+      }
     }
   }
 );
@@ -185,17 +228,16 @@ function onPaneClick() {
 function openTaskAiPreview(
   operation: TaskAiOperation,
   projectId: number,
-  nodeId: number | null,
-  replace = false
+  nodeId: number | null
 ) {
-  pendingTaskAi.value = { operation, projectId, nodeId, replace };
+  pendingTaskAi.value = { operation, projectId, nodeId };
   aiPreviewVisible.value = true;
 }
 
-function doGenerate(replace: boolean) {
+function doGenerate() {
   const pid = projectId.value;
   if (pid === null) return;
-  openTaskAiPreview("generate", pid, null, replace);
+  openTaskAiPreview("generate", pid, null);
 }
 
 async function loadTaskAiPreview(): Promise<AiContextPreview> {
@@ -210,24 +252,34 @@ async function loadTaskAiPreview(): Promise<AiContextPreview> {
 
 async function confirmTaskAi(payload: { inputHash: string }) {
   const pending = pendingTaskAi.value;
-  if (!pending) return;
+  if (!pending || projectId.value !== pending.projectId) return;
   try {
     if (pending.operation === "generate") {
       const execution = await tree.generate(
         pending.projectId,
-        pending.replace,
         payload.inputHash
       );
-      tree.selectedId = null;
-      await fitAll();
+      if (
+        projectId.value !== pending.projectId ||
+        pendingTaskAi.value !== pending ||
+        execution.proposal.project_id !== pending.projectId
+      )
+        return;
+      proposalVisible.value = true;
       ElMessage.success(
-        `任务树已生成（${tree.nodes.length} 个节点，审计运行 #${execution.analysis_run_id}）`
+        `已生成测试计划 proposal #${execution.proposal.id}，请查看差异后确认`
       );
     } else if (pending.operation === "expand" && pending.nodeId !== null) {
       const execution = await tree.expand(pending.nodeId, payload.inputHash);
-      await fitAll();
+      if (
+        projectId.value !== pending.projectId ||
+        pendingTaskAi.value !== pending ||
+        execution.proposal.project_id !== pending.projectId
+      )
+        return;
+      proposalVisible.value = true;
       ElMessage.success(
-        `已展开 ${execution.affected_nodes} 个子任务（审计运行 #${execution.analysis_run_id}）`
+        `已生成展开 proposal #${execution.proposal.id}，尚未修改当前计划`
       );
     } else if (
       pending.operation === "alternative" &&
@@ -237,28 +289,64 @@ async function confirmTaskAi(payload: { inputHash: string }) {
         pending.nodeId,
         payload.inputHash
       );
+      if (
+        projectId.value !== pending.projectId ||
+        pendingTaskAi.value !== pending ||
+        execution.proposal.project_id !== pending.projectId
+      )
+        return;
+      proposalVisible.value = true;
       ElMessage.success(
-        `已换一种思路（审计运行 #${execution.analysis_run_id}，节点已重置为「待做」）`
+        `已生成替代方案 proposal #${execution.proposal.id}，人工状态保持不变`
       );
     }
   } catch (error) {
-    ElMessage.error(String(error));
+    if (!String(error).includes("[STALE_WORKSPACE]")) {
+      ElMessage.error(String(error));
+    }
   } finally {
-    pendingTaskAi.value = null;
+    if (pendingTaskAi.value === pending) pendingTaskAi.value = null;
   }
 }
 
 async function onRegenerate() {
+  doGenerate();
+}
+
+async function applyProposal() {
   try {
-    await ElMessageBox.confirm(
-      "重新生成会清空当前任务树，包括你手动添加/修改的节点与进度状态。确定继续？",
-      "重新生成任务树",
-      { type: "warning", confirmButtonText: "清空并重建", cancelButtonText: "取消" }
+    const result = await tree.applyProposal();
+    proposalVisible.value = false;
+    await fitAll();
+    ElMessage.success(
+      result.applied
+        ? `测试计划已合并为 revision ${result.revision}`
+        : `该 proposal 已应用，当前 revision ${result.revision}`
     );
-  } catch {
-    return; // 用户取消
+  } catch (error) {
+    const message = String(error);
+    if (message.includes("[STALE_WORKSPACE]")) return;
+    if (
+      message.includes("superseded") ||
+      message.includes("重新生成") ||
+      message.includes("保护边界已变化")
+    ) {
+      tree.pendingProposal = null;
+      proposalVisible.value = false;
+      if (projectId.value !== null) await tree.refresh(projectId.value);
+    }
+    ElMessage.error(message);
   }
-  await doGenerate(true);
+}
+
+async function rejectProposal() {
+  try {
+    await tree.rejectProposal();
+    proposalVisible.value = false;
+    ElMessage.info("已拒绝该测试计划 proposal");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
 }
 
 async function onNext() {
@@ -288,20 +376,38 @@ function onAlternative(id: number) {
   openTaskAiPreview("alternative", pid, id);
 }
 
-async function onSetStatus(id: number, status: string) {
+async function onSetStatus(id: number, status: TaskStatus) {
   try {
-    await tree.setStatus(id, status);
+    let reason: string | null = null;
+    if (["blocked", "skipped", "not_applicable"].includes(status)) {
+      const labels: Record<string, string> = {
+        blocked: "受阻原因",
+        skipped: "跳过原因",
+        not_applicable: "不适用原因",
+      };
+      const result = await ElMessageBox.prompt(
+        `请填写${labels[status]}，该内容会进入不可变计划事件。`,
+        "状态变更需要原因",
+        {
+          confirmButtonText: "确认",
+          cancelButtonText: "取消",
+          inputValidator: (value) => Boolean(value.trim()) || "原因不能为空",
+        }
+      );
+      reason = result.value.trim();
+    }
+    await tree.setStatus(id, status, reason);
   } catch (e) {
-    ElMessage.error(String(e));
+    if (e !== "cancel" && e !== "close") ElMessage.error(String(e));
   }
 }
 
 async function onDelete(id: number) {
   try {
     await ElMessageBox.confirm(
-      "删除该节点及其所有子节点？此操作不可撤销。",
-      "删除节点",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+      "归档该节点及其所有子节点？结构、状态、备注和 Evidence 关系会保留在历史中。",
+      "归档节点",
+      { type: "warning", confirmButtonText: "归档", cancelButtonText: "取消" }
     );
   } catch {
     return;
@@ -315,12 +421,42 @@ async function onDelete(id: number) {
 }
 
 // ---------- 手动添加节点 ----------
+interface TaskNodeForm {
+  node_type: TaskNodeType;
+  title: string;
+  description: string;
+  why: string;
+  how_to: string;
+  verify_criteria: string;
+  priority: number;
+  required_role: string;
+  required_session: string;
+  expected_observation: string;
+  actual_observation: string;
+  prerequisite_ids: number[];
+}
+
+const emptyNodeForm = (): TaskNodeForm => ({
+  node_type: "test",
+  title: "",
+  description: "",
+  why: "",
+  how_to: "",
+  verify_criteria: "",
+  priority: 50,
+  required_role: "",
+  required_session: "",
+  expected_observation: "",
+  actual_observation: "",
+  prerequisite_ids: [],
+});
+
 const addVisible = ref(false);
 const addParentId = ref<number | null>(null);
-const addForm = ref({ title: "", description: "", why: "", how_to: "", verify_criteria: "" });
+const addForm = ref<TaskNodeForm>(emptyNodeForm());
 function openAdd(parentId: number | null) {
   addParentId.value = parentId;
-  addForm.value = { title: "", description: "", why: "", how_to: "", verify_criteria: "" };
+  addForm.value = emptyNodeForm();
   addVisible.value = true;
 }
 async function submitAdd() {
@@ -331,13 +467,78 @@ async function submitAdd() {
     return;
   }
   try {
-    await tree.create(pid, addParentId.value, { ...addForm.value });
+    const input: CreateTaskNodeInput = {
+      project_id: pid,
+      parent_id: addParentId.value,
+      ...addForm.value,
+    };
+    await tree.create(input);
     addVisible.value = false;
     await fitAll();
-    ElMessage.success("已添加节点");
+    ElMessage.success("已添加并锁定人工节点");
   } catch (e) {
     ElMessage.error(String(e));
   }
+}
+
+// ---------- 人工编辑与字段锁 ----------
+const editVisible = ref(false);
+const editForm = ref<UpdateTaskNodeInput | null>(null);
+function openEdit(node: TaskNode) {
+  editForm.value = {
+    node_id: node.id,
+    node_type: node.node_type,
+    title: node.title,
+    description: node.description,
+    why: node.why,
+    how_to: node.how_to,
+    verify_criteria: node.verify_criteria,
+    priority: node.priority,
+    required_role: node.required_role,
+    required_session: node.required_session,
+    expected_observation: node.expected_observation,
+    actual_observation: node.actual_observation,
+    prerequisite_ids: [...node.prerequisite_ids],
+    locked_fields: [...node.locked_fields],
+  };
+  editVisible.value = true;
+}
+
+async function submitEdit() {
+  if (!editForm.value?.title.trim()) {
+    ElMessage.warning("标题不能为空");
+    return;
+  }
+  try {
+    const updated = await tree.update(editForm.value);
+    tree.selectedId = updated.id;
+    editVisible.value = false;
+    ElMessage.success("节点与字段锁已更新");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+function prerequisiteOptions(excludeId: number | null) {
+  if (excludeId === null) return tree.nodes;
+  const descendants = new Set<number>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of tree.nodes) {
+      if (
+        node.parent_id !== null &&
+        (node.parent_id === excludeId || descendants.has(node.parent_id)) &&
+        !descendants.has(node.id)
+      ) {
+        descendants.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  return tree.nodes.filter(
+    (node) => node.id !== excludeId && !descendants.has(node.id)
+  );
 }
 
 function gotoFindings() {
@@ -345,27 +546,68 @@ function gotoFindings() {
 }
 
 // ---------- 展示辅助 ----------
+const NODE_TYPE_OPTIONS: Array<{ value: TaskNodeType; label: string }> = [
+  { value: "hypothesis", label: "假设" },
+  { value: "test", label: "测试" },
+  { value: "decision", label: "决策" },
+  { value: "manual_note", label: "人工备注" },
+];
+const NODE_TYPE_LABEL: Record<TaskNodeType, string> = Object.fromEntries(
+  NODE_TYPE_OPTIONS.map((option) => [option.value, option.label])
+) as Record<TaskNodeType, string>;
+const SOURCE_LABEL = { ai: "AI proposal", rule: "规则", manual: "人工" };
+const UPDATE_REASON_LABEL: Record<string, string> = {
+  new_task_evidence: "测试节点新增 Evidence",
+  new_finding_evidence: "Finding 新增 Evidence",
+};
+const LOCKABLE_FIELDS = [
+  ["parent", "父级"],
+  ["node_type", "节点类型"],
+  ["title", "标题"],
+  ["description", "做什么"],
+  ["why", "为什么"],
+  ["how_to", "怎么做"],
+  ["verify_criteria", "完成标准"],
+  ["priority", "优先级"],
+  ["required_role", "所需角色"],
+  ["required_session", "所需会话"],
+  ["expected_observation", "预期观察"],
+  ["actual_observation", "实际观察"],
+  ["prerequisites", "前置依赖"],
+  ["standard_references", "标准引用"],
+  ["findings", "Finding 关系"],
+  ["sort_order", "显示顺序"],
+] as const;
 const STATUS_META: Record<string, { label: string; type: string }> = {
   todo: { label: "待做", type: "info" },
   in_progress: { label: "进行中", type: "primary" },
   done: { label: "完成", type: "success" },
   blocked: { label: "受阻", type: "danger" },
+  skipped: { label: "已跳过", type: "warning" },
+  not_applicable: { label: "不适用", type: "info" },
 };
 // 与后端状态机 tree/state.rs 的白名单保持一致
-const TRANSITIONS: Record<string, string[]> = {
-  todo: ["in_progress", "blocked"],
-  in_progress: ["done", "blocked", "todo"],
-  blocked: ["todo", "in_progress"],
+const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  todo: ["in_progress", "blocked", "skipped", "not_applicable"],
+  in_progress: ["done", "blocked", "skipped", "not_applicable", "todo"],
+  blocked: ["todo", "in_progress", "skipped", "not_applicable"],
+  skipped: ["todo", "not_applicable"],
+  not_applicable: ["todo"],
   done: ["todo"],
 };
 const TRANSITION_LABEL: Record<string, string> = {
   in_progress: "进行中",
   done: "完成",
   blocked: "受阻",
+  skipped: "跳过",
+  not_applicable: "不适用",
   todo: "重置",
 };
 function statusMeta(s: string) {
   return STATUS_META[s] ?? { label: s, type: "info" };
+}
+function nodeTitle(id: number) {
+  return tree.nodes.find((node) => node.id === id)?.title ?? `#${id}`;
 }
 function severityTag(s: string): string {
   const map: Record<string, string> = {
@@ -388,13 +630,16 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 <template>
   <div class="tree-page rf-page rf-page--inset">
     <PageHeader
-      title="任务树"
-      description="基于流量摘要生成引导式渗透任务，每一步由你手动执行。"
+      title="测试计划"
+      description="版本化、证据驱动的测试计划；AI 只提出差异，由你确认后合并。"
     />
     <div class="rf-toolbar">
       <div v-if="total > 0" class="rf-toolbar-group">
         <el-progress :percentage="progress" :stroke-width="8" status="success" class="progress" />
-        <span class="prog-text">{{ tree.doneCount }} / {{ total }} 完成</span>
+        <span class="prog-text">{{ tree.doneCount }} / {{ total }} 已终结</span>
+        <el-tag v-if="tree.plan" size="small" effect="plain">
+          revision {{ tree.plan.revision }}
+        </el-tag>
       </div>
       <div class="rf-filters">
         <div class="rf-toolbar-group">
@@ -404,8 +649,8 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
               :icon="MagicStick"
               :loading="tree.aiBusy === 'generate'"
               :disabled="aiDisabled"
-              @click="doGenerate(false)"
-            >AI 生成任务树</el-button>
+              @click="doGenerate"
+            >AI 生成测试计划</el-button>
           </template>
           <template v-else>
             <el-button type="primary" :disabled="projectId === null" @click="onNext">
@@ -419,7 +664,14 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
               :loading="tree.aiBusy === 'generate'"
               :disabled="aiDisabled"
               @click="onRegenerate"
-            >重新生成</el-button>
+            >生成更新提案</el-button>
+            <el-button
+              v-if="tree.pendingProposal"
+              type="warning"
+              @click="proposalVisible = true"
+            >
+              查看 proposal #{{ tree.pendingProposal.id }}
+            </el-button>
             <el-button :icon="FullScreen" @click="fitAll">适应视图</el-button>
           </template>
         </div>
@@ -429,15 +681,27 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
     <EmptyState
       v-if="!project.current"
       title="尚未选择项目"
-      description="请先在顶部创建或选择项目。任务树基于该项目已抓取的流量摘要生成。"
+      description="请先在顶部创建或选择项目。测试计划基于该项目流量、Finding 和 Evidence 生成。"
     >
       <template #icon><el-icon :size="20"><FolderOpened /></el-icon></template>
     </EmptyState>
     <el-alert v-else-if="!settings.ai_enabled" type="info" :closable="false" class="hint" show-icon>
       AI 功能已在设置中全局禁用。你仍可手动添加节点并推进状态。
     </el-alert>
+    <el-alert
+      v-else-if="tree.plan?.needs_update"
+      type="warning"
+      :closable="false"
+      class="hint"
+      show-icon
+    >
+      新 Evidence 已到达，测试计划可更新（{{
+        UPDATE_REASON_LABEL[tree.plan.update_reason] ?? tree.plan.update_reason
+      }}）。
+      当前计划不会自动变化，请点击“生成更新提案”。
+    </el-alert>
     <el-alert v-else type="info" :closable="false" class="hint" show-icon>
-      人在回路：任务树只做引导——每一步由你手动执行。点「下一步」定位当前该做什么；带链接标记的节点关联了发现。
+      人在回路：依赖满足后，按风险/优先级、Evidence 缺口和创建时间确定“下一步”；AI 不能覆盖人工进度、锁或 Evidence。
     </el-alert>
 
     <!-- 主体：画布 + 详情面板 -->
@@ -468,8 +732,13 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
               <div class="tnode-title">{{ data.node.title }}</div>
               <div class="tnode-foot">
                 <span class="tnode-badge">{{ statusMeta(data.node.status).label }}</span>
+                <span>{{ NODE_TYPE_LABEL[data.node.node_type] }}</span>
+                <span>P{{ data.node.priority }}</span>
                 <span v-if="data.node.finding_ids.length" class="tnode-link" title="关联发现数">
                   <el-icon :size="12"><Aim /></el-icon> {{ data.node.finding_ids.length }}
+                </span>
+                <span v-if="data.node.evidence_ids.length" class="tnode-evidence" title="关联 Evidence 数">
+                  E{{ data.node.evidence_ids.length }}
                 </span>
                 <span class="tnode-spacer" />
                 <button
@@ -490,8 +759,8 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
         <div v-if="total === 0 && !tree.loading" class="empty-overlay">
           <EmptyState
             class="empty-on-canvas"
-            title="还没有任务树"
-            description="AI 会读取当前项目的流量侦察摘要，生成引导式任务树。每个节点说明做什么、为什么、怎么手动做、怎样算完成。"
+            title="还没有测试计划"
+            description="AI 会读取流量摘要、Finding 和当前 revision，先生成 proposal 与 diff；确认后才创建节点。"
           >
             <template #icon><el-icon :size="20"><MagicStick /></el-icon></template>
             <template #action>
@@ -527,6 +796,50 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
         </div>
 
         <div class="scroll">
+          <div class="node-meta">
+            <el-tag size="small" effect="plain">
+              {{ NODE_TYPE_LABEL[tree.selected.node_type] }}
+            </el-tag>
+            <el-tag size="small" effect="plain">P{{ tree.selected.priority }}</el-tag>
+            <el-tag size="small" effect="plain">
+              {{ SOURCE_LABEL[tree.selected.source] }}
+            </el-tag>
+            <el-tag v-if="tree.selected.evidence_ids.length" size="small" type="success">
+              Evidence {{ tree.selected.evidence_ids.length }}
+            </el-tag>
+          </div>
+          <div class="identity-line">
+            <code>{{ tree.selected.stable_key }}</code>
+            <span>更新于 revision {{ tree.selected.updated_revision }}</span>
+          </div>
+
+          <div v-if="tree.selected.blocker_reason" class="field field-reason">
+            <div class="field-label">状态原因（可追溯）</div>
+            <div class="field-body">{{ tree.selected.blocker_reason }}</div>
+          </div>
+          <div
+            v-if="tree.selected.required_role || tree.selected.required_session"
+            class="field"
+          >
+            <div class="field-label">执行上下文</div>
+            <div class="field-body">
+              角色：{{ tree.selected.required_role || "未指定" }}；
+              会话：{{ tree.selected.required_session || "未指定" }}
+            </div>
+          </div>
+          <div v-if="tree.selected.prerequisite_ids.length" class="field">
+            <div class="field-label">前置依赖</div>
+            <div class="reference-list">
+              <el-tag
+                v-for="id in tree.selected.prerequisite_ids"
+                :key="id"
+                size="small"
+                effect="plain"
+              >
+                {{ nodeTitle(id) }}
+              </el-tag>
+            </div>
+          </div>
           <!-- 为什么：直接展示存储字段，不消耗 token -->
           <div v-if="tree.selected.why" class="field field-why">
             <div class="field-label">为什么做这步</div>
@@ -543,6 +856,28 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
           <div v-if="tree.selected.verify_criteria" class="field">
             <div class="field-label">怎样算完成</div>
             <div class="md" v-html="md.render(tree.selected.verify_criteria)" />
+          </div>
+          <div v-if="tree.selected.expected_observation" class="field">
+            <div class="field-label">预期观察</div>
+            <div class="field-body">{{ tree.selected.expected_observation }}</div>
+          </div>
+          <div v-if="tree.selected.actual_observation" class="field">
+            <div class="field-label">实际观察（人工）</div>
+            <div class="field-body">{{ tree.selected.actual_observation }}</div>
+          </div>
+          <div v-if="tree.selected.locked_fields.length" class="field">
+            <div class="field-label">AI 不得覆盖的字段</div>
+            <div class="reference-list">
+              <el-tag
+                v-for="field in tree.selected.locked_fields"
+                :key="field"
+                size="small"
+                type="warning"
+                effect="plain"
+              >
+                {{ field }}
+              </el-tag>
+            </div>
           </div>
 
           <div v-if="tree.selected.standard_references.length" class="field">
@@ -598,13 +933,14 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
             @click="onAlternative(tree.selected.id)"
           >换个思路</el-button>
           <el-button size="small" :icon="Plus" @click="openAdd(tree.selected.id)">子任务</el-button>
+          <el-button size="small" :icon="Edit" @click="openEdit(tree.selected)">编辑 / 锁定</el-button>
           <el-button
             size="small"
             type="danger"
             :icon="Delete"
             plain
             @click="onDelete(tree.selected.id)"
-          >删除</el-button>
+          >归档</el-button>
         </div>
       </div>
     </div>
@@ -613,11 +949,47 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
     <el-dialog
       v-model="addVisible"
       :title="addParentId === null ? '添加阶段（顶层节点）' : '添加子任务'"
-      width="540px"
+      width="640px"
     >
-      <el-form label-width="88px">
+      <el-form label-width="100px">
+        <el-form-item label="节点类型" required>
+          <el-select v-model="addForm.node_type">
+            <el-option
+              v-for="option in NODE_TYPE_OPTIONS"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="标题" required>
           <el-input v-model="addForm.title" placeholder="一句话概括这一步" />
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-slider v-model="addForm.priority" :min="0" :max="100" show-input />
+          <div class="form-hint">数字越小越优先，0 为最高。</div>
+        </el-form-item>
+        <el-form-item label="所需角色">
+          <el-input v-model="addForm.required_role" placeholder="例如：admin / anonymous" />
+        </el-form-item>
+        <el-form-item label="所需会话">
+          <el-input v-model="addForm.required_session" placeholder="例如：管理员登录态" />
+        </el-form-item>
+        <el-form-item label="前置依赖">
+          <el-select
+            v-model="addForm.prerequisite_ids"
+            multiple
+            filterable
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="node in prerequisiteOptions(null)"
+              :key="node.id"
+              :label="node.title"
+              :value="node.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="做什么">
           <el-input v-model="addForm.description" type="textarea" :rows="2" />
@@ -636,10 +1008,101 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
         <el-form-item label="完成标准">
           <el-input v-model="addForm.verify_criteria" type="textarea" :rows="2" />
         </el-form-item>
+        <el-form-item label="预期观察">
+          <el-input v-model="addForm.expected_observation" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="实际观察">
+          <el-input v-model="addForm.actual_observation" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-alert type="info" :closable="false">
+          人工创建字段会默认全部锁定，后续 AI proposal 只能保留该节点。
+        </el-alert>
       </el-form>
       <template #footer>
         <el-button @click="addVisible = false">取消</el-button>
         <el-button type="primary" @click="submitAdd">添加</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="editVisible" title="编辑节点与 AI 字段锁" width="680px">
+      <el-form v-if="editForm" label-width="110px">
+        <el-form-item label="节点类型" required>
+          <el-select v-model="editForm.node_type">
+            <el-option
+              v-for="option in NODE_TYPE_OPTIONS"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="标题" required>
+          <el-input v-model="editForm.title" />
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-slider v-model="editForm.priority" :min="0" :max="100" show-input />
+        </el-form-item>
+        <el-form-item label="所需角色">
+          <el-input v-model="editForm.required_role" />
+        </el-form-item>
+        <el-form-item label="所需会话">
+          <el-input v-model="editForm.required_session" />
+        </el-form-item>
+        <el-form-item label="前置依赖">
+          <el-select
+            v-model="editForm.prerequisite_ids"
+            multiple
+            filterable
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="node in prerequisiteOptions(editForm.node_id)"
+              :key="node.id"
+              :label="node.title"
+              :value="node.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="做什么">
+          <el-input v-model="editForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="为什么">
+          <el-input v-model="editForm.why" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="怎么做">
+          <el-input v-model="editForm.how_to" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item label="完成标准">
+          <el-input v-model="editForm.verify_criteria" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="预期观察">
+          <el-input v-model="editForm.expected_observation" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="实际观察">
+          <el-input v-model="editForm.actual_observation" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="锁定字段">
+          <el-select
+            v-model="editForm.locked_fields"
+            multiple
+            filterable
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="[value, label] in LOCKABLE_FIELDS"
+              :key="value"
+              :label="label"
+              :value="value"
+            />
+          </el-select>
+          <div class="form-hint">选中的字段不会被后续 AI proposal 覆盖。</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitEdit">保存并记录 revision</el-button>
       </template>
     </el-dialog>
 
@@ -648,8 +1111,15 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
       :load-preview="loadTaskAiPreview"
       :allow-policy-editing="false"
       confirm-text="确认并调用 AI"
-      description="任务规划只发送下方经过脱敏和长度限制的项目摘要；确认时后端会从数据库重新构建内容，并核对供应商、提示词和消息哈希。"
+      description="测试计划 AI 只发送下方经脱敏和长度限制的摘要及当前 revision；调用结果仍需在 diff 对话框中人工确认。"
       @confirm="confirmTaskAi"
+    />
+    <TaskPlanDiffDialog
+      v-model="proposalVisible"
+      :proposal="tree.pendingProposal"
+      :loading="tree.applyingProposal"
+      @confirm="applyProposal"
+      @reject="rejectProposal"
     />
   </div>
 </template>
@@ -744,6 +1214,13 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 .st-blocked {
   border-left-color: var(--rf-danger);
 }
+.st-skipped {
+  border-left-color: var(--rf-warning);
+}
+.st-not_applicable {
+  border-left-color: var(--rf-border-strong);
+  opacity: 0.78;
+}
 .tnode-title {
   font-size: 13px;
   line-height: 1.35;
@@ -771,6 +1248,10 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   align-items: center;
   gap: 2px;
   color: var(--rf-warning);
+}
+.tnode-evidence {
+  color: var(--rf-success);
+  font-weight: 600;
 }
 .tnode-spacer {
   flex: 1;
@@ -867,6 +1348,25 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   overflow: auto;
   padding: var(--rf-space-3);
 }
+.node-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+.identity-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--rf-text-muted);
+  font-size: 10px;
+}
+.identity-line code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .field {
   margin-bottom: 14px;
 }
@@ -885,6 +1385,17 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
 .field-why .field-body {
   font-size: 13px;
   line-height: 1.7;
+  white-space: pre-wrap;
+}
+.field-reason {
+  padding: 8px 10px;
+  border-left: 3px solid var(--rf-warning);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+}
+.field-body {
+  font-size: 13px;
+  line-height: 1.6;
   white-space: pre-wrap;
 }
 .reference-list {
@@ -944,5 +1455,11 @@ const aiDisabled = computed(() => projectId.value === null || !settings.ai_enabl
   background: var(--rf-bg-hover);
   padding: 1px 4px;
   border-radius: 3px;
+}
+.form-hint {
+  width: 100%;
+  margin-top: 3px;
+  color: var(--rf-text-muted);
+  font-size: 11px;
 }
 </style>

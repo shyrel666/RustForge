@@ -1,5 +1,5 @@
 //! LLM 输出的通用 JSON 提取：剥 Markdown 围栏、截取首个 JSON 片段。
-//! analyzer（单请求分析）和 planner（任务树规划）共用。
+//! analyzer（单请求分析）和 planner（测试计划规划）共用。
 
 use serde::de::DeserializeOwned;
 

@@ -81,6 +81,21 @@ impl CaptureHandle {
         }
     }
 
+    /// Observe a body data chunk outside Hyper's `Body` wrapper. Repeater uses
+    /// this while pulling reqwest chunks so it shares the proxy's exact byte
+    /// limits and decode semantics.
+    pub(crate) fn observe_chunk(&self, chunk: &[u8]) {
+        self.record(chunk);
+    }
+
+    pub(crate) fn mark_complete(&self) {
+        self.mark(StreamCompletion::Complete);
+    }
+
+    pub(crate) fn mark_error(&self) {
+        self.mark(StreamCompletion::Error);
+    }
+
     fn observed_wire_size(&self) -> u64 {
         self.state
             .lock()
@@ -114,6 +129,39 @@ impl CaptureHandle {
             .lock()
             .map(|state| state.peak_buffered)
             .unwrap_or_default()
+    }
+}
+
+/// Capture an already materialized request body with the same bounded
+/// semantics used by the streaming proxy. Only the configured prefix is copied.
+pub(crate) fn capture_complete_bytes(bytes: &[u8], metadata: &BodyMetadata) -> CapturedBody {
+    let handle = CaptureHandle::default();
+    handle.observe_chunk(bytes);
+    handle.mark_complete();
+    handle.finish(metadata)
+}
+
+/// A bounded snapshot of the exact body bytes supplied to the HTTP client.
+///
+/// Unlike [`CapturedBody`], this representation is never decoded. Repeater
+/// keeps it separately from the decoded inspection preview so a restored run
+/// cannot accidentally combine decoded bytes with the original
+/// `Content-Encoding` header.
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedWireBody {
+    pub bytes: Vec<u8>,
+    pub wire_size: i64,
+    pub captured_size: i64,
+    pub truncated: bool,
+}
+
+pub(crate) fn capture_complete_wire_bytes(bytes: &[u8]) -> CapturedWireBody {
+    let retained = bytes.len().min(MAX_WIRE_CAPTURE_BYTES);
+    CapturedWireBody {
+        bytes: bytes[..retained].to_vec(),
+        wire_size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+        captured_size: i64::try_from(retained).unwrap_or(i64::MAX),
+        truncated: bytes.len() > retained,
     }
 }
 

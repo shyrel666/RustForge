@@ -99,6 +99,212 @@ const V1_TABLES: &[(&str, &[&str])] = &[
             "reasoning",
             "verify_steps",
             "status",
+            "analyst_notes",
+            "fingerprint",
+            "occurrences",
+            "last_seen_at",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "finding_events",
+        &[
+            "id",
+            "finding_id",
+            "event_type",
+            "old_value",
+            "new_value",
+            "reason",
+            "actor",
+            "created_at",
+        ],
+    ),
+    (
+        "replay_sessions",
+        &[
+            "id",
+            "project_id",
+            "title",
+            "source_traffic_id",
+            "tls_policy",
+            "is_selected",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    ("replay_run_delete_guards", &["session_id", "project_id"]),
+    (
+        "replay_attempts",
+        &[
+            "id",
+            "execution_token",
+            "session_id",
+            "project_id",
+            "method",
+            "url",
+            "request_headers",
+            "request_wire_body",
+            "req_wire_size",
+            "req_wire_captured_size",
+            "req_wire_truncated",
+            "request_input",
+            "request_body",
+            "req_captured_size",
+            "req_truncated",
+            "req_decode_status",
+            "tls_policy",
+            "scope_decision",
+            "request_hash",
+            "req_body_hash",
+            "created_at",
+        ],
+    ),
+    (
+        "replay_runs",
+        &[
+            "id",
+            "attempt_id",
+            "session_id",
+            "project_id",
+            "method",
+            "url",
+            "request_headers",
+            "request_wire_body",
+            "req_wire_captured_size",
+            "req_wire_truncated",
+            "request_input",
+            "request_body",
+            "req_wire_size",
+            "req_captured_size",
+            "req_truncated",
+            "req_decode_status",
+            "tls_policy",
+            "scope_allowed",
+            "scope_decision",
+            "outcome",
+            "error_code",
+            "error_message",
+            "status",
+            "status_text",
+            "response_headers",
+            "response_body",
+            "resp_wire_size",
+            "resp_captured_size",
+            "resp_truncated",
+            "resp_decode_status",
+            "duration_ms",
+            "request_hash",
+            "req_body_hash",
+            "response_hash",
+            "resp_body_hash",
+            "created_at",
+        ],
+    ),
+    (
+        "finding_traffic",
+        &["finding_id", "traffic_id", "first_seen_at"],
+    ),
+    (
+        "evidence",
+        &[
+            "id",
+            "project_id",
+            "source_type",
+            "source_id",
+            "observation",
+            "redacted_snapshot",
+            "content_hash",
+            "qualifies_for_confirmation",
+            "created_by",
+            "created_at",
+        ],
+    ),
+    (
+        "finding_evidence",
+        &[
+            "finding_id",
+            "evidence_id",
+            "accepted",
+            "acceptance_note",
+            "accepted_by",
+            "accepted_at",
+            "linked_at",
+        ],
+    ),
+    (
+        "rule_evaluations",
+        &[
+            "id",
+            "project_id",
+            "traffic_id",
+            "pack_id",
+            "pack_version",
+            "status",
+            "hit_count",
+            "finding_count",
+            "duration_ms",
+            "diagnostics",
+            "created_at",
+        ],
+    ),
+    (
+        "finding_rule_hits",
+        &[
+            "id",
+            "finding_id",
+            "evaluation_id",
+            "traffic_id",
+            "pack_id",
+            "pack_version",
+            "rule_id",
+            "rule_version",
+            "field_path",
+            "evidence",
+            "confidence",
+            "incomplete_evidence",
+            "hit_fingerprint",
+            "created_at",
+        ],
+    ),
+    (
+        "task_plan_proposals",
+        &[
+            "id",
+            "project_id",
+            "proposal_key",
+            "operation",
+            "target_node_id",
+            "base_revision",
+            "analysis_run_id",
+            "status",
+            "proposed_plan",
+            "diff_json",
+            "created_at",
+            "applied_at",
+        ],
+    ),
+    ("task_plan_delete_guards", &["project_id"]),
+    (
+        "test_plans",
+        &[
+            "project_id",
+            "revision",
+            "needs_update",
+            "update_reason",
+            "last_applied_proposal_id",
+            "created_at",
+            "updated_at",
+        ],
+    ),
+    (
+        "task_plan_revisions",
+        &[
+            "project_id",
+            "revision",
+            "proposal_id",
+            "actor",
+            "summary",
             "created_at",
         ],
     ),
@@ -108,18 +314,37 @@ const V1_TABLES: &[(&str, &[&str])] = &[
             "id",
             "project_id",
             "parent_id",
+            "stable_key",
+            "node_type",
             "title",
             "description",
             "why",
             "how_to",
             "verify_criteria",
+            "priority",
+            "required_role",
+            "required_session",
+            "expected_observation",
+            "actual_observation",
+            "blocker_reason",
             "standard_references",
+            "source",
+            "locked_fields",
             "status",
             "sort_order",
+            "archived",
+            "archived_at",
+            "created_revision",
+            "updated_revision",
             "created_at",
             "updated_at",
         ],
     ),
+    (
+        "task_prerequisites",
+        &["task_id", "prerequisite_id", "created_at"],
+    ),
+    ("task_evidence", &["task_id", "evidence_id", "linked_at"]),
     (
         "analyses",
         &[
@@ -136,22 +361,107 @@ const V1_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     ("task_findings", &["task_id", "finding_id"]),
+    (
+        "task_plan_events",
+        &[
+            "id",
+            "project_id",
+            "revision",
+            "event_type",
+            "proposal_id",
+            "node_id",
+            "details_json",
+            "actor",
+            "created_at",
+        ],
+    ),
 ];
 
 const V1_INDEXES: &[&str] = &[
     "idx_traffic_project",
+    "idx_replay_sessions_project",
+    "idx_replay_sessions_selected",
+    "idx_replay_attempts_session",
+    "idx_replay_runs_session",
+    "idx_replay_runs_project",
     "idx_prompt_versions_prompt",
     "idx_analysis_runs_traffic",
     "idx_findings_project",
+    "idx_findings_fingerprint",
+    "idx_finding_events_finding",
+    "idx_finding_traffic_finding",
+    "idx_evidence_source",
+    "idx_finding_evidence_evidence",
+    "idx_rule_evaluations_traffic",
+    "idx_finding_rule_hits_finding",
+    "idx_finding_rule_hits_evaluation",
+    "idx_task_plan_proposals_project",
     "idx_task_nodes_project",
+    "idx_task_nodes_stable_key",
+    "idx_task_nodes_actionable",
+    "idx_task_prerequisites_reverse",
+    "idx_task_evidence_evidence",
     "idx_analyses_traffic",
+    "idx_task_plan_events_project",
+    "idx_task_plan_events_node",
 ];
 
 const V1_TRIGGERS: &[&str] = &[
     "trg_prompt_versions_immutable_update",
     "trg_prompt_versions_immutable_delete",
+    "trg_replay_session_source_project_insert",
+    "trg_replay_session_source_project_update",
+    "trg_replay_session_prepare_run_delete",
+    "trg_replay_session_finish_run_delete",
+    "trg_project_prepare_replay_run_delete",
+    "trg_project_finish_replay_run_delete",
+    "trg_replay_attempt_same_project_insert",
+    "trg_replay_attempts_immutable_update",
+    "trg_replay_attempts_immutable_delete",
+    "trg_replay_run_same_project_insert",
+    "trg_replay_runs_immutable_update",
+    "trg_replay_runs_immutable_delete",
+    "trg_replay_session_blocks_pending_attempt_delete",
+    "trg_project_blocks_pending_replay_attempt_delete",
+    "trg_analysis_run_traffic_project_insert",
+    "trg_analysis_run_traffic_project_update",
+    "trg_finding_sources_same_project_insert",
+    "trg_finding_sources_same_project_update",
+    "trg_finding_initial_status_pending",
+    "trg_finding_initial_event",
+    "trg_finding_events_immutable_update",
+    "trg_finding_events_immutable_delete",
+    "trg_finding_rejected_event_requires_reason",
+    "trg_finding_status_requires_event",
+    "trg_finding_severity_requires_event",
+    "trg_finding_notes_requires_event",
+    "trg_finding_traffic_same_project_insert",
+    "trg_finding_traffic_same_project_update",
+    "trg_evidence_immutable_update",
+    "trg_evidence_immutable_delete",
+    "trg_finding_evidence_same_project_insert",
+    "trg_finding_evidence_initial_unaccepted",
+    "trg_finding_evidence_acceptance_requires_event",
+    "trg_finding_evidence_metadata_requires_transition",
+    "trg_finding_evidence_immutable_delete",
+    "trg_confirmed_finding_keeps_accepted_evidence_update",
+    "trg_confirmed_finding_keeps_accepted_evidence_delete",
+    "trg_finding_confirmed_requires_evidence",
     "trg_ai_finding_requires_valid_run_insert",
     "trg_ai_finding_requires_valid_run_update",
+    "trg_project_prepare_task_plan_delete",
+    "trg_project_finish_task_plan_delete",
+    "trg_task_nodes_assign_stable_key",
+    "trg_task_nodes_parent_same_project_insert",
+    "trg_task_nodes_parent_same_project_update",
+    "trg_task_prerequisites_valid_insert",
+    "trg_task_prerequisites_immutable_update",
+    "trg_task_evidence_same_project_insert",
+    "trg_task_findings_same_project_insert",
+    "trg_task_plan_event_context_insert",
+    "trg_task_plan_events_immutable_update",
+    "trg_task_plan_events_immutable_delete",
+    "trg_task_status_requires_event",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,5 +826,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(run_traffic, None);
+    }
+
+    #[test]
+    fn project_scoped_relationships_reject_cross_project_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(id, name) VALUES(1, 'a'), (2, 'b');
+             INSERT INTO traffic(id, project_id, method, host, url) VALUES
+                 (11, 1, 'GET', 'a.test', 'https://a.test/'),
+                 (22, 2, 'GET', 'b.test', 'https://b.test/');
+             INSERT INTO findings(id, project_id, traffic_id, source, title)
+                 VALUES(31, 1, 11, 'rule', 'a finding');
+             INSERT INTO test_plans(project_id, revision) VALUES(1, 0), (2, 0);
+             INSERT INTO task_nodes(id, project_id, title)
+                 VALUES(41, 1, 'a task');",
+        )
+        .unwrap();
+
+        assert!(conn
+            .execute(
+                "INSERT INTO finding_traffic(finding_id, traffic_id) VALUES(31, 22)",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO findings(project_id, traffic_id, source, title)
+                 VALUES(1, 22, 'rule', 'cross-project source')",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO task_plan_events(
+                     project_id, revision, event_type, node_id, details_json, actor
+                 ) VALUES(
+                     2, 0, 'status_changed', 41,
+                     '{\"from\":\"todo\",\"to\":\"in_progress\"}', 'attacker'
+                 )",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO task_plan_events(
+                     project_id, revision, event_type, node_id, details_json, actor
+                 ) VALUES(
+                     1, 999, 'status_changed', 41,
+                     '{\"from\":\"todo\",\"to\":\"in_progress\"}', 'attacker'
+                 )",
+                [],
+            )
+            .is_err());
+
+        conn.execute_batch(
+            "INSERT INTO finding_traffic(finding_id, traffic_id) VALUES(31, 11);
+             INSERT INTO task_plan_events(
+                 project_id, revision, event_type, node_id, details_json, actor
+             ) VALUES(
+                 1, 0, 'status_changed', 41,
+                 '{\"from\":\"todo\",\"to\":\"in_progress\"}', 'analyst'
+             );
+             UPDATE task_nodes
+             SET status='in_progress', updated_revision=0
+             WHERE id=41;",
+        )
+        .unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM task_nodes WHERE id=41", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "in_progress");
     }
 }

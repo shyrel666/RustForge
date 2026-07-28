@@ -64,7 +64,10 @@ pub struct TrafficDetail {
 pub struct Finding {
     pub id: i64,
     pub project_id: i64,
+    /// 首次命中的流量。删除该流量后置空，Finding 本身保留。
     pub traffic_id: Option<i64>,
+    /// AI 假设的审计运行；规则 Finding 为空。删除原 traffic 不影响该运行。
+    pub analysis_run_id: Option<i64>,
     /// 'ai' | 'rule'
     pub source: String,
     pub title: String,
@@ -80,6 +83,93 @@ pub struct Finding {
     pub verify_steps: String,
     /// pending/confirmed/rejected
     pub status: String,
+    /// 人工复核备注；与模型置信度、严重度分别维护。
+    pub analyst_notes: String,
+    /// 规则命中的稳定身份（项目 + 规则 + 接口 + 字段）。AI Finding 暂为空。
+    pub fingerprint: Option<String>,
+    /// 同一身份累计关联过的不同流量数；尚未删除的条目见 `finding_traffic`。
+    pub occurrences: i64,
+    pub last_seen_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Finding {
+    /// `from_row` 期望的列顺序。所有查询都用它，避免各处 SELECT 漂移。
+    pub const COLUMNS: &'static str =
+        "id, project_id, traffic_id, source, title, vuln_type, standard_references, \
+         severity, confidence, reasoning, verify_steps, status, fingerprint, \
+         occurrences, last_seen_at, created_at, analysis_run_id, analyst_notes, updated_at";
+
+    pub fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let raw_references: String = row.get(6)?;
+        let standard_references =
+            crate::knowledge::references_from_json(&raw_references).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                )
+            })?;
+        Ok(Self {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            traffic_id: row.get(2)?,
+            analysis_run_id: row.get(16)?,
+            source: row.get(3)?,
+            title: row.get(4)?,
+            vuln_type: row.get(5)?,
+            standard_references,
+            severity: row.get(7)?,
+            confidence: row.get(8)?,
+            reasoning: row.get(9)?,
+            verify_steps: row.get(10)?,
+            status: row.get(11)?,
+            analyst_notes: row.get(17)?,
+            fingerprint: row.get(12)?,
+            occurrences: row.get(13)?,
+            last_seen_at: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(18)?,
+        })
+    }
+}
+
+/// 后台规则求值补写标签后推给前端的增量（事件 "traffic:tags"）。
+/// 流量本身在规则跑完之前就已经落库并推过 "traffic:new"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrafficTagsUpdate {
+    pub id: i64,
+    pub project_id: i64,
+    pub rule_tags: Vec<String>,
+}
+
+/// Finding 关联到的一条流量，用于展示"同一问题命中过哪些请求"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingTrafficRef {
+    pub traffic_id: i64,
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub first_seen_at: String,
+}
+
+/// 一次规则命中的可追溯快照；规则补丁版本不会覆盖旧 Finding 的初始说明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingRuleHit {
+    pub id: i64,
+    pub finding_id: i64,
+    pub evaluation_id: i64,
+    pub traffic_id: i64,
+    pub pack_id: String,
+    pub pack_version: String,
+    pub rule_id: String,
+    pub rule_version: String,
+    pub field_path: String,
+    pub evidence: String,
+    pub confidence: i64,
+    pub incomplete_evidence: bool,
+    pub hit_fingerprint: String,
     pub created_at: String,
 }
 

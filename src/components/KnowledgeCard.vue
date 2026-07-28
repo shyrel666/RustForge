@@ -4,18 +4,23 @@ import {
   getKnowledgeCards,
   type KnowledgeCard,
   type StandardReference,
+  type UnresolvedReference,
 } from "../api/tauri";
 
 const props = defineProps<{ references: StandardReference[] }>();
 const cards = ref<KnowledgeCard[]>([]);
+const unresolved = ref<UnresolvedReference[]>([]);
 const error = ref("");
 
 async function load() {
   cards.value = [];
+  unresolved.value = [];
   error.value = "";
   if (!props.references.length) return;
   try {
-    cards.value = await getKnowledgeCards(props.references);
+    const lookup = await getKnowledgeCards(props.references);
+    cards.value = lookup.cards;
+    unresolved.value = lookup.unresolved;
   } catch (e) {
     error.value = String(e);
   }
@@ -29,11 +34,11 @@ watch(() => props.references, load, { immediate: true, deep: true });
     v-if="error"
     type="warning"
     :closable="false"
-    title="标准引用无法解析"
+    title="知识库不可用"
     :description="error"
     show-icon
   />
-  <div v-else-if="cards.length" class="kb">
+  <div v-else-if="cards.length || unresolved.length" class="kb">
     <div v-for="c in cards" :key="c.key" class="kb-card">
       <div class="kb-head">
         <el-tag size="small" type="primary" effect="dark">
@@ -51,6 +56,19 @@ watch(() => props.references, load, { immediate: true, deep: true });
         <div class="kb-item"><span class="kb-label">危害</span>{{ c.impact }}</div>
         <div class="kb-item"><span class="kb-label">成因</span>{{ c.cause }}</div>
         <div class="kb-item kb-fix"><span class="kb-label">修复</span>{{ c.remediation }}</div>
+      </div>
+    </div>
+    <div v-for="u in unresolved" :key="u.key" class="kb-card kb-unresolved">
+      <div class="kb-head">
+        <el-tag size="small" :type="u.state === 'not_in_pack' ? 'info' : 'warning'">
+          {{ u.key }}
+        </el-tag>
+        <div>
+          <div class="kb-title">
+            {{ u.state === "not_in_pack" ? "未收录，不影响判定" : "编号不成立" }}
+          </div>
+          <div class="kb-meta">{{ u.framework_label }} · {{ u.reason }}</div>
+        </div>
       </div>
     </div>
   </div>
@@ -73,6 +91,13 @@ watch(() => props.references, load, { immediate: true, deep: true });
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+.kb-unresolved {
+  background: transparent;
+  border-style: dashed;
+}
+.kb-unresolved .kb-head {
+  margin-bottom: 0;
 }
 .kb-title {
   font-weight: 600;

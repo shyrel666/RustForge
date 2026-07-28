@@ -6,24 +6,36 @@ use crate::ai::redaction::{redact_fallback_text, RedactionManifest};
 use crate::ai::validation::ValidationReport;
 use crate::ai::{analyzer, digest, planner, prompts};
 use crate::authorization::{
-    load_project_policy, normalize_scope_entries, AuthorizationError, ScopeDecision, ScopePolicy,
+    load_project_policy, normalize_scope_entries, AuthorizationError, ScopeDecision,
 };
+use crate::evidence::{self, Evidence, EvidenceSourceType, FindingEvent};
 use crate::knowledge;
 use crate::knowledge::StandardReference;
 use crate::proxy::ca;
 use crate::proxy::ProxyStatus;
+use crate::replay::{
+    self, ReplayRequestInput, ReplayRun, ReplayRunDiff, ReplayRunPage, ReplaySession, TlsPolicy,
+};
 use crate::report;
 use crate::secrets::{
     is_sensitive_setting_key, json_contains_sensitive_field, provider_api_key_id, redact_sensitive,
     SecretStore, SecretString,
 };
-use crate::storage::models::{AnalysisResult, Finding, Project, TrafficDetail, TrafficSummary};
-use crate::tree::model::TaskNode;
+use crate::storage::models::{
+    AnalysisResult, Finding, FindingRuleHit, FindingTrafficRef, Project, TrafficDetail,
+    TrafficSummary,
+};
+use crate::tree::model::{
+    CreateTaskNodeInput, TaskNode, TaskPlanApplyResult, TaskPlanEvent, TaskPlanProposal, TestPlan,
+    UpdateTaskNodeInput,
+};
+use crate::tree::service as tree_service;
 use crate::tree::state as tree_state;
 use crate::AppState;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use zeroize::Zeroizing;
 
 type CmdResult<T> = Result<T, String>;
@@ -986,6 +998,7 @@ pub fn create_project(
 #[tauri::command]
 pub fn delete_project(state: State<AppState>, id: i64) -> CmdResult<()> {
     let db = state.db.get().map_err(|e| e.to_string())?;
+    replay::service::recover_interrupted_attempts(&db)?;
     db.execute("DELETE FROM projects WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1423,6 +1436,178 @@ pub fn preview_ai_context(
 
 /// 对一条流量做 AI 分析。后端重新构建上下文并核对预览哈希；模型响应无论
 /// 是否通过校验都会留下 analysis_runs，只有通过校验才创建 Finding。
+fn delete_replaceable_ai_findings(
+    conn: &rusqlite::Connection,
+    traffic_id: i64,
+) -> CmdResult<usize> {
+    conn.execute(
+        "DELETE FROM findings
+         WHERE traffic_id = ?1 AND source = 'ai' AND status = 'pending'
+           AND analyst_notes = ''
+           AND NOT EXISTS(
+               SELECT 1 FROM finding_evidence fe WHERE fe.finding_id = findings.id
+           )
+           AND NOT EXISTS(
+               SELECT 1 FROM finding_events event
+               WHERE event.finding_id = findings.id AND event.event_type <> 'created'
+           )
+           AND NOT EXISTS(
+               SELECT 1 FROM task_findings tf WHERE tf.finding_id = findings.id
+           )",
+        [traffic_id],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod ai_finding_replacement_tests {
+    use super::*;
+
+    fn fixture() -> (rusqlite::Connection, i64, i64, i64) {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::migrations::migrate(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects(name, target_host) VALUES('p', 'example.test')",
+            [],
+        )
+        .unwrap();
+        let project_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO traffic(project_id, method, host, url)
+             VALUES(?1, 'GET', 'example.test', 'https://example.test/')",
+            [project_id],
+        )
+        .unwrap();
+        let traffic_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO analysis_runs(
+                 project_id, traffic_id, provider_id, provider_base_url, model, prompt_id,
+                 prompt_version, input_hash, policy_json, manifest_json,
+                 validation_status, validation_json, raw_output_hash
+             ) VALUES(
+                 ?1,?2,'provider','https://provider.test/v1','model','analyze',1,
+                 ?3,'{}','{}','valid','{}',?4
+             )",
+            rusqlite::params![project_id, traffic_id, "a".repeat(64), "b".repeat(64)],
+        )
+        .unwrap();
+        let run_id = conn.last_insert_rowid();
+        (conn, project_id, traffic_id, run_id)
+    }
+
+    fn insert_ai_finding(
+        conn: &rusqlite::Connection,
+        project_id: i64,
+        traffic_id: i64,
+        run_id: i64,
+        title: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO findings(
+                 project_id, traffic_id, analysis_run_id, source, title, severity
+             ) VALUES(?1,?2,?3,'ai',?4,'medium')",
+            rusqlite::params![project_id, traffic_id, run_id, title],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn finding_exists(conn: &rusqlite::Connection, finding_id: i64) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM findings WHERE id = ?1)",
+            [finding_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reanalysis_removes_only_completely_untouched_pending_hypotheses() {
+        let (mut conn, project_id, traffic_id, run_id) = fixture();
+        let untouched =
+            insert_ai_finding(&conn, project_id, traffic_id, run_id, "untouched pending");
+        let reviewed =
+            insert_ai_finding(&conn, project_id, traffic_id, run_id, "severity reviewed");
+        let status_reviewed =
+            insert_ai_finding(&conn, project_id, traffic_id, run_id, "status reviewed");
+        let linked_to_task =
+            insert_ai_finding(&conn, project_id, traffic_id, run_id, "linked to task");
+        let linked_to_evidence =
+            insert_ai_finding(&conn, project_id, traffic_id, run_id, "linked to evidence");
+
+        crate::evidence::service::update_finding_review(
+            &mut conn,
+            reviewed,
+            "high",
+            "",
+            Some("analyst raised severity"),
+            "analyst",
+        )
+        .unwrap();
+        crate::evidence::service::update_finding_status(
+            &mut conn,
+            status_reviewed,
+            "rejected",
+            Some("not reproducible"),
+            "analyst",
+        )
+        .unwrap();
+        crate::evidence::service::update_finding_status(
+            &mut conn,
+            status_reviewed,
+            "pending",
+            Some("reopened"),
+            "analyst",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO task_nodes(project_id, title) VALUES(?1, 'verify')",
+            [project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_findings(task_id, finding_id) VALUES(?1, ?2)",
+            rusqlite::params![conn.last_insert_rowid(), linked_to_task],
+        )
+        .unwrap();
+        crate::evidence::service::create_finding_evidence(
+            &mut conn,
+            linked_to_evidence,
+            EvidenceSourceType::Traffic,
+            traffic_id,
+            "captured response",
+            "analyst",
+        )
+        .unwrap();
+
+        assert_eq!(
+            delete_replaceable_ai_findings(&conn, traffic_id).unwrap(),
+            1
+        );
+        assert!(!finding_exists(&conn, untouched));
+        for preserved in [
+            reviewed,
+            status_reviewed,
+            linked_to_task,
+            linked_to_evidence,
+        ] {
+            assert!(
+                finding_exists(&conn, preserved),
+                "reviewed Finding #{preserved} must survive re-analysis"
+            );
+        }
+        let status_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM finding_events WHERE finding_id = ?1",
+                [status_reviewed],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_event_count, 3);
+    }
+}
+
 #[tauri::command]
 pub async fn analyze_traffic(
     app: AppHandle,
@@ -1460,7 +1645,6 @@ pub async fn analyze_traffic(
     let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
     let attempt = analyzer::analyze(&client, &preview).await?;
 
-    let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut new_findings: Vec<Finding> = Vec::new();
     let mut result = attempt.result;
     let validation_error = attempt.validation.errors.join("；");
@@ -1503,13 +1687,10 @@ pub async fn analyze_traffic(
 
         if let Some(result) = result.as_mut() {
             result.analysis_run_id = Some(run_id);
-            // A valid replacement removes only old pending hypotheses. Confirmed/rejected
-            // human decisions and the immutable analysis_runs history remain intact.
-            tx.execute(
-                "DELETE FROM findings WHERE traffic_id = ?1 AND source = 'ai' AND status = 'pending'",
-                [traffic_id],
-            )
-            .map_err(|e| e.to_string())?;
+            // A valid replacement removes only untouched pending hypotheses. Any Finding
+            // with Evidence, analyst edits, status history, or task links has entered the
+            // review workflow and is preserved, as are immutable analysis_runs.
+            delete_replaceable_ai_findings(&tx, traffic_id)?;
             tx.execute("DELETE FROM analyses WHERE traffic_id = ?1", [traffic_id])
                 .map_err(|e| e.to_string())?;
             tx.execute(
@@ -1566,21 +1747,13 @@ pub async fn analyze_traffic(
                     ],
                 )
                 .map_err(|e| e.to_string())?;
-                new_findings.push(Finding {
-                    id: tx.last_insert_rowid(),
-                    project_id,
-                    traffic_id: Some(traffic_id),
-                    source: "ai".into(),
-                    title: hypothesis.vuln_type.clone(),
-                    vuln_type: hypothesis.vuln_type.clone(),
-                    standard_references: hypothesis.standard_references.clone(),
-                    severity: hypothesis.severity.clone(),
-                    confidence: hypothesis.confidence as i64,
-                    reasoning,
-                    verify_steps: hypothesis.verify_steps.clone(),
-                    status: "pending".into(),
-                    created_at: created_at.clone(),
-                });
+                let finding_id = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO finding_traffic(finding_id, traffic_id) VALUES(?1,?2)",
+                    rusqlite::params![finding_id, traffic_id],
+                )
+                .map_err(|e| e.to_string())?;
+                new_findings.push(evidence::service::load_finding(&tx, finding_id)?);
             }
         }
         record_usage(&tx, &attempt.usage);
@@ -1679,38 +1852,6 @@ pub fn get_analysis_run(state: State<AppState>, run_id: i64) -> CmdResult<Analys
 
 // ---------- Findings ----------
 
-fn standard_references_from_column(
-    row: &rusqlite::Row,
-    index: usize,
-) -> rusqlite::Result<Vec<StandardReference>> {
-    let raw: String = row.get(index)?;
-    knowledge::references_from_json(&raw).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-        )
-    })
-}
-
-fn row_to_finding(row: &rusqlite::Row) -> rusqlite::Result<Finding> {
-    Ok(Finding {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        traffic_id: row.get(2)?,
-        source: row.get(3)?,
-        title: row.get(4)?,
-        vuln_type: row.get(5)?,
-        standard_references: standard_references_from_column(row, 6)?,
-        severity: row.get(7)?,
-        confidence: row.get(8)?,
-        reasoning: row.get(9)?,
-        verify_steps: row.get(10)?,
-        status: row.get(11)?,
-        created_at: row.get(12)?,
-    })
-}
-
 #[tauri::command]
 pub fn list_findings(
     state: State<AppState>,
@@ -1721,16 +1862,15 @@ pub fn list_findings(
 ) -> CmdResult<Vec<Finding>> {
     let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .prepare(
-            "SELECT id, project_id, traffic_id, source, title, vuln_type, standard_references,
-                    severity, confidence, reasoning, verify_steps, status, created_at
-             FROM findings
+        .prepare(&format!(
+            "SELECT {} FROM findings
              WHERE project_id = ?1
                AND (?2 IS NULL OR status = ?2)
                AND (?3 IS NULL OR severity = ?3)
                AND (?4 IS NULL OR source = ?4)
              ORDER BY id DESC LIMIT 500",
-        )
+            Finding::COLUMNS
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
@@ -1740,7 +1880,7 @@ pub fn list_findings(
                 severity.filter(|s| !s.is_empty()),
                 source.filter(|s| !s.is_empty()),
             ],
-            row_to_finding,
+            Finding::from_row,
         )
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -1750,19 +1890,218 @@ pub fn list_findings(
     Ok(out)
 }
 
-/// 状态流转：pending（待验证）→ confirmed / rejected（人工结论）
+/// 同一指纹命中过的全部流量。重复命中不会新建 Finding，只在这里累积。
 #[tauri::command]
-pub fn update_finding_status(state: State<AppState>, id: i64, status: String) -> CmdResult<()> {
-    if !["pending", "confirmed", "rejected"].contains(&status.as_str()) {
-        return Err(format!("非法状态: {status}"));
-    }
+pub fn list_finding_traffic(state: State<AppState>, id: i64) -> CmdResult<Vec<FindingTrafficRef>> {
     let db = state.db.get().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE findings SET status = ?1 WHERE id = ?2",
-        rusqlite::params![status, id],
+    let mut stmt = db
+        .prepare(
+            "SELECT t.id, t.method, t.url, t.status, ft.first_seen_at
+             FROM finding_traffic ft JOIN traffic t ON t.id = ft.traffic_id
+             WHERE ft.finding_id = ?1
+             ORDER BY t.id DESC LIMIT 200",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([id], |row| {
+            Ok(FindingTrafficRef {
+                traffic_id: row.get(0)?,
+                method: row.get(1)?,
+                url: row.get(2)?,
+                status: row.get(3)?,
+                first_seen_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+/// 同一 Finding 的逐次规则命中快照，包括补丁版本和当时的脱敏证据。
+#[tauri::command]
+pub fn list_finding_rule_hits(state: State<AppState>, id: i64) -> CmdResult<Vec<FindingRuleHit>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, finding_id, evaluation_id, traffic_id, pack_id, pack_version,
+                    rule_id, rule_version, field_path, evidence, confidence,
+                    incomplete_evidence, hit_fingerprint, created_at
+             FROM finding_rule_hits
+             WHERE finding_id = ?1
+             ORDER BY id DESC
+             LIMIT 200",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([id], |row| {
+            Ok(FindingRuleHit {
+                id: row.get(0)?,
+                finding_id: row.get(1)?,
+                evaluation_id: row.get(2)?,
+                traffic_id: row.get(3)?,
+                pack_id: row.get(4)?,
+                pack_version: row.get(5)?,
+                rule_id: row.get(6)?,
+                rule_version: row.get(7)?,
+                field_path: row.get(8)?,
+                evidence: row.get(9)?,
+                confidence: row.get(10)?,
+                incomplete_evidence: row.get(11)?,
+                hit_fingerprint: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_finding_evidence(state: State<AppState>, id: i64) -> CmdResult<Vec<Evidence>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    evidence::service::list_finding_evidence(&db, id)
+}
+
+#[tauri::command]
+pub fn list_finding_events(state: State<AppState>, id: i64) -> CmdResult<Vec<FindingEvent>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    evidence::service::list_finding_events(&db, id)
+}
+
+#[tauri::command]
+pub fn create_finding_evidence(
+    app: AppHandle,
+    state: State<AppState>,
+    finding_id: i64,
+    source_type: String,
+    source_id: i64,
+    observation: String,
+) -> CmdResult<Evidence> {
+    let source_type = EvidenceSourceType::parse(&source_type)?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let item = evidence::service::create_finding_evidence(
+        &mut db,
+        finding_id,
+        source_type,
+        source_id,
+        &observation,
+        "analyst:local",
+    )?;
+    let finding = evidence::service::load_finding(&db, finding_id)?;
+    let _ = app.emit("finding:updated", &finding);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn create_task_evidence(
+    state: State<AppState>,
+    task_id: i64,
+    source_type: String,
+    source_id: i64,
+    observation: String,
+) -> CmdResult<i64> {
+    let source_type = EvidenceSourceType::parse(&source_type)?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    evidence::service::create_task_evidence(
+        &mut db,
+        task_id,
+        source_type,
+        source_id,
+        &observation,
+        "analyst:local",
     )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+}
+
+#[tauri::command]
+pub fn set_finding_evidence_accepted(
+    app: AppHandle,
+    state: State<AppState>,
+    finding_id: i64,
+    evidence_id: i64,
+    accepted: bool,
+    reason: String,
+) -> CmdResult<Evidence> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let item = evidence::service::set_finding_evidence_accepted(
+        &mut db,
+        finding_id,
+        evidence_id,
+        accepted,
+        &reason,
+        "analyst:local",
+    )?;
+    let finding = evidence::service::load_finding(&db, finding_id)?;
+    let _ = app.emit("finding:updated", &finding);
+    Ok(item)
+}
+
+/// 规则运行状况：坏包禁用原因、求值超时次数、队列丢弃数。
+#[tauri::command]
+pub fn get_rule_diagnostics(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<crate::rules::worker::RuleDiagnostics> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !exists {
+        return Err(format!("项目 #{project_id} 不存在"));
+    }
+    let mut diagnostics = crate::rules::worker::diagnostics();
+    diagnostics.recent_evaluations = crate::rules::worker::recent_evaluations(&db, project_id, 20)?;
+    Ok(diagnostics)
+}
+
+/// 人工状态流转。confirmed 必须有人工接受的 Evidence，rejected 必须给出原因；
+/// Finding 更新与不可变事件在同一事务中提交。
+#[tauri::command]
+pub fn update_finding_status(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    status: String,
+    reason: Option<String>,
+) -> CmdResult<Finding> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let finding = evidence::service::update_finding_status(
+        &mut db,
+        id,
+        &status,
+        reason.as_deref(),
+        "analyst:local",
+    )?;
+    let _ = app.emit("finding:updated", &finding);
+    Ok(finding)
+}
+
+#[tauri::command]
+pub fn update_finding_review(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    severity: String,
+    analyst_notes: String,
+    reason: Option<String>,
+) -> CmdResult<Finding> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let finding = evidence::service::update_finding_review(
+        &mut db,
+        id,
+        &severity,
+        &analyst_notes,
+        reason.as_deref(),
+        "analyst:local",
+    )?;
+    let _ = app.emit("finding:updated", &finding);
+    Ok(finding)
 }
 
 #[tauri::command]
@@ -1853,73 +2192,27 @@ pub fn reset_prompt_template(state: State<AppState>) -> CmdResult<prompts::Promp
     Ok(prompts::PromptTemplateView::builtin(true))
 }
 
-// ---------- 渗透任务树 ----------
-
-fn row_to_task_node(
-    conn: &rusqlite::Connection,
-    row: &rusqlite::Row,
-) -> rusqlite::Result<TaskNode> {
-    let id: i64 = row.get(0)?;
-    let finding_ids: Vec<i64> = {
-        let mut stmt = conn.prepare(
-            "SELECT finding_id FROM task_findings WHERE task_id = ?1 ORDER BY finding_id",
-        )?;
-        let rows = stmt.query_map([id], |r| r.get(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        out
-    };
-    Ok(TaskNode {
-        id,
-        project_id: row.get(1)?,
-        parent_id: row.get(2)?,
-        title: row.get(3)?,
-        description: row.get(4)?,
-        why: row.get(5)?,
-        how_to: row.get(6)?,
-        verify_criteria: row.get(7)?,
-        standard_references: standard_references_from_column(row, 8)?,
-        status: row.get(9)?,
-        sort_order: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
-        finding_ids,
-    })
-}
-
-const TASK_COLS: &str =
-    "id, project_id, parent_id, title, description, why, how_to, verify_criteria,
-     standard_references, status, sort_order, created_at, updated_at";
-
-fn load_task_nodes(conn: &rusqlite::Connection, project_id: i64) -> CmdResult<Vec<TaskNode>> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT {TASK_COLS} FROM task_nodes WHERE project_id = ?1 ORDER BY id"
-        ))
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    let mut rows = stmt.query([project_id]).map_err(|e| e.to_string())?;
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        out.push(row_to_task_node(conn, row).map_err(|e| e.to_string())?);
-    }
-    Ok(out)
-}
-
-fn load_task_node(conn: &rusqlite::Connection, id: i64) -> CmdResult<TaskNode> {
-    conn.query_row(
-        &format!("SELECT {TASK_COLS} FROM task_nodes WHERE id = ?1"),
-        [id],
-        |row| row_to_task_node(conn, row),
-    )
-    .map_err(|e| format!("任务节点 #{id} 不存在: {e}"))
-}
+// ---------- 版本化测试计划 ----------
 
 #[tauri::command]
 pub fn get_task_tree(state: State<AppState>, project_id: i64) -> CmdResult<Vec<TaskNode>> {
     let db = state.db.get().map_err(|e| e.to_string())?;
-    load_task_nodes(&db, project_id)
+    tree_service::load_nodes(&db, project_id, false)
+}
+
+#[tauri::command]
+pub fn get_test_plan(state: State<AppState>, project_id: i64) -> CmdResult<TestPlan> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::get_plan(&db, project_id)
+}
+
+#[tauri::command]
+pub fn list_task_plan_events(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<Vec<TaskPlanEvent>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::list_events(&db, project_id)
 }
 
 const MAX_TASK_AI_INPUT_BYTES: usize = 32 * 1024;
@@ -1950,19 +2243,28 @@ impl TaskAiOperation {
             Self::Alternative => planner::ALTERNATIVE_PROMPT_ID,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Generate => "generate",
+            Self::Expand => "expand",
+            Self::Alternative => "alternative",
+        }
+    }
 }
 
 struct PreparedTaskAi {
     preview: AiContextPreview,
     project_id: i64,
     node_id: Option<i64>,
+    base_revision: i64,
     valid_finding_ids: Vec<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct TaskAiExecution {
-    pub affected_nodes: usize,
     pub analysis_run_id: i64,
+    pub proposal: TaskPlanProposal,
 }
 
 fn truncate_task_ai_value(
@@ -2019,7 +2321,7 @@ fn prepare_task_ai(
     let mut manifest = RedactionManifest::default();
     let (project_id, node_id, prompt, valid_finding_ids) = match operation {
         TaskAiOperation::Generate => {
-            let project_id = project_id.ok_or("生成任务树需要项目 id")?;
+            let project_id = project_id.ok_or("生成测试计划需要项目 id")?;
             let target: String = conn
                 .query_row(
                     "SELECT target_host FROM projects WHERE id = ?1",
@@ -2045,7 +2347,7 @@ fn prepare_task_ai(
         }
         TaskAiOperation::Expand | TaskAiOperation::Alternative => {
             let node_id = node_id.ok_or("任务节点 AI 操作需要节点 id")?;
-            let node = load_task_node(conn, node_id)?;
+            let node = tree_service::load_node(conn, node_id)?;
             if project_id.is_some_and(|project_id| project_id != node.project_id) {
                 return Err("任务节点不属于指定项目".to_string());
             }
@@ -2066,6 +2368,8 @@ fn prepare_task_ai(
             (node.project_id, Some(node_id), prompt, valid_ids)
         }
     };
+    let base_revision = tree_service::get_plan(conn, project_id)?.revision;
+    let base_revision_text = base_revision.to_string();
     let retry_user_prompt = format!("{prompt}\n\n{}", planner::RETRY_SUFFIX);
     manifest.total_input_bytes = planner::SYSTEM_PROMPT.len() + retry_user_prompt.len();
     if manifest.total_input_bytes > MAX_TASK_AI_INPUT_BYTES {
@@ -2083,6 +2387,7 @@ fn prepare_task_ai(
         model.as_bytes(),
         operation.prompt_id().as_bytes(),
         prompt_version.as_bytes(),
+        base_revision_text.as_bytes(),
         policy_json.as_bytes(),
         planner::SYSTEM_PROMPT.as_bytes(),
         prompt.as_bytes(),
@@ -2110,8 +2415,51 @@ fn prepare_task_ai(
         },
         project_id,
         node_id,
+        base_revision,
         valid_finding_ids,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_task_ai_proposal(
+    conn: &mut rusqlite::Connection,
+    prepared: &PreparedTaskAi,
+    operation: TaskAiOperation,
+    proposed: crate::tree::model::PlannedTree,
+    analysis_run_id: i64,
+    provider_id: &str,
+    provider_base_url: &str,
+    model: &str,
+) -> CmdResult<TaskPlanProposal> {
+    tree_service::create_proposal_checked(
+        conn,
+        prepared.project_id,
+        prepared.base_revision,
+        operation.as_str(),
+        prepared.node_id,
+        proposed,
+        Some(analysis_run_id),
+        |transaction| {
+            let current = prepare_task_ai(
+                transaction,
+                operation,
+                Some(prepared.project_id),
+                prepared.node_id,
+                provider_id,
+                provider_base_url,
+                model,
+            )?;
+            if current.base_revision != prepared.base_revision
+                || current.preview.input_hash != prepared.preview.input_hash
+            {
+                return Err(
+                    "AI 测试计划上下文已变化；本次模型运行已保留审计，但 proposal 未创建，请重新预览"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        },
+    )
 }
 
 fn persist_task_ai_run(
@@ -2158,7 +2506,7 @@ fn persist_task_ai_run(
 
 fn task_ai_validation_error(run_id: i64, validation: &ValidationReport) -> String {
     format!(
-        "AI 输出两次都未通过任务 JSON 校验，未修改任务树。审计运行 #{run_id}：{}",
+        "AI 输出两次都未通过测试计划 JSON 校验，未创建 proposal。审计运行 #{run_id}：{}",
         validation.errors.join("；")
     )
 }
@@ -2194,27 +2542,15 @@ pub fn preview_task_ai(
     .preview)
 }
 
-/// AI 生成整棵树（replace=true 时先清空现有树）。调用前必须提交刚刚
-/// 展示给用户的预览哈希，后端会从数据库真值重新构建并校验。
+/// AI 生成测试计划 proposal。该命令只持久化 proposal 与 diff，不直接修改节点。
 #[tauri::command]
 pub async fn generate_task_tree(
     state: State<'_, AppState>,
     project_id: i64,
-    replace: bool,
     expected_input_hash: String,
 ) -> CmdResult<TaskAiExecution> {
     let (prepared, resolved) = {
         let db = state.db.get().map_err(|error| error.to_string())?;
-        let existing: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM task_nodes WHERE project_id = ?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if existing > 0 && !replace {
-            return Err("任务树已存在。如需重建请点「重新生成」（会清空现有树）".into());
-        }
         let resolved = resolved_ai(&db, state.secrets.as_ref())?;
         let prepared = prepare_task_ai(
             &db,
@@ -2230,6 +2566,9 @@ pub async fn generate_task_tree(
         }
         (prepared, resolved)
     };
+    let provider_id = resolved.provider_id.clone();
+    let provider_base_url = resolved.base_url.clone();
+    let model = resolved.model.clone();
     let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
     let valid_ids = prepared.valid_finding_ids.clone();
     let attempt = chat_json(
@@ -2240,19 +2579,28 @@ pub async fn generate_task_tree(
     )
     .await?;
 
-    let db = state.db.get().map_err(|error| error.to_string())?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
     let run_id = persist_task_ai_run(&db, &prepared, &attempt.audit)?;
     let Some(tree) = attempt.result else {
         return Err(task_ai_validation_error(run_id, &attempt.audit.validation));
     };
-    let affected_nodes = planner::insert_tree(&db, project_id, &tree, replace)?;
+    let proposal = create_task_ai_proposal(
+        &mut db,
+        &prepared,
+        TaskAiOperation::Generate,
+        tree,
+        run_id,
+        &provider_id,
+        &provider_base_url,
+        &model,
+    )?;
     Ok(TaskAiExecution {
-        affected_nodes,
         analysis_run_id: run_id,
+        proposal,
     })
 }
 
-/// AI 展开节点为子任务。
+/// AI 展开节点也先形成完整计划 proposal，等待用户查看 diff 后确认。
 #[tauri::command]
 pub async fn expand_task_node(
     state: State<'_, AppState>,
@@ -2276,6 +2624,9 @@ pub async fn expand_task_node(
         }
         (prepared, resolved)
     };
+    let provider_id = resolved.provider_id.clone();
+    let provider_base_url = resolved.base_url.clone();
+    let model = resolved.model.clone();
     let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
     let valid_ids = prepared.valid_finding_ids.clone();
     let attempt = chat_json(
@@ -2286,20 +2637,30 @@ pub async fn expand_task_node(
     )
     .await?;
 
-    let db = state.db.get().map_err(|error| error.to_string())?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
     let run_id = persist_task_ai_run(&db, &prepared, &attempt.audit)?;
     let Some(children) = attempt.result else {
         return Err(task_ai_validation_error(run_id, &attempt.audit.validation));
     };
-    let node = load_task_node(&db, prepared.node_id.unwrap_or(node_id))?;
-    let affected_nodes = planner::insert_children(&db, &node, &children)?;
+    let target_id = prepared.node_id.unwrap_or(node_id);
+    let proposed = tree_service::plan_with_expansion(&db, target_id, children)?;
+    let proposal = create_task_ai_proposal(
+        &mut db,
+        &prepared,
+        TaskAiOperation::Expand,
+        proposed,
+        run_id,
+        &provider_id,
+        &provider_base_url,
+        &model,
+    )?;
     Ok(TaskAiExecution {
-        affected_nodes,
         analysis_run_id: run_id,
+        proposal,
     })
 }
 
-/// AI 换个思路（重写节点四要素，状态重置 todo）。
+/// AI “换个思路”只提出字段差异；人工进度、锁定字段与 Evidence 仍由合并层保护。
 #[tauri::command]
 pub async fn alternative_task_node(
     state: State<'_, AppState>,
@@ -2323,6 +2684,9 @@ pub async fn alternative_task_node(
         }
         (prepared, resolved)
     };
+    let provider_id = resolved.provider_id.clone();
+    let provider_base_url = resolved.base_url.clone();
+    let model = resolved.model.clone();
     let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
     let attempt = chat_json(
         &client,
@@ -2332,15 +2696,26 @@ pub async fn alternative_task_node(
     )
     .await?;
 
-    let db = state.db.get().map_err(|error| error.to_string())?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
     let run_id = persist_task_ai_run(&db, &prepared, &attempt.audit)?;
     let Some(alternative) = attempt.result else {
         return Err(task_ai_validation_error(run_id, &attempt.audit.validation));
     };
-    planner::apply_alternative(&db, prepared.node_id.unwrap_or(node_id), &alternative)?;
+    let target_id = prepared.node_id.unwrap_or(node_id);
+    let proposed = tree_service::plan_with_alternative(&db, target_id, &alternative)?;
+    let proposal = create_task_ai_proposal(
+        &mut db,
+        &prepared,
+        TaskAiOperation::Alternative,
+        proposed,
+        run_id,
+        &provider_id,
+        &provider_base_url,
+        &model,
+    )?;
     Ok(TaskAiExecution {
-        affected_nodes: 1,
         analysis_run_id: run_id,
+        proposal,
     })
 }
 
@@ -2370,7 +2745,7 @@ mod task_ai_firewall_tests {
 
     #[test]
     fn planner_preview_redacts_queries_binds_input_and_persists_a_run() {
-        let conn = task_connection();
+        let mut conn = task_connection();
         let project_id: i64 = conn
             .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
             .unwrap();
@@ -2432,92 +2807,83 @@ mod task_ai_firewall_tests {
         .unwrap();
         assert_ne!(changed.preview.input_hash, prepared.preview.input_hash);
         assert!(!changed.preview.user_prompt.contains("new-secret"));
+
+        let error = create_task_ai_proposal(
+            &mut conn,
+            &prepared,
+            TaskAiOperation::Generate,
+            crate::tree::model::PlannedTree { phases: vec![] },
+            run_id,
+            "provider",
+            "https://provider.test/v1",
+            "model",
+        )
+        .unwrap_err();
+        assert!(error.contains("上下文已变化"));
+        let proposal_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_plan_proposals", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(proposal_count, 0);
     }
 }
 
-/// "下一步"：进行中优先，否则第一个可执行的 todo 叶子
+#[tauri::command]
+pub fn apply_task_plan_proposal(
+    state: State<AppState>,
+    project_id: i64,
+    proposal_id: i64,
+) -> CmdResult<TaskPlanApplyResult> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::apply_proposal(&mut db, project_id, proposal_id, "analyst")
+}
+
+#[tauri::command]
+pub fn reject_task_plan_proposal(state: State<AppState>, proposal_id: i64) -> CmdResult<()> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::reject_proposal(&db, proposal_id)
+}
+
+/// “下一步”使用显式 prerequisite 与稳定风险/优先级排序。
 #[tauri::command]
 pub fn next_task(state: State<AppState>, project_id: i64) -> CmdResult<Option<TaskNode>> {
     let db = state.db.get().map_err(|e| e.to_string())?;
-    let nodes = load_task_nodes(&db, project_id)?;
+    let nodes = tree_service::load_nodes(&db, project_id, false)?;
     let id = tree_state::next_actionable(&nodes);
     Ok(id.and_then(|nid| nodes.into_iter().find(|n| n.id == nid)))
 }
 
-/// 手动标记状态（状态机白名单校验）
+/// 手工状态永远通过专用事务写入，并记录原因与不可变事件。
 #[tauri::command]
-pub fn update_task_status(state: State<AppState>, node_id: i64, status: String) -> CmdResult<()> {
-    let db = state.db.get().map_err(|e| e.to_string())?;
-    let node = load_task_node(&db, node_id)?;
-    if !tree_state::can_transition(&node.status, &status) {
-        return Err(format!("不允许从「{}」变为「{}」", node.status, status));
-    }
-    db.execute(
-        "UPDATE task_nodes SET status = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-        rusqlite::params![status, node_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// 手动添加节点
-// 参数保持与现有 Tauri IPC 的扁平字段一致；Task 5.2 重构计划模型时再统一收口。
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub fn create_task_node(
+pub fn update_task_status(
     state: State<AppState>,
-    project_id: i64,
-    parent_id: Option<i64>,
-    title: String,
-    description: String,
-    why: String,
-    how_to: String,
-    verify_criteria: String,
-) -> CmdResult<i64> {
-    if title.trim().is_empty() {
-        return Err("标题不能为空".into());
-    }
-    let db = state.db.get().map_err(|e| e.to_string())?;
-    if let Some(pid) = parent_id {
-        let parent = load_task_node(&db, pid)?;
-        if parent.project_id != project_id {
-            return Err("父节点不属于当前项目".into());
-        }
-    }
-    let next_sort: i64 = db
-        .query_row(
-            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM task_nodes
-             WHERE project_id = ?1 AND parent_id IS ?2",
-            rusqlite::params![project_id, parent_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    db.execute(
-        "INSERT INTO task_nodes(project_id, parent_id, title, description, why, how_to,
-                                    verify_criteria, status, sort_order)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,'todo',?8)",
-        rusqlite::params![
-            project_id,
-            parent_id,
-            title.trim(),
-            description,
-            why,
-            how_to,
-            verify_criteria,
-            next_sort,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(db.last_insert_rowid())
+    node_id: i64,
+    status: String,
+    reason: Option<String>,
+) -> CmdResult<TaskNode> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::update_status(&mut db, node_id, &status, reason.as_deref(), "analyst")
 }
 
-/// 删除节点（子节点与关联随 FK 级联删除）
+/// 人工创建的字段默认全部锁定，后续 proposal 只会把它列为 preserved。
+#[tauri::command]
+pub fn create_task_node(state: State<AppState>, input: CreateTaskNodeInput) -> CmdResult<i64> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::create_manual_node(&mut db, &input, "analyst")
+}
+
+#[tauri::command]
+pub fn update_task_node(state: State<AppState>, input: UpdateTaskNodeInput) -> CmdResult<TaskNode> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::update_manual_fields(&mut db, &input, "analyst")
+}
+
+/// 保留旧 IPC 名称，但语义已改为可审计归档，不再物理删除节点或 Evidence 关系。
 #[tauri::command]
 pub fn delete_task_node(state: State<AppState>, node_id: i64) -> CmdResult<()> {
-    let db = state.db.get().map_err(|e| e.to_string())?;
-    db.execute("DELETE FROM task_nodes WHERE id = ?1", [node_id])
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    tree_service::archive_node(&mut db, node_id, "analyst")
 }
 
 /// 节点关联的 Finding 列表
@@ -2525,16 +2891,14 @@ pub fn delete_task_node(state: State<AppState>, node_id: i64) -> CmdResult<()> {
 pub fn get_task_findings(state: State<AppState>, node_id: i64) -> CmdResult<Vec<Finding>> {
     let db = state.db.get().map_err(|e| e.to_string())?;
     let mut stmt = db
-        .prepare(
-            "SELECT f.id, f.project_id, f.traffic_id, f.source, f.title, f.vuln_type,
-                    f.standard_references, f.severity, f.confidence, f.reasoning, f.verify_steps,
-                    f.status, f.created_at
-             FROM findings f JOIN task_findings tf ON tf.finding_id = f.id
+        .prepare(&format!(
+            "SELECT {} FROM findings f JOIN task_findings tf ON tf.finding_id = f.id
              WHERE tf.task_id = ?1 ORDER BY f.id",
-        )
+            Finding::COLUMNS
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([node_id], row_to_finding)
+        .query_map([node_id], Finding::from_row)
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for row in rows {
@@ -2545,33 +2909,16 @@ pub fn get_task_findings(state: State<AppState>, node_id: i64) -> CmdResult<Vec<
 
 // ---------- 版本化安全标准知识卡 ----------
 
+/// 逐条解析：命中的返回知识卡，未收录/非法的返回明确状态，不因为其中一条
+/// 无法解析就让整块知识区变成报错。
 #[tauri::command]
 pub fn get_knowledge_cards(
     references: Vec<StandardReference>,
-) -> CmdResult<Vec<knowledge::KnowledgeCard>> {
-    knowledge::lookup(&references)
+) -> CmdResult<knowledge::KnowledgeLookup> {
+    knowledge::resolve(&references)
 }
 
 // ---------- Repeater（手动改包重发） ----------
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ReplayHeader {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ReplayResponse {
-    pub status: u16,
-    pub status_text: String,
-    pub headers: Vec<ReplayHeader>,
-    pub body_text: Option<String>,
-    pub body_base64: Option<String>,
-    pub resp_size: i64,
-    pub duration_ms: i64,
-    /// 本次发包前由后端 ScopePolicy 生成的授权快照；Task 4.2 将原样持久化。
-    pub scope_decision: ScopeDecision,
-}
 
 /// Repeater 编辑器的无网络预检。它与真正发送请求调用完全相同的 ScopePolicy；
 /// `replay_request` 仍会再次校验，不能把预检结果当作授权令牌。
@@ -2593,205 +2940,232 @@ pub fn authorize_replay_target(
         .map_err(|error| error.to_string())
 }
 
-/// 手动重发一个请求——人在回路的「验证」动作，由用户主动触发、可自由改包。
-/// pentest 工具惯例：忽略证书错误、不自动跟随重定向（便于观察 3xx/鉴权行为）。
+#[tauri::command]
+pub fn list_replay_sessions(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<Vec<ReplaySession>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::list_sessions(&db, project_id)
+}
+
+#[tauri::command]
+pub fn create_replay_session(
+    state: State<AppState>,
+    project_id: i64,
+    title: String,
+    source_traffic_id: Option<i64>,
+    tls_policy: String,
+) -> CmdResult<ReplaySession> {
+    let tls_policy = TlsPolicy::parse(&tls_policy)?;
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::create_session(&mut db, project_id, &title, source_traffic_id, tls_policy)
+}
+
+#[tauri::command]
+pub fn update_replay_session(
+    state: State<AppState>,
+    session_id: i64,
+    title: String,
+    tls_policy: String,
+) -> CmdResult<ReplaySession> {
+    let tls_policy = TlsPolicy::parse(&tls_policy)?;
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::update_session(&db, session_id, &title, tls_policy)
+}
+
+#[tauri::command]
+pub fn select_replay_session(state: State<AppState>, session_id: i64) -> CmdResult<ReplaySession> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::select_session(&mut db, session_id)
+}
+
+#[tauri::command]
+pub fn delete_replay_session(state: State<AppState>, session_id: i64) -> CmdResult<()> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::delete_session(&mut db, session_id)
+}
+
+#[tauri::command]
+pub fn list_replay_runs(
+    state: State<AppState>,
+    session_id: i64,
+    before_id: Option<i64>,
+    limit: Option<i64>,
+) -> CmdResult<ReplayRunPage> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::list_runs(&db, session_id, before_id, limit)
+}
+
+#[tauri::command]
+pub fn get_replay_run(
+    state: State<AppState>,
+    project_id: i64,
+    run_id: i64,
+) -> CmdResult<ReplayRun> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::load_run_for_project(&db, project_id, run_id)
+}
+
+#[tauri::command]
+pub fn compare_replay_runs(
+    state: State<AppState>,
+    project_id: i64,
+    left_run_id: i64,
+    right_run_id: i64,
+) -> CmdResult<ReplayRunDiff> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    replay::service::compare_runs(&db, project_id, left_run_id, right_run_id)
+}
+
+/// 手动重发一个请求。唯一主动触发点仍是用户点击；service 在任何 HTTP
+/// client/socket 创建前重新执行 ScopePolicy，并把成功、失败或拒绝都追加为 run。
 #[tauri::command]
 pub async fn replay_request(
     state: State<'_, AppState>,
     project_id: i64,
-    method: String,
-    url: String,
-    headers: Vec<ReplayHeader>,
-    body_text: Option<String>,
-    body_base64: Option<String>,
-) -> CmdResult<ReplayResponse> {
-    // 数据库连接只用于构造不可变策略，网络 await 前必须释放。
-    let policy = {
-        let db = state
-            .db
-            .get()
-            .map_err(|error| AuthorizationError::storage(error).to_string())?;
-        load_project_policy(&db, project_id).map_err(|error| error.to_string())?
-    };
-    execute_replay_request(&policy, method, url, headers, body_text, body_base64).await
+    session_id: i64,
+    request: ReplayRequestInput,
+) -> CmdResult<ReplayRun> {
+    replay::service::execute_request(state.db.clone(), project_id, session_id, request).await
 }
 
-fn decode_replay_body(
-    body_text: Option<String>,
-    body_base64: Option<String>,
-) -> CmdResult<Option<Vec<u8>>> {
-    use base64::Engine;
-    let body_text = body_text.filter(|body| !body.is_empty());
-    let body_base64 = body_base64.filter(|body| !body.trim().is_empty());
-    match (body_text, body_base64) {
-        (Some(_), Some(_)) => {
-            Err("[INVALID_REPLAY_BODY] 文本正文与 Base64 正文不能同时提交".to_string())
-        }
-        (Some(body), None) => Ok(Some(body.into_bytes())),
-        (None, Some(body)) => {
-            let compact: String = body
-                .chars()
-                .filter(|character| !character.is_ascii_whitespace())
-                .collect();
-            base64::engine::general_purpose::STANDARD
-                .decode(compact)
-                .map(Some)
-                .map_err(|_| "[INVALID_REPLAY_BODY] Base64 请求体格式无效".to_string())
-        }
-        (None, None) => Ok(None),
-    }
-}
+// ---------- 证据化报告 ----------
 
-async fn execute_replay_request(
-    policy: &ScopePolicy,
-    method: String,
-    url: String,
-    headers: Vec<ReplayHeader>,
-    body_text: Option<String>,
-    body_base64: Option<String>,
-) -> CmdResult<ReplayResponse> {
-    use base64::Engine;
-    use std::time::{Duration, Instant};
-
-    // 安全边界：必须在创建 HTTP client / RequestBuilder、解析用户头部或建立
-    // socket 之前完成授权。后续发包直接使用这里返回的已解析 Url。
-    let authorized = policy
-        .authorize_url(&url)
-        .map_err(|error| error.to_string())?;
-    let scope_decision = authorized.decision;
-    let body = decode_replay_body(body_text, body_base64)?;
-
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
-
-    let m = reqwest::Method::from_bytes(method.trim().to_uppercase().as_bytes())
-        .map_err(|_| format!("非法的 HTTP 方法: {method}"))?;
-    let mut req = client.request(m, authorized.url);
-    for h in &headers {
-        let name = h.name.trim();
-        // content-length / host 交给 reqwest 依据实际 body/url 计算，避免冲突
-        if name.is_empty()
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("host")
-        {
-            continue;
-        }
-        req = req.header(name, &h.value);
-    }
-    if let Some(b) = body {
-        req = req.body(b);
-    }
-
-    let start = Instant::now();
-    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
-    let duration_ms = start.elapsed().as_millis() as i64;
-
-    let status = resp.status();
-    let out_headers: Vec<ReplayHeader> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| ReplayHeader {
-            name: k.to_string(),
-            value: v.to_str().unwrap_or("<非文本值>").to_string(),
-        })
-        .collect();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取响应体失败: {e}"))?;
-    let resp_size = bytes.len() as i64;
-    let (body_text, body_base64) = match std::str::from_utf8(&bytes) {
-        Ok(s) => (Some(s.to_string()), None),
-        Err(_) => (
-            None,
-            Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-        ),
-    };
-
-    Ok(ReplayResponse {
-        status: status.as_u16(),
-        status_text: status.canonical_reason().unwrap_or("").to_string(),
-        headers: out_headers,
-        body_text,
-        body_base64,
-        resp_size,
-        duration_ms,
-        scope_decision,
-    })
-}
-
-#[cfg(test)]
-mod replay_scope_tests {
-    use super::*;
-    use tokio::net::TcpListener;
-    use tokio::time::{timeout, Duration};
-
-    #[tokio::test]
-    async fn out_of_scope_replay_never_opens_a_network_connection() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let policy = ScopePolicy::new(&["example.com".to_string()]).unwrap();
-
-        let error = execute_replay_request(
-            &policy,
-            "GET".into(),
-            format!("http://{address}/must-not-connect"),
-            Vec::new(),
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.starts_with("[OUT_OF_SCOPE]"));
-        assert!(
-            timeout(Duration::from_millis(150), listener.accept())
-                .await
-                .is_err(),
-            "Scope 拒绝后不应建立 TCP 连接"
-        );
-    }
-
-    #[test]
-    fn replay_body_preserves_binary_bytes_and_rejects_ambiguous_inputs() {
-        use base64::Engine;
-
-        let raw = vec![0, 1, 2, 0xff];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-        assert_eq!(decode_replay_body(None, Some(encoded)).unwrap(), Some(raw));
-        assert!(decode_replay_body(Some("text".into()), Some("dGV4dA==".into())).is_err());
-        assert!(decode_replay_body(None, Some("%%%".into())).is_err());
-    }
-}
-
-// ---------- 学习报告 ----------
-
-/// 生成 Markdown 报告文本（供前端预览）
+/// 生成默认脱敏的 Markdown 报告文本（供前端预览）。
 #[tauri::command]
 pub fn build_report(state: State<AppState>, project_id: i64) -> CmdResult<String> {
     let db = state.db.get().map_err(|e| e.to_string())?;
     report::build_markdown(&db, project_id)
 }
 
-/// 导出报告到下载目录，返回保存路径
+#[derive(Debug, serde::Serialize)]
+pub struct ReportExportResult {
+    pub markdown_path: String,
+    pub json_path: String,
+    pub contains_sensitive_evidence: bool,
+}
+
+/// 同时导出主 Markdown 和机器可读 JSON 备份。
+///
+/// 默认只使用 Evidence 的不可变脱敏快照。原始来源内容不会成为持久设置；
+/// 每次敏感导出都必须在后端弹出的原生确认框中单独确认；renderer 不持有、
+/// 不签发、也不能复用任何确认令牌。
 #[tauri::command]
-pub fn export_report(app: AppHandle, state: State<AppState>, project_id: i64) -> CmdResult<String> {
-    let md = {
+pub async fn export_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: i64,
+    include_sensitive_evidence: bool,
+) -> CmdResult<ReportExportResult> {
+    let options = if include_sensitive_evidence {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .message(
+                "本次导出会附加当前仍可读取的原始请求/响应片段，可能包含 Cookie、\
+                 Authorization、API Key 或业务数据。确认仅对本次导出调用有效。",
+            )
+            .title("导出原始敏感 Evidence")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "仅本次包含原始内容".to_string(),
+                "取消".to_string(),
+            ))
+            .show(move |confirmed| {
+                let _ = sender.send(confirmed);
+            });
+        if !receiver
+            .await
+            .map_err(|_| "敏感导出确认框意外关闭".to_string())?
+        {
+            return Err("已取消敏感 Evidence 导出".to_string());
+        }
+        report::ReportOptions::confirmed_sensitive()
+    } else {
+        report::ReportOptions::redacted()
+    };
+    let bundle = {
         let db = state.db.get().map_err(|e| e.to_string())?;
-        report::build_markdown(&db, project_id)?
+        report::build_bundle(&db, project_id, options)?
     };
     let dest_dir = app
         .path()
         .download_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let dest = dest_dir.join(format!("RustForge-Report-{stamp}.md"));
-    std::fs::write(&dest, md).map_err(|e| format!("写入报告失败: {e}"))?;
-    Ok(dest.to_string_lossy().into_owned())
+    let safe_project = report::safe_file_component(&bundle.project_name, project_id);
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+    let sensitivity_marker = if bundle.contains_sensitive_evidence {
+        "-SENSITIVE"
+    } else {
+        ""
+    };
+    let basename =
+        format!("RustForge-Report-{safe_project}-{project_id}{sensitivity_marker}-{stamp}");
+    let (markdown_path, json_path) =
+        write_report_pair(&dest_dir, &basename, &bundle.markdown, &bundle.json)?;
+    Ok(ReportExportResult {
+        markdown_path: markdown_path.to_string_lossy().into_owned(),
+        json_path: json_path.to_string_lossy().into_owned(),
+        contains_sensitive_evidence: bundle.contains_sensitive_evidence,
+    })
+}
+
+fn write_report_pair(
+    directory: &std::path::Path,
+    basename: &str,
+    markdown: &str,
+    json: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(directory).map_err(|error| format!("创建报告导出目录失败: {error}"))?;
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let markdown_path = directory.join(format!("{basename}{suffix}.md"));
+        let json_path = directory.join(format!("{basename}{suffix}.json"));
+        let mut markdown_file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&markdown_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建 Markdown 报告失败: {error}")),
+        };
+        let mut json_file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&json_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                drop(markdown_file);
+                let _ = std::fs::remove_file(&markdown_path);
+                continue;
+            }
+            Err(error) => {
+                drop(markdown_file);
+                let _ = std::fs::remove_file(&markdown_path);
+                return Err(format!("创建 JSON 报告失败: {error}"));
+            }
+        };
+        if let Err(error) = markdown_file
+            .write_all(markdown.as_bytes())
+            .and_then(|_| json_file.write_all(json.as_bytes()))
+        {
+            drop(markdown_file);
+            drop(json_file);
+            let _ = std::fs::remove_file(&markdown_path);
+            let _ = std::fs::remove_file(&json_path);
+            return Err(format!("写入报告失败: {error}"));
+        }
+        return Ok((markdown_path, json_path));
+    }
+    Err("报告文件名冲突次数过多，请稍后重试".to_string())
 }
 
 // ---------- 流量计数（分页/加载更多用） ----------

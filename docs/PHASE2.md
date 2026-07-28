@@ -64,5 +64,5 @@ get_prompt_template / set_prompt_template / reset_prompt_template`
 ## 已知限制（后续 Phase）
 
 - 响应体为 gzip/br 时按原字节存储，AI 看到的也是乱码——详情页解码预览列入 Phase 4 前修
-- 任务树规划器（Phase 3）会复用本阶段的 client/prompts 基础设施
+- 测试计划规划器（Phase 3，后续升级为版本化 proposal）会复用本阶段的 client/prompts 基础设施
 - token 用量统计在 Phase 5

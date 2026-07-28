@@ -26,7 +26,7 @@ export const WORKSPACE_HISTORY_KEY = "rustforge.workspace-history.v1";
 const WORKSPACE_LABELS: Record<WorkspacePath, string> = {
   "/traffic": "流量分析",
   "/repeater": "请求重放",
-  "/tasks": "任务树",
+  "/tasks": "测试计划",
   "/findings": "发现",
 };
 

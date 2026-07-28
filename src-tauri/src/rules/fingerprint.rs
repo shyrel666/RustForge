@@ -1,8 +1,13 @@
 //! 命中指纹：同一规则、同一接口、同一字段的命中必须得到同一个字符串，
-//! 换了字段路径或换了接口就必须不同。Task 3.3 的去重直接依赖这里的稳定性。
+//! 换了字段路径或换了接口就必须不同。Finding 去重直接依赖这里的稳定性。
 //!
-//! 组成成分固定为 `rule_id | rule_version | method | host | path | field_path`，
+//! 命中身份固定为 `rule_id | method | host | path | field_path`，
 //! 每段做长度前缀，避免 `a|bc` 与 `ab|c` 撞到同一个摘要。
+//!
+//! **`rule_version` 刻意不进入身份。** 规则包打补丁版（1.0.0 → 1.0.1）不改变
+//! "这个端点的这个字段有这个问题"这一事实；把版本算进去会让升版后的命中和
+//! 历史 Finding 指纹不同、去重失效并炸出重复。版本只作为命中/证据属性记录。
+//! 规则语义真的变了，就换一个新的 `rule_id`。
 
 use sha2::{Digest, Sha256};
 
@@ -33,25 +38,7 @@ pub fn url_identity(url: &str) -> (String, String) {
     (host, path)
 }
 
-/// 稳定命中指纹（sha256 十六进制）。
-pub fn fingerprint(
-    rule_id: &str,
-    rule_version: &str,
-    method: &str,
-    host: &str,
-    path_without_query: &str,
-    field_path: &str,
-) -> String {
-    let method = method.to_ascii_uppercase();
-    let host = host.to_ascii_lowercase();
-    let components = [
-        rule_id,
-        rule_version,
-        method.as_str(),
-        host.as_str(),
-        path_without_query,
-        field_path,
-    ];
+fn digest(components: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for component in components {
         hasher.update((component.len() as u32).to_be_bytes());
@@ -61,16 +48,37 @@ pub fn fingerprint(
     format!("{:x}", hasher.finalize())
 }
 
-/// 从原始 URL 直接算指纹的便捷入口。
-pub fn fingerprint_for_url(
+/// 稳定命中指纹（sha256 十六进制）。
+pub fn fingerprint(
     rule_id: &str,
-    rule_version: &str,
     method: &str,
-    url: &str,
+    host: &str,
+    path_without_query: &str,
     field_path: &str,
 ) -> String {
+    let method = method.to_ascii_uppercase();
+    let host = host.to_ascii_lowercase();
+    digest(&[
+        rule_id,
+        method.as_str(),
+        host.as_str(),
+        path_without_query,
+        field_path,
+    ])
+}
+
+/// 从原始 URL 直接算指纹的便捷入口。
+pub fn fingerprint_for_url(rule_id: &str, method: &str, url: &str, field_path: &str) -> String {
     let (host, path) = url_identity(url);
-    fingerprint(rule_id, rule_version, method, &host, &path, field_path)
+    fingerprint(rule_id, method, &host, &path, field_path)
+}
+
+/// Finding 身份 = 项目 + 命中指纹。
+///
+/// 直接在引擎指纹上叠一层 project，而不是另起一套规范化逻辑——两处规范化
+/// 迟早会漂移，那时同一个问题会在库里裂成两条 Finding。
+pub fn finding_fingerprint(project_id: i64, hit_fingerprint: &str) -> String {
+    digest(&[&project_id.to_string(), hit_fingerprint])
 }
 
 #[cfg(test)]
@@ -79,8 +87,8 @@ mod tests {
 
     #[test]
     fn same_inputs_always_produce_the_same_fingerprint() {
-        let first = fingerprint("r", "1.0.0", "get", "Example.COM", "/a", "response.body");
-        let second = fingerprint("r", "1.0.0", "GET", "example.com", "/a", "response.body");
+        let first = fingerprint("r", "get", "Example.COM", "/a", "response.body");
+        let second = fingerprint("r", "GET", "example.com", "/a", "response.body");
         assert_eq!(first, second);
         assert_eq!(first.len(), 64);
     }
@@ -89,21 +97,18 @@ mod tests {
     fn query_values_and_field_paths_change_the_identity_correctly() {
         let base = fingerprint_for_url(
             "cookie-no-secure",
-            "1.0.0",
             "GET",
             "https://t.cn/login?id=1",
             "response.cookie.set-cookie[0]",
         );
         let other_query = fingerprint_for_url(
             "cookie-no-secure",
-            "1.0.0",
             "GET",
             "https://t.cn/login?id=2",
             "response.cookie.set-cookie[0]",
         );
         let other_field = fingerprint_for_url(
             "cookie-no-secure",
-            "1.0.0",
             "GET",
             "https://t.cn/login?id=1",
             "response.cookie.set-cookie[1]",
@@ -115,9 +120,26 @@ mod tests {
 
     #[test]
     fn components_cannot_be_shifted_across_the_delimiter() {
-        let left = fingerprint("ab", "c", "GET", "h", "/p", "f");
-        let right = fingerprint("a", "bc", "GET", "h", "/p", "f");
+        let left = fingerprint("abc", "GET", "h", "/p", "f");
+        let right = fingerprint("ab", "GET", "ch", "/p", "f");
         assert_ne!(left, right);
+        assert_ne!(
+            finding_fingerprint(1, "23"),
+            finding_fingerprint(12, "3"),
+            "project 与命中指纹之间同样不能移位"
+        );
+    }
+
+    #[test]
+    fn rule_version_is_not_part_of_the_identity() {
+        // 规则包补丁升版不得让同一端点同一字段裂成两条 Finding
+        let hit = fingerprint_for_url("sql-error-leak", "GET", "https://t.cn/a", "response.body");
+        assert_eq!(finding_fingerprint(7, &hit), finding_fingerprint(7, &hit));
+        assert_ne!(
+            finding_fingerprint(7, &hit),
+            finding_fingerprint(8, &hit),
+            "不同项目必须是不同身份"
+        );
     }
 
     #[test]

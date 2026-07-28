@@ -134,6 +134,7 @@ async fn spawn_scripted_origin(response: Vec<u8>) -> (u16, oneshot::Receiver<Vec
         let request = read_complete_request(&mut tls).await;
         let _ = observed_tx.send(request);
         tls.write_all(&response).await.unwrap();
+        tls.flush().await.unwrap();
         let _ = tls.shutdown().await;
     });
     (port, observed_rx)
@@ -240,6 +241,36 @@ async fn read_complete_request(stream: &mut tokio_rustls::server::TlsStream<TcpS
     bytes
 }
 
+/// 按 HTTP framing 读取完整响应，不依赖代理主动关闭下游 keep-alive 连接。
+/// 先前使用 `read_to_end` 会在正文已经完整到达后仍等待 EOF，导致大正文测试
+/// 偶发耗尽 30 秒超时。
+async fn read_complete_response(
+    stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let read = stream.read(&mut chunk).await.unwrap();
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        let Some(head_end) = header_end(&bytes) else {
+            continue;
+        };
+        let head = String::from_utf8_lossy(&bytes[..head_end]);
+        let body = &bytes[head_end..];
+        if let Some(length) = content_length(&head) {
+            if body.len() >= length {
+                break;
+            }
+        } else if is_chunked(&head) && chunked_complete(body) {
+            break;
+        }
+    }
+    bytes
+}
+
 fn encode_chunked(payload: &[u8], chunk_size: usize) -> Vec<u8> {
     let mut encoded = Vec::new();
     for chunk in payload.chunks(chunk_size) {
@@ -317,9 +348,8 @@ async fn request_via_proxy(proxy_port: u16, origin_port: u16, request: &[u8]) ->
     let server_name = ServerName::try_from(CA_SCOPE_HOST).unwrap().to_owned();
     let mut tls = connector.connect(server_name, tcp).await.unwrap();
     tls.write_all(request).await.unwrap();
-    let mut response = Vec::new();
-    tls.read_to_end(&mut response).await.unwrap();
-    response
+    tls.flush().await.unwrap();
+    read_complete_response(&mut tls).await
 }
 
 fn scoped_pool(file_name: &str) -> Pool {

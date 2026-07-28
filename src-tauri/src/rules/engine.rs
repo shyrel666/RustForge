@@ -3,8 +3,12 @@
 //! Evaluation is local and read-only. Regexes are compiled under loader limits,
 //! candidate expansion is bounded by the extractors, and the whole pack has a
 //! wall-clock budget. A disabled pack produces diagnostics and zero hits.
+//!
+//! Bodies, headers and cookies are decoded/parsed once per pack evaluation and
+//! reused by every rule and condition (see [`EvaluationContext`]). Without that
+//! the worker would re-scan a 1 MiB response once per rule and degrade linearly
+//! with pack size.
 
-use super::builtin::{LegacyRule, LegacyTarget};
 use super::extractors::{
     cookie_candidates, evidence_window, json_path_lookup, json_scalar, jwt_metadata,
     parse_cookie_header, parse_form, parse_headers, parse_query, parse_set_cookie, query_scalar,
@@ -19,8 +23,10 @@ use super::schema::{
     TRUNCATED_HIT_MAX_CONFIDENCE,
 };
 use crate::ai::redaction::{redact_url, RedactionManifest};
+use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 pub use super::schema::Severity;
@@ -119,61 +125,142 @@ struct ConditionMatch {
     incomplete: bool,
 }
 
-fn body_text<'a>(body: &'a [u8], decode_status: &str) -> Option<std::borrow::Cow<'a, str>> {
+pub(super) fn body_text<'a>(body: &'a [u8], decode_status: &str) -> Option<Cow<'a, str>> {
     matches!(decode_status, "empty" | "identity_text" | "decoded_text")
         .then(|| String::from_utf8_lossy(body))
 }
 
-fn header_source<'a>(view: &'a TrafficView<'a>, target: Target) -> Option<&'a str> {
-    match target {
-        Target::RequestHeader | Target::RequestCookie => Some(view.req_headers),
-        Target::ResponseHeader | Target::ResponseCookie => view.resp_headers,
-        _ => None,
-    }
+/// 一次流量 × 一个规则包的求值上下文。
+///
+/// 正文在构造时解码一次；Header JSON、Cookie 实例和正文 JSON 首次用到时解析
+/// 一次，之后所有规则和条件共用同一份结果。
+struct EvaluationContext<'a> {
+    view: &'a TrafficView<'a>,
+    budget: Budget,
+    req_body: Option<Cow<'a, str>>,
+    resp_body: Option<Cow<'a, str>>,
+    req_json: OnceCell<Option<serde_json::Value>>,
+    resp_json: OnceCell<Option<serde_json::Value>>,
+    req_headers: OnceCell<Vec<(String, Vec<String>)>>,
+    resp_headers: OnceCell<Vec<(String, Vec<String>)>>,
+    req_cookies: OnceCell<Vec<ScopedCookie>>,
+    resp_cookies: OnceCell<Vec<ScopedCookie>>,
 }
 
-fn cookie_instances(view: &TrafficView<'_>, target: Target) -> Vec<ScopedCookie> {
-    let header_name = match target {
-        Target::RequestCookie => "cookie",
-        Target::ResponseCookie => "set-cookie",
-        _ => return Vec::new(),
-    };
-    let Some(headers) = header_source(view, target) else {
-        return Vec::new();
-    };
-    let values = parse_headers(headers)
-        .into_iter()
-        .filter(|(name, _)| name == header_name)
-        .flat_map(|(_, values)| values);
-    let mut cookies = Vec::new();
-    for raw in values {
+impl<'a> EvaluationContext<'a> {
+    fn new(view: &'a TrafficView<'a>, limits: EvaluationLimits) -> Self {
+        let req_body = body_text(view.req_body, view.req_decode_status);
+        let resp_body = view
+            .resp_body
+            .and_then(|body| body_text(body, view.resp_decode_status));
+        Self {
+            view,
+            budget: Budget::new(limits),
+            req_body,
+            resp_body,
+            req_json: OnceCell::new(),
+            resp_json: OnceCell::new(),
+            req_headers: OnceCell::new(),
+            resp_headers: OnceCell::new(),
+            req_cookies: OnceCell::new(),
+            resp_cookies: OnceCell::new(),
+        }
+    }
+
+    fn checkpoint(&self) -> Result<(), ()> {
+        self.budget.checkpoint()
+    }
+
+    /// `(正文文本, 捕获是否截断, 字段路径前缀)`
+    fn body(&self, target: Target) -> (Option<&str>, bool, &'static str) {
         match target {
-            Target::RequestCookie => {
-                for cookie in parse_cookie_header(&raw) {
+            Target::RequestBody => (
+                self.req_body.as_deref(),
+                self.view.req_truncated,
+                "request.body",
+            ),
+            Target::ResponseBody => (
+                self.resp_body.as_deref(),
+                self.view.resp_truncated,
+                "response.body",
+            ),
+            _ => (None, false, "unsupported.body"),
+        }
+    }
+
+    fn body_json(&self, target: Target) -> Option<&serde_json::Value> {
+        let (cell, body) = match target {
+            Target::RequestBody => (&self.req_json, self.req_body.as_deref()),
+            Target::ResponseBody => (&self.resp_json, self.resp_body.as_deref()),
+            _ => return None,
+        };
+        cell.get_or_init(|| body.and_then(|body| serde_json::from_str(body).ok()))
+            .as_ref()
+    }
+
+    fn headers(&self, target: Target) -> &[(String, Vec<String>)] {
+        let (cell, raw) = match target {
+            Target::RequestHeader | Target::RequestCookie => {
+                (&self.req_headers, Some(self.view.req_headers))
+            }
+            Target::ResponseHeader | Target::ResponseCookie => {
+                (&self.resp_headers, self.view.resp_headers)
+            }
+            _ => return &[],
+        };
+        cell.get_or_init(|| raw.map(parse_headers).unwrap_or_default())
+    }
+
+    fn cookies(&self, target: Target) -> &[ScopedCookie] {
+        let cell = match target {
+            Target::RequestCookie => &self.req_cookies,
+            Target::ResponseCookie => &self.resp_cookies,
+            _ => return &[],
+        };
+        cell.get_or_init(|| self.parse_cookies(target))
+    }
+
+    fn parse_cookies(&self, target: Target) -> Vec<ScopedCookie> {
+        let header_name = match target {
+            Target::RequestCookie => "cookie",
+            Target::ResponseCookie => "set-cookie",
+            _ => return Vec::new(),
+        };
+        let values = self
+            .headers(target)
+            .iter()
+            .filter(|(name, _)| name == header_name)
+            .flat_map(|(_, values)| values);
+        let mut cookies = Vec::new();
+        for raw in values {
+            match target {
+                Target::RequestCookie => {
+                    for cookie in parse_cookie_header(raw) {
+                        if cookies.len() == MAX_CANDIDATES_PER_SELECTOR {
+                            return cookies;
+                        }
+                        cookies.push(ScopedCookie {
+                            target,
+                            index: cookies.len(),
+                            cookie,
+                        });
+                    }
+                }
+                Target::ResponseCookie => {
                     if cookies.len() == MAX_CANDIDATES_PER_SELECTOR {
                         return cookies;
                     }
                     cookies.push(ScopedCookie {
                         target,
                         index: cookies.len(),
-                        cookie,
+                        cookie: parse_set_cookie(raw),
                     });
                 }
+                _ => {}
             }
-            Target::ResponseCookie => {
-                if cookies.len() == MAX_CANDIDATES_PER_SELECTOR {
-                    return cookies;
-                }
-                cookies.push(ScopedCookie {
-                    target,
-                    index: cookies.len(),
-                    cookie: parse_set_cookie(&raw),
-                });
-            }
-            _ => {}
         }
+        cookies
     }
-    cookies
 }
 
 fn cookie_base_path(target: Target, index: usize) -> String {
@@ -257,26 +344,6 @@ fn scalar_candidate(
     }
 }
 
-fn body_source<'a>(
-    view: &'a TrafficView<'a>,
-    target: Target,
-) -> (Option<std::borrow::Cow<'a, str>>, bool, &'static str) {
-    match target {
-        Target::RequestBody => (
-            body_text(view.req_body, view.req_decode_status),
-            view.req_truncated,
-            "request.body",
-        ),
-        Target::ResponseBody => (
-            view.resp_body
-                .and_then(|body| body_text(body, view.resp_decode_status)),
-            view.resp_truncated,
-            "response.body",
-        ),
-        _ => (None, false, "unsupported.body"),
-    }
-}
-
 fn candidates_for_cookie(
     selector: &CompiledSelector,
     cookie_scope: &ScopedCookie,
@@ -318,14 +385,16 @@ fn candidates_for_cookie(
 
 fn candidates_for_selector(
     selector: &CompiledSelector,
-    view: &TrafficView<'_>,
+    ctx: &EvaluationContext<'_>,
     scope: Option<&ScopedCookie>,
 ) -> Vec<Candidate> {
+    let view = ctx.view;
     if selector.target.is_cookie() {
         if let Some(scope) = scope.filter(|scope| scope.target == selector.target) {
             return candidates_for_cookie(selector, scope);
         }
-        return cookie_instances(view, selector.target)
+        return ctx
+            .cookies(selector.target)
             .iter()
             .flat_map(|cookie| candidates_for_cookie(selector, cookie))
             .take(MAX_CANDIDATES_PER_SELECTOR)
@@ -345,11 +414,10 @@ fn candidates_for_selector(
             Some(redacted_url(view.url)),
             false,
         )],
-        Target::Query => parse_query(view.url)
+        Target::Query => index_fields_by_name(parse_query(view.url))
             .into_iter()
-            .enumerate()
-            .filter(|(_, (name, _))| selector.name.as_deref().is_none_or(|wanted| wanted == name))
-            .filter_map(|(index, (name, value))| {
+            .filter(|(_, name, _)| selector.name.as_deref().is_none_or(|wanted| wanted == name))
+            .filter_map(|(index, name, value)| {
                 let (scalar, suffix) = match selector.extractor {
                     CompiledExtractor::Text => (format!("{name}={value}"), "pair"),
                     CompiledExtractor::Query(field) => (
@@ -378,25 +446,20 @@ fn candidates_for_selector(
             })
             .collect(),
         Target::RequestHeader | Target::ResponseHeader => {
-            let Some(headers) = header_source(view, selector.target) else {
-                return Vec::new();
-            };
             let prefix = selector.target.path_prefix();
-            parse_headers(headers)
-                .into_iter()
+            ctx.headers(selector.target)
+                .iter()
                 .filter(|(name, _)| selector.name.as_deref().is_none_or(|wanted| wanted == name))
                 .flat_map(|(name, values)| {
-                    values
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(move |(index, value)| match selector.extractor {
+                    values.iter().enumerate().filter_map(move |(index, value)| {
+                        match selector.extractor {
                             CompiledExtractor::Text => Some(scalar_candidate(
                                 format!("{prefix}.{name}[{index}]"),
                                 value.clone(),
                                 Some(redact_evidence(&format!("{name}: {value}"))),
                                 false,
                             )),
-                            CompiledExtractor::JwtMetadata(field) => jwt_metadata(&value, field)
+                            CompiledExtractor::JwtMetadata(field) => jwt_metadata(value, field)
                                 .map(|metadata| {
                                     scalar_candidate(
                                         format!("{prefix}.{name}[{index}].jwt.{field:?}")
@@ -407,12 +470,13 @@ fn candidates_for_selector(
                                     )
                                 }),
                             _ => None,
-                        })
+                        }
+                    })
                 })
                 .collect()
         }
         Target::RequestBody | Target::ResponseBody => {
-            let (body, capture_incomplete, base) = body_source(view, selector.target);
+            let (body, capture_incomplete, base) = ctx.body(selector.target);
             let Some(body) = body.filter(|body| !body.is_empty()) else {
                 return Vec::new();
             };
@@ -423,13 +487,12 @@ fn candidates_for_selector(
                     None,
                     capture_incomplete,
                 )],
-                CompiledExtractor::Form(field) => parse_form(&body)
+                CompiledExtractor::Form(field) => index_fields_by_name(parse_form(body))
                     .into_iter()
-                    .enumerate()
-                    .filter(|(_, (name, _))| {
+                    .filter(|(_, name, _)| {
                         selector.name.as_deref().is_none_or(|wanted| wanted == name)
                     })
-                    .map(|(index, (name, value))| {
+                    .map(|(index, name, value)| {
                         scalar_candidate(
                             format!(
                                 "{base}.form.{name}[{index}].{}",
@@ -442,10 +505,10 @@ fn candidates_for_selector(
                     })
                     .collect(),
                 CompiledExtractor::JsonPath { path, segments } => {
-                    let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    let Some(json) = ctx.body_json(selector.target) else {
                         return Vec::new();
                     };
-                    json_path_lookup(&json, segments)
+                    json_path_lookup(json, segments)
                         .map(|value| {
                             let value = json_scalar(value);
                             let last_name = path
@@ -469,7 +532,7 @@ fn candidates_for_selector(
                         .into_iter()
                         .collect()
                 }
-                CompiledExtractor::JwtMetadata(field) => jwt_metadata(&body, *field)
+                CompiledExtractor::JwtMetadata(field) => jwt_metadata(body, *field)
                     .map(|value| {
                         scalar_candidate(
                             format!("{base}.jwt.{field:?}").to_ascii_lowercase(),
@@ -509,6 +572,20 @@ fn candidates_for_selector(
             .collect(),
         Target::RequestCookie | Target::ResponseCookie => unreachable!("handled above"),
     }
+}
+
+/// 字段路径中的下标只区分同名重复字段，不受其他参数插入、删除或重排影响。
+fn index_fields_by_name(fields: Vec<(String, String)>) -> Vec<(usize, String, String)> {
+    let mut occurrences = HashMap::<String, usize>::new();
+    fields
+        .into_iter()
+        .map(|(name, value)| {
+            let index = occurrences.entry(name.clone()).or_default();
+            let current = *index;
+            *index += 1;
+            (current, name, value)
+        })
+        .collect()
 }
 
 fn query_field_name(field: QueryFieldLike) -> &'static str {
@@ -558,12 +635,12 @@ fn condition_selector(condition: &CompiledCondition) -> Option<&CompiledSelector
 fn missing_match(
     selector: &CompiledSelector,
     scope: Option<&ScopedCookie>,
-    view: &TrafficView<'_>,
+    ctx: &EvaluationContext<'_>,
 ) -> ConditionMatch {
     let field_path = selector_missing_path(selector, scope);
     let incomplete = match selector.target {
-        Target::RequestBody => view.req_truncated,
-        Target::ResponseBody => view.resp_truncated,
+        Target::RequestBody => ctx.view.req_truncated,
+        Target::ResponseBody => ctx.view.resp_truncated,
         _ => false,
     };
     let evidence = scope
@@ -597,19 +674,18 @@ fn ascii_find(haystack: &str, needle: &str, case_sensitive: bool) -> Option<Rang
 
 fn evaluate_condition(
     condition: &CompiledCondition,
-    view: &TrafficView<'_>,
+    ctx: &EvaluationContext<'_>,
     scope: Option<&ScopedCookie>,
-    budget: &Budget,
 ) -> Result<Option<ConditionMatch>, ()> {
-    budget.checkpoint()?;
+    ctx.checkpoint()?;
     match condition {
         CompiledCondition::Equals {
             selector,
             value,
             case_sensitive,
         } => {
-            for candidate in candidates_for_selector(selector, view, scope) {
-                budget.checkpoint()?;
+            for candidate in candidates_for_selector(selector, ctx, scope) {
+                ctx.checkpoint()?;
                 let actual = candidate.value.trim();
                 let expected = value.trim();
                 let matched = if *case_sensitive {
@@ -631,8 +707,8 @@ fn evaluate_condition(
             value,
             case_sensitive,
         } => {
-            for candidate in candidates_for_selector(selector, view, scope) {
-                budget.checkpoint()?;
+            for candidate in candidates_for_selector(selector, ctx, scope) {
+                ctx.checkpoint()?;
                 if let Some(range) = ascii_find(&candidate.value, value, *case_sensitive) {
                     return Ok(Some(matched_candidate(&candidate, Some(range))));
                 }
@@ -640,34 +716,34 @@ fn evaluate_condition(
             Ok(None)
         }
         CompiledCondition::Regex { selector, pattern } => {
-            for candidate in candidates_for_selector(selector, view, scope) {
-                budget.checkpoint()?;
+            for candidate in candidates_for_selector(selector, ctx, scope) {
+                ctx.checkpoint()?;
                 if let Some(matched) = pattern.find(&candidate.value) {
                     return Ok(Some(matched_candidate(&candidate, Some(matched.range()))));
                 }
-                budget.checkpoint()?;
+                ctx.checkpoint()?;
             }
             Ok(None)
         }
         CompiledCondition::Exists { selector } => {
-            let candidates = candidates_for_selector(selector, view, scope);
+            let candidates = candidates_for_selector(selector, ctx, scope);
             Ok(candidates
                 .first()
                 .map(|candidate| matched_candidate(candidate, None)))
         }
         CompiledCondition::Missing { selector } => {
-            let candidates = candidates_for_selector(selector, view, scope);
+            let candidates = candidates_for_selector(selector, ctx, scope);
             Ok(candidates
                 .is_empty()
-                .then(|| missing_match(selector, scope, view)))
+                .then(|| missing_match(selector, scope, ctx)))
         }
         CompiledCondition::Numeric {
             selector,
             comparison,
             value,
         } => {
-            for candidate in candidates_for_selector(selector, view, scope) {
-                budget.checkpoint()?;
+            for candidate in candidates_for_selector(selector, ctx, scope) {
+                ctx.checkpoint()?;
                 if candidate
                     .value
                     .trim()
@@ -684,7 +760,7 @@ fn evaluate_condition(
             let mut first = None;
             let mut incomplete = false;
             for condition in conditions {
-                let Some(matched) = evaluate_condition(condition, view, scope, budget)? else {
+                let Some(matched) = evaluate_condition(condition, ctx, scope)? else {
                     return Ok(None);
                 };
                 incomplete |= matched.incomplete;
@@ -699,14 +775,14 @@ fn evaluate_condition(
         }
         CompiledCondition::Any(conditions) => {
             for condition in conditions {
-                if let Some(matched) = evaluate_condition(condition, view, scope, budget)? {
+                if let Some(matched) = evaluate_condition(condition, ctx, scope)? {
                     return Ok(Some(matched));
                 }
             }
             Ok(None)
         }
         CompiledCondition::Not(condition) => {
-            if evaluate_condition(condition, view, scope, budget)?.is_some() {
+            if evaluate_condition(condition, ctx, scope)?.is_some() {
                 return Ok(None);
             }
             let Some(selector) = condition_selector(condition) else {
@@ -716,29 +792,32 @@ fn evaluate_condition(
                     incomplete: false,
                 }));
             };
-            Ok(Some(missing_match(selector, scope, view)))
+            Ok(Some(missing_match(selector, scope, ctx)))
         }
         CompiledCondition::ForEach {
             target,
             name,
             condition,
         } => {
-            for instance in cookie_instances(view, *target)
-                .into_iter()
-                .filter(|instance| {
-                    name.as_deref()
-                        .is_none_or(|name| name == instance.cookie.name)
-                })
-            {
-                budget.checkpoint()?;
-                if let Some(matched) = evaluate_condition(condition, view, Some(&instance), budget)?
-                {
+            for instance in matching_cookies(ctx, *target, name.as_deref()) {
+                ctx.checkpoint()?;
+                if let Some(matched) = evaluate_condition(condition, ctx, Some(instance))? {
                     return Ok(Some(matched));
                 }
             }
             Ok(None)
         }
     }
+}
+
+fn matching_cookies<'c>(
+    ctx: &'c EvaluationContext<'_>,
+    target: Target,
+    name: Option<&'c str>,
+) -> impl Iterator<Item = &'c ScopedCookie> {
+    ctx.cookies(target)
+        .iter()
+        .filter(move |instance| name.is_none_or(|name| name == instance.cookie.name))
 }
 
 /// 一条规则在一条流量上的全部命中。
@@ -748,8 +827,7 @@ fn evaluate_condition(
 /// Task 3.3 也能按指纹独立去重。其它算子最多一条命中。
 fn evaluate_rule_matches(
     rule: &CompiledRule,
-    view: &TrafficView<'_>,
-    budget: &Budget,
+    ctx: &EvaluationContext<'_>,
 ) -> Result<Vec<ConditionMatch>, ()> {
     let CompiledCondition::ForEach {
         target,
@@ -757,35 +835,29 @@ fn evaluate_rule_matches(
         condition,
     } = &rule.condition
     else {
-        return Ok(evaluate_condition(&rule.condition, view, None, budget)?
+        return Ok(evaluate_condition(&rule.condition, ctx, None)?
             .into_iter()
             .collect());
     };
     let mut matches = Vec::new();
-    for instance in cookie_instances(view, *target)
-        .into_iter()
-        .filter(|instance| {
-            name.as_deref()
-                .is_none_or(|name| name == instance.cookie.name)
-        })
-    {
-        budget.checkpoint()?;
-        if let Some(matched) = evaluate_condition(condition, view, Some(&instance), budget)? {
+    for instance in matching_cookies(ctx, *target, name.as_deref()) {
+        ctx.checkpoint()?;
+        if let Some(matched) = evaluate_condition(condition, ctx, Some(instance))? {
             matches.push(matched);
         }
     }
     Ok(matches)
 }
 
-pub fn evaluate_pack_with_limits<'a>(
+pub fn evaluate_pack_with_limits<'a, 'v>(
     pack: &'a CompiledPack,
-    view: &TrafficView<'_>,
+    view: &'v TrafficView<'v>,
     limits: EvaluationLimits,
 ) -> EvaluationReport<'a> {
     let mut report = EvaluationReport::default();
-    let budget = Budget::new(limits);
+    let ctx = EvaluationContext::new(view, limits);
     for rule in &pack.rules {
-        let matches = match evaluate_rule_matches(rule, view, &budget) {
+        let matches = match evaluate_rule_matches(rule, &ctx) {
             Ok(matches) => matches,
             Err(()) => {
                 report.timed_out = true;
@@ -808,7 +880,6 @@ pub fn evaluate_pack_with_limits<'a>(
             report.hits.push(RuleHit {
                 fingerprint: fingerprint_for_url(
                     &rule.rule_id,
-                    &rule.version,
                     view.method,
                     view.url,
                     &matched.field_path,
@@ -824,13 +895,19 @@ pub fn evaluate_pack_with_limits<'a>(
     report
 }
 
-pub fn evaluate_pack<'a>(pack: &'a CompiledPack, view: &TrafficView<'_>) -> EvaluationReport<'a> {
+pub fn evaluate_pack<'a, 'v>(
+    pack: &'a CompiledPack,
+    view: &'v TrafficView<'v>,
+) -> EvaluationReport<'a> {
     evaluate_pack_with_limits(pack, view, EvaluationLimits::default())
 }
 
 /// 对任意加载结果求值。被禁用的包只产出一条诊断和零条命中——调用方
 /// （代理）照常写库、照常继续，不会因为规则包坏了而中断。
-pub fn evaluate_status<'a>(status: &'a PackStatus, view: &TrafficView<'_>) -> EvaluationReport<'a> {
+pub fn evaluate_status<'a, 'v>(
+    status: &'a PackStatus,
+    view: &'v TrafficView<'v>,
+) -> EvaluationReport<'a> {
     match status {
         PackStatus::Loaded(pack) => evaluate_pack(pack, view),
         PackStatus::Disabled { pack_id, reason } => EvaluationReport {
@@ -843,65 +920,8 @@ pub fn evaluate_status<'a>(status: &'a PackStatus, view: &TrafficView<'_>) -> Ev
     }
 }
 
-pub fn evaluate(view: &TrafficView<'_>) -> EvaluationReport<'static> {
+pub fn evaluate<'v>(view: &'v TrafficView<'v>) -> EvaluationReport<'static> {
     evaluate_status(super::loader::builtin_pack(), view)
-}
-
-// ---- 旧版正则实现：只留给 Task 3.3 做新旧影子对比 ----
-
-/// 旧版（v1）命中结果。
-pub struct LegacyRuleHit {
-    pub rule: &'static LegacyRule,
-    /// 命中的目标段（如 "resp_body"）
-    pub location: &'static str,
-    pub incomplete_evidence: bool,
-}
-
-static LEGACY_RULES: LazyLock<Vec<LegacyRule>> = LazyLock::new(super::builtin::legacy_rules);
-
-/// 旧版"整段文本跑正则"的求值实现，语义上带已知缺陷：`must_absent` 作用于
-/// 整个 Header JSON，任意一条合规 Cookie 都会掩盖其它 Cookie 的属性缺失。
-/// 保留它只为让 Task 3.3 能用同一批输入做新旧对比，不要再用于生产判定。
-pub fn legacy_evaluate(view: &TrafficView<'_>) -> Vec<LegacyRuleHit> {
-    let req_body = body_text(view.req_body, view.req_decode_status);
-    let resp_body = view
-        .resp_body
-        .and_then(|body| body_text(body, view.resp_decode_status));
-    let empty = String::new();
-    let req_body = req_body.as_deref().unwrap_or(&empty);
-    let resp_body = resp_body.as_deref().unwrap_or(&empty);
-
-    let mut hits = Vec::new();
-    for rule in LEGACY_RULES.iter() {
-        for &target in rule.targets {
-            let (text, location, incomplete_evidence): (&str, &'static str, bool) = match target {
-                LegacyTarget::Url => (view.url, "url", false),
-                LegacyTarget::ReqHeaders => (view.req_headers, "req_headers", false),
-                LegacyTarget::ReqBody => (req_body, "req_body", view.req_truncated),
-                LegacyTarget::RespHeaders => {
-                    (view.resp_headers.unwrap_or(""), "resp_headers", false)
-                }
-                LegacyTarget::RespBody => (resp_body, "resp_body", view.resp_truncated),
-            };
-            if text.is_empty() {
-                continue;
-            }
-            if rule.pattern.is_match(text)
-                && rule
-                    .must_absent
-                    .as_ref()
-                    .is_none_or(|neg| !neg.is_match(text))
-            {
-                hits.push(LegacyRuleHit {
-                    rule,
-                    location,
-                    incomplete_evidence,
-                });
-                break; // 同一规则命中一次即可
-            }
-        }
-    }
-    hits
 }
 
 #[cfg(test)]
@@ -975,6 +995,72 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_query_and_form_reordering_does_not_change_hit_identity() {
+        let first_query_view = view(
+            "https://t.cn/login?token=first&locale=zh",
+            "{}",
+            b"",
+            None,
+            None,
+        );
+        let reordered_query_view = view(
+            "https://t.cn/login?locale=en&token=second",
+            "{}",
+            b"",
+            None,
+            None,
+        );
+        let first_query = evaluate(&first_query_view);
+        let reordered_query = evaluate(&reordered_query_view);
+        let first_query_hit = hit(&first_query, "sensitive-param-in-url").unwrap();
+        let reordered_query_hit = hit(&reordered_query, "sensitive-param-in-url").unwrap();
+        assert_eq!(first_query_hit.field_path, "request.query.token[0].name");
+        assert_eq!(first_query_hit.field_path, reordered_query_hit.field_path);
+        assert_eq!(first_query_hit.fingerprint, reordered_query_hit.fingerprint);
+
+        let first_form_view = view(
+            "https://t.cn/login",
+            "{}",
+            b"username=alice&password=first",
+            None,
+            None,
+        );
+        let reordered_form_view = view(
+            "https://t.cn/login",
+            "{}",
+            b"password=second&username=bob",
+            None,
+            None,
+        );
+        let first_form = evaluate(&first_form_view);
+        let reordered_form = evaluate(&reordered_form_view);
+        let first_form_hit = hit(&first_form, "password-in-request-body").unwrap();
+        let reordered_form_hit = hit(&reordered_form, "password-in-request-body").unwrap();
+        assert_eq!(
+            first_form_hit.field_path,
+            "request.body.form.password[0].name"
+        );
+        assert_eq!(first_form_hit.field_path, reordered_form_hit.field_path);
+        assert_eq!(first_form_hit.fingerprint, reordered_form_hit.fingerprint);
+    }
+
+    #[test]
+    fn repeated_names_keep_distinct_occurrence_indices() {
+        assert_eq!(
+            index_fields_by_name(vec![
+                ("token".into(), "a".into()),
+                ("locale".into(), "zh".into()),
+                ("token".into(), "b".into()),
+            ]),
+            vec![
+                (0, "token".into(), "a".into()),
+                (0, "locale".into(), "zh".into()),
+                (1, "token".into(), "b".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn cookie_selector_candidate_expansion_has_one_global_limit() {
         let attributes = (0..200)
             .map(|index| format!("attribute-{index}=value"))
@@ -1002,48 +1088,75 @@ mod tests {
                 attribute: None,
             },
         };
+        let ctx = EvaluationContext::new(&view, EvaluationLimits::default());
         assert_eq!(
-            candidates_for_selector(&selector, &view, None).len(),
+            candidates_for_selector(&selector, &ctx, None).len(),
             MAX_CANDIDATES_PER_SELECTOR
         );
     }
 
     #[test]
-    fn per_cookie_evaluation_fixes_the_legacy_global_must_absent_bug() {
+    fn bodies_headers_and_json_are_parsed_once_per_pack_evaluation() {
+        let body = br#"{"detail":"You have an error in your SQL syntax","host":"10.0.0.7"}"#;
         let view = view(
-            "https://t.cn/login",
+            "https://t.cn/item?id=1",
             "{}",
             b"",
-            Some(
-                r#"{"set-cookie":["session=abc; Path=/; Secure","theme=dark; Path=/; Secure; HttpOnly"]}"#,
-            ),
-            None,
+            Some(r#"{"content-type":"application/json","set-cookie":["a=1; Path=/"]}"#),
+            Some(body),
         );
-        // 旧实现：theme 带了 HttpOnly，全局 must_absent 就认定整条响应没问题
-        assert!(!legacy_evaluate(&view)
-            .iter()
-            .any(|hit| hit.rule.id == "cookie-no-httponly"));
-        // 新实现：逐条判定，session 缺 HttpOnly 被单独识别出来
+        let ctx = EvaluationContext::new(&view, EvaluationLimits::default());
+
+        // 同一份数据反复取到的必须是同一块内存，而不是每次重新解码/解析
+        let (first, _, _) = ctx.body(Target::ResponseBody);
+        let (second, _, _) = ctx.body(Target::ResponseBody);
+        assert_eq!(first.unwrap().as_ptr(), second.unwrap().as_ptr());
+        assert!(std::ptr::eq(
+            ctx.body_json(Target::ResponseBody).unwrap(),
+            ctx.body_json(Target::ResponseBody).unwrap()
+        ));
+        assert_eq!(
+            ctx.headers(Target::ResponseHeader).as_ptr(),
+            ctx.headers(Target::ResponseCookie).as_ptr(),
+            "Header JSON 只应解析一次并被 header/cookie 目标共用"
+        );
+        assert_eq!(
+            ctx.cookies(Target::ResponseCookie).as_ptr(),
+            ctx.cookies(Target::ResponseCookie).as_ptr()
+        );
+
+        // 复用不改变判定结果
         let report = evaluate(&view);
-        let hit = hit(&report, "cookie-no-httponly").unwrap();
-        assert!(hit.field_path.contains("set-cookie[0]"));
-        assert!(!hit.evidence.contains("abc"));
+        assert!(hit(&report, "sql-error-leak").is_some());
+        assert!(hit(&report, "internal-ip-leak").is_some());
     }
 
     #[test]
-    fn cookie_value_spelling_secure_is_not_mistaken_for_the_attribute() {
+    fn a_large_body_still_yields_correct_hits_under_a_generous_budget() {
+        let mut body = vec![b'a'; 1024 * 1024];
+        body.extend_from_slice(b"You have an error in your SQL syntax");
         let view = view(
-            "https://t.cn/login",
+            "https://t.cn/big",
             "{}",
             b"",
-            Some(r#"{"set-cookie":"sid=very-secure-token; Path=/; HttpOnly"}"#),
-            None,
+            Some(r#"{"content-type":"text/plain"}"#),
+            Some(&body),
         );
-        // 旧实现对整段 Header JSON 跑 `(?i)secure`，Cookie 值里的 secure 会掩盖缺失
-        assert!(!legacy_evaluate(&view)
+        let PackStatus::Loaded(pack) = builtin_pack() else {
+            panic!("builtin pack disabled")
+        };
+        let report = evaluate_pack_with_limits(
+            pack,
+            &view,
+            EvaluationLimits {
+                max_duration: Duration::from_secs(30),
+            },
+        );
+        assert!(!report.timed_out);
+        assert!(report
+            .hits
             .iter()
-            .any(|hit| hit.rule.id == "cookie-no-secure"));
-        assert!(hit(&evaluate(&view), "cookie-no-secure").is_some());
+            .any(|hit| hit.rule.rule_id == "sql-error-leak"));
     }
 
     #[test]

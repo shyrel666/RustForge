@@ -1,7 +1,7 @@
-//! 旧版（v1）内置被动规则的兼容层。
+//! 旧版（v1）内置被动规则的测试夹具。
 //!
 //! 生产求值已经切到 `packs/builtin-v1.json` 声明式规则包（见 `loader` /
-//! `engine`）。这里保留同样 14 条规则的正则实现，只为 Task 3.3 做新旧影子
+//! `engine`）。这里冻结同样 14 条规则的正则实现，只为 Task 3.3 做新旧影子
 //! 对比时能跑同一批输入；它带着已知语义缺陷（全局 `must_absent` 会让任意
 //! 一条合规 Cookie 掩盖其它 Cookie 的属性缺失），不要再用于判定。
 
@@ -273,6 +273,10 @@ mod tests {
                 .find(|rule| rule.rule_id == legacy.id)
                 .unwrap_or_else(|| panic!("规则 {} 未迁移到声明式规则包", legacy.id));
             assert_eq!(migrated.name, legacy.name, "{}", legacy.id);
+            assert!(!legacy.description.is_empty(), "{}", legacy.id);
+            assert!(!legacy.verify_hint.is_empty(), "{}", legacy.id);
+            assert!(!migrated.description.is_empty(), "{}", legacy.id);
+            assert!(!migrated.verify_hint.is_empty(), "{}", legacy.id);
             assert_eq!(migrated.severity, legacy.severity, "{}", legacy.id);
             assert_eq!(migrated.tag, legacy.tag, "{}", legacy.id);
             assert_eq!(migrated.vuln_type, legacy.vuln_type, "{}", legacy.id);

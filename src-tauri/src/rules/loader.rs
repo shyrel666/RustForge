@@ -541,18 +541,37 @@ mod tests {
     }
 
     #[test]
-    fn builtin_pack_loads_and_carries_every_legacy_rule_id() {
+    fn builtin_pack_loads_and_carries_all_migrated_rule_ids() {
         let pack = builtin_pack()
             .pack()
             .expect("内置规则包必须加载成功，否则代理会静默失去初筛能力");
         assert_eq!(pack.pack_id, BUILTIN_PACK_ID);
         assert_eq!(pack.version, "1.0.0");
         assert_eq!(pack.source, "rustforge-builtin");
-        let ids: Vec<&str> = pack.rules.iter().map(|r| r.rule_id.as_str()).collect();
-        for legacy in crate::rules::builtin::legacy_rules() {
-            assert!(ids.contains(&legacy.id), "缺少迁移规则 {}", legacy.id);
-        }
-        assert_eq!(pack.rules.len(), 14);
+        let ids: Vec<&str> = pack
+            .rules
+            .iter()
+            .map(|rule| rule.rule_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "sensitive-param-in-url",
+                "password-in-request-body",
+                "jwt-exposed",
+                "sql-error-leak",
+                "stack-trace-leak",
+                "debug-actuator-endpoint",
+                "admin-console-path",
+                "sensitive-file-access",
+                "path-traversal-param",
+                "cors-wildcard",
+                "cookie-no-httponly",
+                "cookie-no-secure",
+                "server-version-leak",
+                "internal-ip-leak",
+            ]
+        );
     }
 
     #[test]

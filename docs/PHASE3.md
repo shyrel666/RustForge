@@ -1,66 +1,56 @@
-# Phase 3 · 渗透任务树（PTT）— 完成说明
+# Phase 3 · 版本化测试计划 — 当前说明
+
+> Phase 3 最初交付的是静态 PTT。2026-07-28 完成 Task 5.2 后，产品与文档统一称为“测试计划”；旧开发态 task node 不做迁移，开发数据库需按当前 v1 schema 重建。
 
 ## 交付内容
 
-**任务树数据模型与状态机（src-tauri/src/tree/）**
-- `model.rs` — `TaskNode`（四问字段：description 做什么 / why 为什么 / how_to 怎么做 /
-  verify_criteria 怎样算完成）+ `PlannedNode` / `PlannedTree`（AI 产出的中间形态）
-- `state.rs` — 白名单式状态机，非法流转直接拒绝：
+**测试计划模型、状态机与合并服务（`src-tauri/src/tree/`）**
 
-  | from → to | todo | in_progress | done | blocked |
-  |---|---|---|---|---|
-  | **todo** | — | ✅ | ✗（不许跳过执行） | ✅ |
-  | **in_progress** | ✅ | — | ✅ | ✅ |
-  | **blocked** | ✅ | ✅ | ✗ | — |
-  | **done** | ✅（误标可重开） | ✗ | ✗ | ✗ |
+- `model.rs`：`TestPlan`、`TaskNode`、`TaskPlanProposal`、`TaskPlanDiff`、revision/event 和人工编辑输入模型。
+- 节点类型：`hypothesis / test / decision / manual_note`。
+- 状态：`todo / in_progress / done / blocked / skipped / not_applicable`；blocked、skipped、not_applicable 必须填写原因。
+- 节点保存 stable key、priority、所需角色/会话、预期/实际观察、来源、字段锁、Finding、Evidence、标准引用、parent 与 prerequisite。
+- `state.rs`：白名单状态流转、三层/40 节点预算和确定性“下一步”排序。未满足 prerequisite 的节点不会成为下一步；候选按风险、priority、Evidence 缺口、创建时间和 id 排序。
+- `service.rs`：生产环境唯一计划写入边界。人工创建/编辑/状态/归档及 proposal 合并都创建 revision 和 append-only 事件。
 
-  `next_actionable()`：进行中优先，否则按规划序（id 序）取第一个「无未完成子任务」的 todo 叶子
+**AI 规划器（`src-tauri/src/ai/planner.rs`、`digest.rs`）**
 
-**AI 规划器（src-tauri/src/ai/planner.rs）**
-- 三段式 API（构建提示词 / 解析校验 / 落库）——调用方在**持锁取数 → 放锁调 LLM → 持锁落库**，
-  避免跨 `await` 持有 SQLite 锁
-- 三种规划动作：`plan`（整树）、`expand`（节点展开子任务）、`alternative`（换个思路重写四要素）
-- 产出校验硬约束：深度 ≤ 3（阶段/任务/子任务）、节点 ≤ 40、标题非空、`finding_ids` 按项目内**白名单过滤**
-- **人在回路红线**：树只描述「做什么/怎么做」，不生成可直接运行的攻击脚本，执行永远由用户手动完成
+- `generate / expand / alternative` 都只创建持久化 proposal 与 diff，不直接改写节点。
+- diff 分为新增、更新、保留和归档；用户确认后才在一个 immediate transaction 中合并。
+- stable key 用于跨 revision 对齐。人工节点、人工进度、字段锁和已关联 Evidence 的节点受保护；归档是软归档，不删除历史关系。
+- 当前计划 revision、key、类型、状态、priority、来源、锁、Evidence 数和 prerequisite key 会进入经过脱敏和长度限制的规划摘要；actual observation 与 Evidence 内容不会发送。
+- 新 Evidence 到达只设置“计划可更新”并使未确认的旧 proposal 失效，不自动调用 AI 或推进节点。
+- 产出仍受深度 ≤ 3、活动节点 ≤ 40、标题/枚举/标准引用/Finding 白名单约束。
 
-**流量摘要（src-tauri/src/ai/digest.rs）**
-- 给规划器看的「侦察报告」：端点聚合 Top 30（方法+host+path+频次+标签）、被动规则命中分布、
-  已有 Finding 摘要（含 id 供 AI 建立双向关联）
-- **成本控制**：只给聚合摘要不给全量流量；空流量项目直接报错引导先抓包
+**Tauri 命令与前端**
 
-**命令（9 个）**
-`get_task_tree / generate_task_tree(replace) / expand_task_node / alternative_task_node /
-next_task / update_task_status / create_task_node / delete_task_node / get_task_findings`
+- 读取：`get_task_tree / get_test_plan / list_task_plan_events / next_task / get_task_findings`。
+- AI：`preview_task_ai / generate_task_tree / expand_task_node / alternative_task_node`，返回 proposal 而非受影响节点数。
+- 确认：`apply_task_plan_proposal / reject_task_plan_proposal`。
+- 人工操作：`create_task_node / update_task_node / update_task_status / delete_task_node`；最后一个命令保留 IPC 名称，但语义为可审计归档。
+- “测试计划”页用 vue-flow 展示 parent 实线和 prerequisite 虚线，并展示 revision、更新标记、节点类型/来源/priority、Finding/Evidence、预期/实际观察、状态原因和字段锁。
+- `TaskPlanDiffDialog.vue` 在人工确认前逐项展示新增、更新、保留和归档。AI 预览确认只发起模型调用，不等于确认计划变更。
 
-**前端（src/views/TaskTreeView.vue — 本阶段补齐的核心 UI）**
-- **vue-flow 可视化**：把扁平的 `parent_id` 结构算成整齐树（左→右分层，深度=列、兄弟纵向排；
-  内部节点取子树中点）；节点按状态配色（待做灰 / 进行中蓝 / 完成绿 / 受阻红），
-  选中描边、`下一步`定位脉冲高亮、可折叠子树
-- **节点详情面板**：状态流转按钮（镜像后端白名单，只给合法目标）；四问字段
-  （「为什么」直接展示存储字段**不消耗 token**，`怎么做/完成标准`用 markdown 渲染）；
-  关联发现列表（点击跳「发现」页）；AI「展开子任务 / 换个思路」；手动「加子任务 / 删除」
-- **工具栏**：AI 生成 / 重新生成（确认清空）、`下一步`引导、完成进度条、人在回路红线提示、
-  空态引导（说明会读取流量摘要 + 需先抓包与配 Key）
-- 交互命令全部落地：**下一步 / 为什么 / 换个思路 / 展开子任务 / 手动标记状态 / 与 Finding 双向关联**
+## 测试
 
-## 测试（cargo test --lib 22/22 通过）
+- proposal 重复应用幂等；重新规划保留人工节点、进度、锁、备注和 Evidence。
+- AI 只更新未锁字段；Evidence 到达不改节点，并使旧 proposal 变为 `superseded`。
+- 特殊状态缺少原因会被应用层和数据库约束拒绝；状态直写必须具有匹配审计事件。
+- prerequisite 不满足时不会推荐；风险/priority/Evidence 缺口/时间排序稳定。
+- 文件数据库关闭重开后，parent、prerequisite、状态、原因和 revision 保持一致。
+- 当前完整门禁：Rust `189` 个单元测试、`4` 个 MITM 集成测试、`8` 个规则包验收测试；前端 `27` 个测试、TypeScript 检查与生产构建通过。
 
-- 状态机：合法/非法流转、不允许 todo→done 跳过执行、done 可重开
-- `next_actionable`：进行中优先、取第一个 todo 叶子、全完成返回 None
-- 规划器：深度 4 拒绝、空标题拒绝、`finding_ids` 白名单过滤、`expand` 截断到 6、嵌套落库 + replace 清空重插
-- 摘要：端点/标签/条数聚合正确、空项目报错
-- 前端 `vite build` 通过（TaskTreeView 独立 chunk，vue-flow 正常打包）
+## 手工验收
 
-## 手工验收（对应 Phase 3 验收标准）
+1. 在“流量”页抓取已授权目标流量，并产生可选 Finding/Evidence。
+2. 在“测试计划”页点“AI 生成测试计划”并确认 AI 上下文预览。
+3. 查看 proposal diff；确认前当前计划不发生变化，确认后 revision 增加。
+4. 人工创建备注、修改状态或锁定字段后再生成更新 proposal，确认这些内容出现在“保留”或不被更新。
+5. 为节点或 Finding 新增 Evidence，确认页面只提示“测试计划可更新”，旧 proposal 不能再应用。
+6. 设置 prerequisite 后点“下一步”，确认依赖未终结的节点不会被定位。
 
-1. 「流量」页抓一段目标流量（触发被动规则 / 可选做 AI 分析产生 Finding）
-2. 「任务树」页点「AI 生成任务树」→ 出现分层任务树
-3. 点任意节点 → 右侧看「做什么/为什么/怎么做/怎样算完成」四问 + 关联发现
-4. 点「下一步」→ 自动定位并高亮当前该做的叶子任务；手动标记 进行中/完成/受阻
-5. 对某节点「展开子任务」或「换个思路」→ 树增量更新
+## 已知限制
 
-## 已知限制（后续 Phase）
-
-- 布局是确定性整齐树（非力导向），超大树横向滚动 + 折叠应对
-- 增量更新依赖「展开 / 重新生成」，未做节点级别的自动同步
-- 规划质量取决于流量摘要与所选模型
+- 当前是 parent + prerequisite 的测试计划，不是带 AND/OR 门的攻击树。
+- 布局为确定性分层图；活动节点硬上限 40，历史节点通过软归档保留。
+- 规划质量仍取决于脱敏后的流量/Finding 摘要和所选模型；所有执行与合并保持人在回路。

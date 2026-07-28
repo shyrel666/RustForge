@@ -63,6 +63,32 @@ pub fn open_pool(path: &Path) -> Result<Pool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::model::CreateTaskNodeInput;
+    use crate::tree::service as tree_service;
+
+    fn manual_input(
+        project_id: i64,
+        parent_id: Option<i64>,
+        title: &str,
+        prerequisites: Vec<i64>,
+    ) -> CreateTaskNodeInput {
+        CreateTaskNodeInput {
+            project_id,
+            parent_id,
+            node_type: "test".to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            why: String::new(),
+            how_to: String::new(),
+            verify_criteria: String::new(),
+            priority: 50,
+            required_role: String::new(),
+            required_session: String::new(),
+            expected_observation: String::new(),
+            actual_observation: String::new(),
+            prerequisite_ids: prerequisites,
+        }
+    }
 
     /// 每条池连接都必须开启 foreign_keys，否则级联删除失效——这里直接验证级联。
     #[test]
@@ -73,7 +99,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let pool = open_pool(&path).unwrap();
-        let conn = pool.get().unwrap();
+        let mut conn = pool.get().unwrap();
         assert_eq!(
             migrations::schema_version(&conn).unwrap(),
             migrations::LATEST_SCHEMA_VERSION
@@ -91,6 +117,12 @@ mod tests {
             [pid],
         )
         .unwrap();
+        tree_service::create_manual_node(
+            &mut conn,
+            &manual_input(pid, None, "plan node", Vec::new()),
+            "test",
+        )
+        .unwrap();
 
         conn.execute("DELETE FROM projects WHERE id = ?1", [pid])
             .unwrap();
@@ -106,5 +138,60 @@ mod tests {
             "删除项目应级联清空流量（依赖每连接 foreign_keys=ON）"
         );
         assert_eq!(findings, 0, "删除项目应级联清空发现");
+        let plan_events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_plan_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plan_events, 0, "项目生命周期删除允许计划事件级联");
+    }
+
+    #[test]
+    fn test_plan_shape_status_and_dependencies_survive_reopen() {
+        let dir =
+            std::env::temp_dir().join(format!("rustforge-test-plan-reopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.db");
+        let _ = std::fs::remove_file(&path);
+
+        let mut db = Db::open(&path).unwrap();
+        db.conn
+            .execute("INSERT INTO projects(name) VALUES('plan')", [])
+            .unwrap();
+        let project_id = db.conn.last_insert_rowid();
+        let root = tree_service::create_manual_node(
+            &mut db.conn,
+            &manual_input(project_id, None, "root", Vec::new()),
+            "test",
+        )
+        .unwrap();
+        let child = tree_service::create_manual_node(
+            &mut db.conn,
+            &manual_input(project_id, Some(root), "child", vec![root]),
+            "test",
+        )
+        .unwrap();
+        tree_service::update_status(&mut db.conn, root, "in_progress", None, "test").unwrap();
+        tree_service::update_status(&mut db.conn, child, "blocked", Some("等待授权窗口"), "test")
+            .unwrap();
+        let revision = tree_service::get_plan(&db.conn, project_id)
+            .unwrap()
+            .revision;
+        drop(db);
+
+        let reopened = Db::open(&path).unwrap();
+        let nodes = tree_service::load_nodes(&reopened.conn, project_id, false).unwrap();
+        assert_eq!(nodes.len(), 2);
+        let persisted_root = nodes.iter().find(|node| node.id == root).unwrap();
+        let persisted_child = nodes.iter().find(|node| node.id == child).unwrap();
+        assert_eq!(persisted_root.status, "in_progress");
+        assert_eq!(persisted_child.parent_id, Some(root));
+        assert_eq!(persisted_child.prerequisite_ids, vec![root]);
+        assert_eq!(persisted_child.status, "blocked");
+        assert_eq!(persisted_child.blocker_reason, "等待授权窗口");
+        assert_eq!(
+            tree_service::get_plan(&reopened.conn, project_id)
+                .unwrap()
+                .revision,
+            revision
+        );
     }
 }

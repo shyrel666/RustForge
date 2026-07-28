@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   TrafficSummary,
   TrafficDetail,
+  TrafficTagsUpdate,
   listTraffic,
   countTraffic,
   getTrafficDetail,
@@ -120,6 +121,16 @@ export const useTrafficStore = defineStore("traffic", {
           this.total += 1;
           // 保持窗口大小，丢弃最旧的（需要时可「加载更多」）
           if (this.items.length > this.limit) this.items.length = this.limit;
+        }),
+        listen<TrafficTagsUpdate>("traffic:tags", (e) => {
+          const pid = getProjectId();
+          const update = e.payload;
+          if (pid === null || update.project_id !== pid) return;
+          const row = this.items.find((item) => item.id === update.id);
+          if (row) row.rule_tags = update.rule_tags;
+          if (this.detail?.id === update.id) {
+            this.detail.rule_tags = update.rule_tags;
+          }
         }),
         listen<{ running: boolean; port: number }>("proxy:status", (e) => {
           this.proxyRunning = e.payload.running;

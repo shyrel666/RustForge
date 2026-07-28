@@ -103,7 +103,7 @@ function onSearchInput() {
 async function onClear() {
   if (projectId.value === null) return;
   await ElMessageBox.confirm(
-    "删除当前项目的全部流量记录？（不影响 Findings 和任务树）",
+    "删除当前项目的全部流量记录？（不影响 Findings 和测试计划）",
     "清空流量",
     { type: "warning", confirmButtonText: "清空", cancelButtonText: "取消" }
   );

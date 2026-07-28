@@ -160,6 +160,12 @@ export interface TrafficSummary {
   created_at: string;
 }
 
+export interface TrafficTagsUpdate {
+  id: number;
+  project_id: number;
+  rule_tags: string[];
+}
+
 export interface TrafficDetail extends TrafficSummary {
   req_headers: string;
   req_body_text: string | null;
@@ -355,6 +361,7 @@ export interface Finding {
   id: number;
   project_id: number;
   traffic_id: number | null;
+  analysis_run_id: number | null;
   source: "ai" | "rule";
   title: string;
   vuln_type: string;
@@ -365,7 +372,113 @@ export interface Finding {
   verify_steps: string;
   /** pending=待验证 confirmed=已确认 rejected=误报 */
   status: string;
+  analyst_notes: string;
+  /** 项目 + 规则 + 规范化端点 + 字段的稳定身份；AI Finding 暂为空。 */
+  fingerprint: string | null;
+  /** 累计关联到该规则 Finding 的不同流量数。 */
+  occurrences: number;
+  last_seen_at: string;
   created_at: string;
+  updated_at: string;
+}
+
+export interface FindingTrafficRef {
+  traffic_id: number;
+  method: string;
+  url: string;
+  status: number | null;
+  first_seen_at: string;
+}
+
+export interface FindingRuleHit {
+  id: number;
+  finding_id: number;
+  evaluation_id: number;
+  traffic_id: number;
+  pack_id: string;
+  pack_version: string;
+  rule_id: string;
+  rule_version: string;
+  field_path: string;
+  evidence: string;
+  confidence: number;
+  incomplete_evidence: boolean;
+  hit_fingerprint: string;
+  created_at: string;
+}
+
+export type EvidenceSourceType = "traffic" | "analysis_run" | "replay_run";
+
+export interface Evidence {
+  id: number;
+  project_id: number;
+  source_type: EvidenceSourceType;
+  source_id: number;
+  source_available: boolean;
+  observation: string;
+  redacted_snapshot: unknown;
+  content_hash: string;
+  qualifies_for_confirmation: boolean;
+  created_by: string;
+  created_at: string;
+  linked_at: string;
+  accepted: boolean;
+  acceptance_note: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+}
+
+export interface FindingEvent {
+  id: number;
+  finding_id: number;
+  event_type:
+    | "created"
+    | "status_changed"
+    | "severity_changed"
+    | "notes_changed"
+    | "evidence_accepted"
+    | "evidence_revoked";
+  old_value: string | null;
+  new_value: string | null;
+  reason: string;
+  actor: string;
+  created_at: string;
+}
+
+export interface RulePackStatusInfo {
+  pack_id: string;
+  version: string;
+  rule_count: number;
+  loaded: boolean;
+  disabled_reason: string | null;
+}
+
+export interface RuleEvaluationInfo {
+  id: number;
+  project_id: number;
+  traffic_id: number;
+  pack_id: string;
+  pack_version: string;
+  status: "completed" | "timed_out" | "pack_disabled";
+  hit_count: number;
+  finding_count: number;
+  duration_ms: number;
+  diagnostics: string[];
+  created_at: string;
+}
+
+export interface RuleDiagnostics {
+  packs: RulePackStatusInfo[];
+  submitted_evaluations: number;
+  completed_evaluations: number;
+  dropped_evaluations: number;
+  timed_out_evaluations: number;
+  failed_evaluations: number;
+  queue_capacity: number;
+  queue_depth: number;
+  last_error: string | null;
+  recent_evaluations: RuleEvaluationInfo[];
+  worker_running: boolean;
 }
 
 export const listFindings = (
@@ -379,8 +492,83 @@ export const listFindings = (
     source: opts.source || null,
   });
 
-export const updateFindingStatus = (id: number, status: string) =>
-  invoke<void>("update_finding_status", { id, status });
+export const updateFindingStatus = (
+  id: number,
+  status: string,
+  reason?: string | null
+) =>
+  invoke<Finding>("update_finding_status", {
+    id,
+    status,
+    reason: reason?.trim() || null,
+  });
+
+export const updateFindingReview = (
+  id: number,
+  severity: string,
+  analystNotes: string,
+  reason?: string | null
+) =>
+  invoke<Finding>("update_finding_review", {
+    id,
+    severity,
+    analystNotes,
+    reason: reason?.trim() || null,
+  });
+
+export const listFindingTraffic = (id: number) =>
+  invoke<FindingTrafficRef[]>("list_finding_traffic", { id });
+
+export const listFindingRuleHits = (id: number) =>
+  invoke<FindingRuleHit[]>("list_finding_rule_hits", { id });
+
+export const listFindingEvidence = (id: number) =>
+  invoke<Evidence[]>("list_finding_evidence", { id });
+
+export const listFindingEvents = (id: number) =>
+  invoke<FindingEvent[]>("list_finding_events", { id });
+
+export const createFindingEvidence = (
+  findingId: number,
+  sourceType: EvidenceSourceType,
+  sourceId: number,
+  observation: string
+) =>
+  invoke<Evidence>("create_finding_evidence", {
+    findingId,
+    sourceType,
+    sourceId,
+    observation,
+  });
+
+export const createTaskEvidence = (
+  taskId: number,
+  sourceType: EvidenceSourceType,
+  sourceId: number,
+  observation: string
+) =>
+  invoke<number>("create_task_evidence", {
+    taskId,
+    sourceType,
+    sourceId,
+    observation,
+  });
+
+export const setFindingEvidenceAccepted = (
+  findingId: number,
+  evidenceId: number,
+  accepted: boolean,
+  reason: string
+) =>
+  invoke<Evidence>("set_finding_evidence_accepted", {
+    findingId,
+    evidenceId,
+    accepted,
+    reason,
+  });
+
+export const getRuleDiagnostics = (projectId: number) =>
+  invoke<RuleDiagnostics>("get_rule_diagnostics", { projectId });
 
 export const deleteFinding = (id: number) =>
   invoke<void>("delete_finding", { id });
@@ -417,12 +605,24 @@ export const rollbackPromptTemplate = (sourceId: number | null) =>
 export const resetPromptTemplate = () =>
   invoke<PromptTemplateVersion>("reset_prompt_template");
 
-// ---------- 渗透任务树 ----------
+// ---------- 版本化测试计划 ----------
+
+export type TaskNodeType = "hypothesis" | "test" | "decision" | "manual_note";
+export type TaskStatus =
+  | "todo"
+  | "in_progress"
+  | "done"
+  | "blocked"
+  | "skipped"
+  | "not_applicable";
+export type TaskSource = "ai" | "rule" | "manual";
 
 export interface TaskNode {
   id: number;
   project_id: number;
   parent_id: number | null;
+  stable_key: string;
+  node_type: TaskNodeType;
   title: string;
   /** 做什么 */
   description: string;
@@ -432,13 +632,120 @@ export interface TaskNode {
   how_to: string;
   /** 完成判定标准 */
   verify_criteria: string;
-  /** todo / in_progress / done / blocked */
-  status: string;
+  /** 0 为最高优先级 */
+  priority: number;
+  required_role: string;
+  required_session: string;
+  expected_observation: string;
+  actual_observation: string;
+  blocker_reason: string;
+  source: TaskSource;
+  locked_fields: string[];
+  status: TaskStatus;
   sort_order: number;
+  archived: boolean;
+  archived_at: string | null;
+  created_revision: number;
+  updated_revision: number;
   created_at: string;
   updated_at: string;
   standard_references: StandardReference[];
   finding_ids: number[];
+  prerequisite_ids: number[];
+  evidence_ids: number[];
+  risk_rank: number;
+}
+
+export interface TestPlan {
+  project_id: number;
+  revision: number;
+  needs_update: boolean;
+  update_reason: string;
+  last_applied_proposal_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskPlanDiffItem {
+  stable_key: string;
+  node_id: number | null;
+  title: string;
+  changed_fields: string[];
+  reason: string;
+}
+
+export interface TaskPlanDiff {
+  additions: TaskPlanDiffItem[];
+  updates: TaskPlanDiffItem[];
+  preserved: TaskPlanDiffItem[];
+  archives: TaskPlanDiffItem[];
+}
+
+export interface TaskPlanProposal {
+  id: number;
+  project_id: number;
+  proposal_key: string;
+  operation: TaskAiOperation;
+  target_node_id: number | null;
+  base_revision: number;
+  analysis_run_id: number | null;
+  status: "pending" | "applied" | "rejected" | "superseded";
+  diff: TaskPlanDiff;
+  created_at: string;
+  applied_at: string | null;
+}
+
+export interface TaskPlanApplyResult {
+  proposal_id: number;
+  revision: number;
+  applied: boolean;
+  diff: TaskPlanDiff;
+}
+
+export interface TaskPlanEvent {
+  id: number;
+  project_id: number;
+  revision: number;
+  event_type: string;
+  proposal_id: number | null;
+  node_id: number | null;
+  details: Record<string, unknown>;
+  actor: string;
+  created_at: string;
+}
+
+export interface CreateTaskNodeInput {
+  project_id: number;
+  parent_id: number | null;
+  node_type: TaskNodeType;
+  title: string;
+  description: string;
+  why: string;
+  how_to: string;
+  verify_criteria: string;
+  priority: number;
+  required_role: string;
+  required_session: string;
+  expected_observation: string;
+  actual_observation: string;
+  prerequisite_ids: number[];
+}
+
+export interface UpdateTaskNodeInput {
+  node_id: number;
+  node_type: TaskNodeType;
+  title: string;
+  description: string;
+  why: string;
+  how_to: string;
+  verify_criteria: string;
+  priority: number;
+  required_role: string;
+  required_session: string;
+  expected_observation: string;
+  actual_observation: string;
+  prerequisite_ids: number[];
+  locked_fields: string[];
 }
 
 export const getTaskTree = (projectId: number) =>
@@ -447,9 +754,15 @@ export const getTaskTree = (projectId: number) =>
 export type TaskAiOperation = "generate" | "expand" | "alternative";
 
 export interface TaskAiExecution {
-  affected_nodes: number;
   analysis_run_id: number;
+  proposal: TaskPlanProposal;
 }
+
+export const getTestPlan = (projectId: number) =>
+  invoke<TestPlan>("get_test_plan", { projectId });
+
+export const listTaskPlanEvents = (projectId: number) =>
+  invoke<TaskPlanEvent[]>("list_task_plan_events", { projectId });
 
 export const previewTaskAi = (
   operation: TaskAiOperation,
@@ -462,15 +775,10 @@ export const previewTaskAi = (
     nodeId,
   });
 
-/** AI 生成整树；replace=true 时先清空现有树。返回节点数 */
-export const generateTaskTree = (
-  projectId: number,
-  replace: boolean,
-  expectedInputHash: string
-) =>
+/** AI 只生成 proposal/diff，不直接修改当前测试计划。 */
+export const generateTaskTree = (projectId: number, expectedInputHash: string) =>
   invoke<TaskAiExecution>("generate_task_tree", {
     projectId,
-    replace,
     expectedInputHash,
   });
 
@@ -483,25 +791,26 @@ export const alternativeTaskNode = (nodeId: number, expectedInputHash: string) =
 export const nextTask = (projectId: number) =>
   invoke<TaskNode | null>("next_task", { projectId });
 
-export const updateTaskStatus = (nodeId: number, status: string) =>
-  invoke<void>("update_task_status", { nodeId, status });
-
-export const createTaskNode = (
-  projectId: number,
-  parentId: number | null,
-  fields: {
-    title: string;
-    description: string;
-    why: string;
-    how_to: string;
-    verify_criteria: string;
-  }
-) =>
-  invoke<number>("create_task_node", {
+export const applyTaskPlanProposal = (projectId: number, proposalId: number) =>
+  invoke<TaskPlanApplyResult>("apply_task_plan_proposal", {
     projectId,
-    parentId,
-    ...fields,
+    proposalId,
   });
+
+export const rejectTaskPlanProposal = (proposalId: number) =>
+  invoke<void>("reject_task_plan_proposal", { proposalId });
+
+export const updateTaskStatus = (
+  nodeId: number,
+  status: TaskStatus,
+  reason: string | null
+) => invoke<TaskNode>("update_task_status", { nodeId, status, reason });
+
+export const createTaskNode = (input: CreateTaskNodeInput) =>
+  invoke<number>("create_task_node", { input });
+
+export const updateTaskNode = (input: UpdateTaskNodeInput) =>
+  invoke<TaskNode>("update_task_node", { input });
 
 export const deleteTaskNode = (nodeId: number) =>
   invoke<void>("delete_task_node", { nodeId });
@@ -531,8 +840,23 @@ export interface KnowledgeCard {
   license_url: string;
 }
 
+/** 未能解析成知识卡的引用，绝不会退回成某个近似条目。 */
+export interface UnresolvedReference {
+  reference: StandardReference;
+  key: string;
+  framework_label: string;
+  /** not_in_pack=编号合法但精选包未收录；invalid=编号本身不成立 */
+  state: "not_in_pack" | "invalid";
+  reason: string;
+}
+
+export interface KnowledgeLookup {
+  cards: KnowledgeCard[];
+  unresolved: UnresolvedReference[];
+}
+
 export const getKnowledgeCards = (references: StandardReference[]) =>
-  invoke<KnowledgeCard[]>("get_knowledge_cards", { references });
+  invoke<KnowledgeLookup>("get_knowledge_cards", { references });
 
 // ---------- Repeater（手动改包重发） ----------
 
@@ -541,21 +865,156 @@ export interface ReplayHeader {
   value: string;
 }
 
+export type TlsPolicy = "strict" | "ignore_invalid";
+
 export interface ScopeDecision {
   normalized_host: string;
   matched_scope: string;
   match_kind: "exact" | "wildcard";
 }
 
-export interface ReplayResponse {
-  status: number;
+export interface ReplayScopeSnapshot {
+  allowed: boolean;
+  normalized_host: string | null;
+  matched_scope: string | null;
+  match_kind: "exact" | "wildcard" | null;
+  reason_code: string | null;
+  reason: string | null;
+}
+
+export interface ReplaySession {
+  id: number;
+  project_id: number;
+  title: string;
+  source_traffic_id: number | null;
+  tls_policy: TlsPolicy;
+  is_selected: boolean;
+  run_count: number;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReplayRun {
+  id: number;
+  attempt_id: number | null;
+  session_id: number;
+  project_id: number;
+  method: string;
+  url: string;
+  request_headers: ReplayHeader[];
+  request_wire_body_text: string | null;
+  request_wire_body_base64: string | null;
+  req_wire_captured_size: number;
+  req_wire_truncated: boolean;
+  request_input: ReplayRequestInputSnapshot;
+  request_body_text: string | null;
+  request_body_base64: string | null;
+  req_wire_size: number;
+  req_captured_size: number;
+  req_truncated: boolean;
+  req_decode_status: BodyDecodeStatus;
+  tls_policy: TlsPolicy;
+  scope_decision: ReplayScopeSnapshot;
+  outcome:
+    | "completed"
+    | "scope_rejected"
+    | "request_failed"
+    | "response_incomplete";
+  error_code: string | null;
+  error_message: string | null;
+  status: number | null;
   status_text: string;
-  headers: ReplayHeader[];
-  body_text: string | null;
-  body_base64: string | null;
-  resp_size: number;
+  response_headers: ReplayHeader[];
+  response_body_text: string | null;
+  response_body_base64: string | null;
+  resp_wire_size: number;
+  resp_captured_size: number;
+  resp_truncated: boolean;
+  resp_decode_status: BodyDecodeStatus;
   duration_ms: number;
-  scope_decision: ScopeDecision;
+  request_hash: string;
+  req_body_hash: string | null;
+  response_hash: string | null;
+  resp_body_hash: string | null;
+  created_at: string;
+}
+
+export interface ReplayRequestInputSnapshot {
+  encoding: "none" | "text" | "base64" | "ambiguous";
+  text: string | null;
+  base64: string | null;
+  original_size: number;
+  captured_size: number;
+  truncated: boolean;
+  content_hash: string;
+}
+
+export interface ReplayRunSummary {
+  id: number;
+  session_id: number;
+  project_id: number;
+  method: string;
+  url: string;
+  tls_policy: TlsPolicy;
+  outcome: ReplayRun["outcome"];
+  error_code: string | null;
+  error_message: string | null;
+  status: number | null;
+  status_text: string;
+  req_wire_size: number;
+  req_wire_captured_size: number;
+  req_wire_truncated: boolean;
+  req_decode_status: BodyDecodeStatus;
+  resp_wire_size: number;
+  resp_captured_size: number;
+  resp_truncated: boolean;
+  resp_decode_status: BodyDecodeStatus;
+  duration_ms: number;
+  request_hash: string;
+  response_hash: string | null;
+  created_at: string;
+}
+
+export interface ReplayRunPage {
+  runs: ReplayRunSummary[];
+  next_before_id: number | null;
+}
+
+export interface ReplayBodySnapshot {
+  encoding: "text" | "base64" | "empty";
+  text: string | null;
+  base64: string | null;
+  wire_size: number;
+  captured_size: number;
+  truncated: boolean;
+  decode_status: BodyDecodeStatus;
+  captured_hash: string;
+  /** 完整 wire 正文哈希；构造失败时为规范化原始输入哈希。 */
+  full_hash: string | null;
+}
+
+export interface ReplayValueDiff<T> {
+  changed: boolean;
+  indeterminate: boolean;
+  left: T;
+  right: T;
+}
+
+export interface ReplayRunDiff {
+  left_run_id: number;
+  right_run_id: number;
+  method: ReplayValueDiff<string>;
+  url: ReplayValueDiff<string>;
+  request_headers: ReplayValueDiff<ReplayHeader[]>;
+  request_body: ReplayValueDiff<ReplayBodySnapshot>;
+  tls_policy: ReplayValueDiff<TlsPolicy>;
+  scope_decision: ReplayValueDiff<ReplayScopeSnapshot>;
+  outcome: ReplayValueDiff<ReplayRun["outcome"]>;
+  status: ReplayValueDiff<number | null>;
+  duration_ms: ReplayValueDiff<number>;
+  response_headers: ReplayValueDiff<ReplayHeader[]>;
+  response_body: ReplayValueDiff<ReplayBodySnapshot>;
 }
 
 /** 只做后端 ScopePolicy 判定，不建立网络连接。真正发送时后端会再次校验。 */
@@ -565,32 +1024,102 @@ export const authorizeReplayTarget = (
 ) =>
   invoke<ScopeDecision>("authorize_replay_target", { projectId, url });
 
+export const listReplaySessions = (projectId: number) =>
+  invoke<ReplaySession[]>("list_replay_sessions", { projectId });
+
+export const createReplaySession = (
+  projectId: number,
+  title: string,
+  sourceTrafficId: number | null,
+  tlsPolicy: TlsPolicy
+) =>
+  invoke<ReplaySession>("create_replay_session", {
+    projectId,
+    title,
+    sourceTrafficId,
+    tlsPolicy,
+  });
+
+export const updateReplaySession = (
+  sessionId: number,
+  title: string,
+  tlsPolicy: TlsPolicy
+) =>
+  invoke<ReplaySession>("update_replay_session", {
+    sessionId,
+    title,
+    tlsPolicy,
+  });
+
+export const selectReplaySession = (sessionId: number) =>
+  invoke<ReplaySession>("select_replay_session", { sessionId });
+
+export const deleteReplaySession = (sessionId: number) =>
+  invoke<void>("delete_replay_session", { sessionId });
+
+export const listReplayRuns = (
+  sessionId: number,
+  beforeId: number | null = null,
+  limit = 50
+) =>
+  invoke<ReplayRunPage>("list_replay_runs", { sessionId, beforeId, limit });
+
+export const getReplayRun = (projectId: number, runId: number) =>
+  invoke<ReplayRun>("get_replay_run", { projectId, runId });
+
+export const compareReplayRuns = (
+  projectId: number,
+  leftRunId: number,
+  rightRunId: number
+) =>
+  invoke<ReplayRunDiff>("compare_replay_runs", {
+    projectId,
+    leftRunId,
+    rightRunId,
+  });
+
 export const replayRequest = (
   projectId: number,
+  sessionId: number,
   method: string,
   url: string,
   headers: ReplayHeader[],
   bodyText: string | null,
   bodyBase64: string | null
 ) =>
-  invoke<ReplayResponse>("replay_request", {
+  invoke<ReplayRun>("replay_request", {
     projectId,
-    method,
-    url,
-    headers,
-    bodyText,
-    bodyBase64,
+    sessionId,
+    request: {
+      method,
+      url,
+      headers,
+      bodyText,
+      bodyBase64,
+    },
   });
 
-// ---------- 学习报告 ----------
+// ---------- 证据化报告 ----------
 
 /** 生成 Markdown 报告文本（预览用） */
 export const buildReport = (projectId: number) =>
   invoke<string>("build_report", { projectId });
 
-/** 导出报告到下载目录，返回保存路径 */
-export const exportReport = (projectId: number) =>
-  invoke<string>("export_report", { projectId });
+export interface ReportExportResult {
+  markdown_path: string;
+  json_path: string;
+  contains_sensitive_evidence: boolean;
+}
+
+/** 同时导出 Markdown 主报告与 JSON 机器可读备份。 */
+export const exportReport = (
+  projectId: number,
+  includeSensitiveEvidence = false
+) =>
+  invoke<ReportExportResult>("export_report", {
+    projectId,
+    includeSensitiveEvidence,
+  });
 
 // ---------- 用量统计 & 计数（Phase 5） ----------
 

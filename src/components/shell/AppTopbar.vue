@@ -22,7 +22,7 @@ const traffic = useTrafficStore();
 const items = [
   { path: "/traffic", label: "流量", icon: Monitor },
   { path: "/repeater", label: "重放", icon: Promotion },
-  { path: "/tasks", label: "任务树", icon: Share },
+  { path: "/tasks", label: "测试计划", icon: Share },
   { path: "/findings", label: "发现", icon: Aim },
   { path: "/settings", label: "设置", icon: Setting },
 ];

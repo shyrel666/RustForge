@@ -1,0 +1,435 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-07-28T12:00:00+08:00",
+  "classification": {
+    "sensitivity": "默认脱敏",
+    "uses_redacted_evidence_by_default": true,
+    "contains_live_raw_source_snapshots": false
+  },
+  "project": {
+    "id": 7,
+    "name": "<script>alert(1)</script> 演示/项目",
+    "target_host": "demo.test",
+    "authorized_scope": [
+      "demo.test",
+      "api.demo.test"
+    ],
+    "excluded_scope": [
+      "当前项目模型未单独记录排除项；所有未列入授权范围的目标均视为排除范围。"
+    ],
+    "testing_limitations": [
+      "1 条流量存在请求或响应截断；相关正文不能视为完整内容。",
+      "1 条 Finding 尚未人工确认，仅列入待验证附录，不作为报告结论。",
+      "1 个测试计划节点尚未完成。",
+      "1 个测试计划节点受阻；阻塞原因见测试计划章节。"
+    ],
+    "created_at": "2026-07-24 09:00:00"
+  },
+  "methodology": {
+    "methods": [
+      {
+        "id": "bounded_traffic_capture",
+        "label": "有界流量采集",
+        "description": "在授权 Scope 内保存带捕获、截断和解码状态的 HTTP 流量。"
+      },
+      {
+        "id": "ai_hypothesis",
+        "label": "AI 辅助假设",
+        "description": "模型输出经过结构校验并保留模型、提示词版本和输入哈希；不自动确认漏洞。"
+      },
+      {
+        "id": "human_evidence_review",
+        "label": "人工 Evidence 复核",
+        "description": "只有已接受且具备确认资格的 Evidence 才能支撑 confirmed 结论。"
+      },
+      {
+        "id": "evidence_driven_test_plan",
+        "label": "证据驱动测试计划",
+        "description": "计划节点、未完成项和阻塞项按当前持久化 revision 汇总。"
+      }
+    ],
+    "tools": [
+      {
+        "tool": "RustForge",
+        "version": "0.1.0"
+      },
+      {
+        "tool": "SQLite",
+        "version": "3.46.0"
+      },
+      {
+        "tool": "Evidence Report Schema",
+        "version": "2"
+      }
+    ]
+  },
+  "summary": {
+    "traffic_count": 1,
+    "confirmed_findings": 1,
+    "pending_findings_in_appendix": 1,
+    "rejected_findings_omitted": 1,
+    "confirmed_risk_distribution": [
+      {
+        "severity": "critical",
+        "count": 0
+      },
+      {
+        "severity": "high",
+        "count": 1
+      },
+      {
+        "severity": "medium",
+        "count": 0
+      },
+      {
+        "severity": "low",
+        "count": 0
+      },
+      {
+        "severity": "info",
+        "count": 0
+      }
+    ],
+    "accepted_supporting_evidence": 1,
+    "test_plan_terminal": 1,
+    "test_plan_total": 3
+  },
+  "timeline": [
+    {
+      "occurred_at": "2026-07-24 09:00:00",
+      "kind": "project_created",
+      "reference": "project:7",
+      "summary": "项目及授权边界记录已创建。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:10:00",
+      "kind": "traffic_capture_started",
+      "reference": "traffic-count:1",
+      "summary": "开始记录授权范围内流量；本报告共统计 1 条。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:13:00",
+      "kind": "finding_created",
+      "reference": "finding:31",
+      "summary": "创建待确认 Finding：登录存在 SQL 注入 # 标题。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:14:00",
+      "kind": "finding_created",
+      "reference": "finding:32",
+      "summary": "创建待确认 Finding：待确认的会话问题。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:16:00",
+      "kind": "test_plan_revision",
+      "reference": "test-plan-revision:1",
+      "summary": "初始测试计划"
+    },
+    {
+      "occurred_at": "2026-07-24 09:18:00.000",
+      "kind": "evidence_created",
+      "reference": "evidence:1",
+      "summary": "为 Finding #31 创建 traffic Evidence 快照。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:19:00.000",
+      "kind": "evidence_accepted",
+      "reference": "evidence:1",
+      "summary": "Evidence #1 经人工接受。"
+    },
+    {
+      "occurred_at": "2026-07-24 09:20:00.000",
+      "kind": "finding_confirmed",
+      "reference": "finding:31",
+      "summary": "Finding 状态由「待验证」变为「已确认」。"
+    }
+  ],
+  "confirmed_findings": [
+    {
+      "id": 31,
+      "identity": "finding:31",
+      "fingerprint": null,
+      "title": "登录存在 SQL 注入 # 标题",
+      "vulnerability_type": "SQL 注入",
+      "status": "confirmed",
+      "severity": "high",
+      "confidence": 87,
+      "occurrences": 1,
+      "affected_targets": [
+        {
+          "traffic_id": 11,
+          "method": "POST",
+          "url": "https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D",
+          "observed_at": "2026-07-24 09:10:00"
+        }
+      ],
+      "standard_references": [
+        {
+          "framework": "owasp-top10",
+          "version": "2021",
+          "id": "A03"
+        },
+        {
+          "framework": "cwe",
+          "version": "4.20",
+          "id": "CWE-89"
+        }
+      ],
+      "hypothesis_reasoning": "AI 假设：参数 username 可能触发报错，不是已执行结果。",
+      "suggested_validation_steps": "1. 在授权环境输入单引号\n2. 对比响应",
+      "executed_reproduction": [
+        {
+          "evidence_id": 1,
+          "observation": "人工观察到 500 与 SQL 错误片段；Authorization: [REDACTED:sensitive_field]",
+          "accepted": true,
+          "qualifies_for_confirmation": true,
+          "observed_at": "2026-07-24 09:18:00.000"
+        }
+      ],
+      "evidence": [
+        {
+          "id": 1,
+          "source_type": "traffic",
+          "source_id": 11,
+          "source_available": true,
+          "observation": "人工观察到 500 与 SQL 错误片段；Authorization: [REDACTED:sensitive_field]",
+          "accepted": true,
+          "qualifies_for_confirmation": true,
+          "acceptance_note": "响应差异可重复",
+          "accepted_by": "test:analyst",
+          "accepted_at": "2026-07-24 09:19:00.000",
+          "content_hash": "403b7b32136b42136fe9e753f03caa618e89ebb29cf17b0ecfe69a2700a33680",
+          "snapshot_hash_verified": true,
+          "created_by": "test:analyst",
+          "created_at": "2026-07-24 09:18:00.000",
+          "redacted_snapshot": {
+            "redaction_manifest": {
+              "body_decisions": [],
+              "disclosures": [],
+              "notes": [],
+              "omissions": [],
+              "redactions": [
+                {
+                  "count": 1,
+                  "kind": "query_value",
+                  "location": "request.url.query.api_key"
+                },
+                {
+                  "count": 1,
+                  "kind": "sensitive_header",
+                  "location": "request.headers.authorization"
+                },
+                {
+                  "count": 1,
+                  "kind": "sensitive_header",
+                  "location": "request.headers.cookie"
+                },
+                {
+                  "count": 1,
+                  "kind": "sensitive_header",
+                  "location": "response.headers.set-cookie"
+                },
+                {
+                  "count": 1,
+                  "kind": "sensitive_field",
+                  "location": "request.body.api_key"
+                }
+              ],
+              "total_input_bytes": 0
+            },
+            "request": {
+              "body": "{\n  \"api_key\": \"[REDACTED:sensitive_field]\",\n  \"username\": \"admin\"\n}",
+              "capture_status": "identity_text",
+              "captured_size": 20000,
+              "headers": "{\n  \"Authorization\": \"[REDACTED:sensitive_header]\",\n  \"Content-Type\": \"application/json\",\n  \"Cookie\": \"[REDACTED:sensitive_header]\"\n}",
+              "method": "POST",
+              "truncated": false,
+              "url": "https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D",
+              "wire_size": 20000
+            },
+            "response": {
+              "body": "{\n  \"error\": \"SQL syntax near username\",\n  \"padding\": \"captured prefix\"\n}",
+              "capture_status": "identity_text",
+              "captured_size": 8192,
+              "headers": "{\n  \"Content-Type\": \"application/json\",\n  \"Set-Cookie\": \"[REDACTED:sensitive_header]\"\n}",
+              "status": 500,
+              "truncated": true,
+              "wire_size": 24000
+            },
+            "schema_version": 1,
+            "source": {
+              "id": 11,
+              "type": "traffic"
+            },
+            "source_created_at": "2026-07-24 09:10:00"
+          }
+        }
+      ],
+      "remediation": "（A03:2021）优先使用参数化接口和安全 API，对输入做语义白名单校验，并按最终解释上下文编码输出。 （CWE-89 (v4.20)）使用参数化查询；动态标识符采用严格映射；数据库账号遵循最小权限。",
+      "retest": {
+        "status": "not_recorded",
+        "statement": "当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。"
+      },
+      "analyst_notes": "由分析员复核。",
+      "source": {
+        "source_type": "ai",
+        "requires_human_review": true,
+        "ai_run": {
+          "analysis_run_id": 21,
+          "provider_id": "test-provider",
+          "model": "model-v2",
+          "prompt_id": "traffic_analysis",
+          "prompt_version": 3,
+          "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "validation_status": "valid",
+          "created_at": "2026-07-24 09:12:00"
+        },
+        "rule_hits": []
+      },
+      "created_at": "2026-07-24 09:13:00",
+      "updated_at": "2026-07-24 09:20:00"
+    }
+  ],
+  "pending_appendix": [
+    {
+      "id": 32,
+      "identity": "finding:32",
+      "fingerprint": null,
+      "title": "待确认的会话问题",
+      "vulnerability_type": "会话管理",
+      "status": "pending",
+      "severity": "medium",
+      "confidence": 55,
+      "occurrences": 1,
+      "affected_targets": [
+        {
+          "traffic_id": 11,
+          "method": "POST",
+          "url": "https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D",
+          "observed_at": "2026-07-24 09:10:00"
+        }
+      ],
+      "standard_references": [],
+      "hypothesis_reasoning": "仅为待验证假设。",
+      "suggested_validation_steps": "检查会话轮换。",
+      "executed_reproduction": [],
+      "evidence": [],
+      "remediation": "",
+      "retest": {
+        "status": "not_recorded",
+        "statement": "当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。"
+      },
+      "analyst_notes": "",
+      "source": {
+        "source_type": "ai",
+        "requires_human_review": true,
+        "ai_run": {
+          "analysis_run_id": 21,
+          "provider_id": "test-provider",
+          "model": "model-v2",
+          "prompt_id": "traffic_analysis",
+          "prompt_version": 3,
+          "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "validation_status": "valid",
+          "created_at": "2026-07-24 09:12:00"
+        },
+        "rule_hits": []
+      },
+      "created_at": "2026-07-24 09:14:00",
+      "updated_at": "2026-07-24 09:14:00"
+    }
+  ],
+  "test_plan": {
+    "revision": 1,
+    "needs_update": true,
+    "update_reason": "新 Evidence 到达",
+    "total_nodes": 3,
+    "terminal_nodes": 1,
+    "coverage_percent": 33,
+    "status_distribution": [
+      {
+        "status": "todo",
+        "count": 1
+      },
+      {
+        "status": "in_progress",
+        "count": 0
+      },
+      {
+        "status": "done",
+        "count": 1
+      },
+      {
+        "status": "blocked",
+        "count": 1
+      },
+      {
+        "status": "skipped",
+        "count": 0
+      },
+      {
+        "status": "not_applicable",
+        "count": 0
+      }
+    ],
+    "unfinished_items": [
+      {
+        "id": 42,
+        "stable_key": "test:session",
+        "title": "验证会话轮换",
+        "status": "todo",
+        "priority": 20,
+        "reason": "",
+        "expected_observation": "",
+        "actual_observation": "",
+        "evidence_count": 0
+      }
+    ],
+    "blocked_items": [
+      {
+        "id": 43,
+        "stable_key": "test:admin",
+        "title": "验证管理员路径",
+        "status": "blocked",
+        "priority": 30,
+        "reason": "缺少授权账号",
+        "expected_observation": "",
+        "actual_observation": "",
+        "evidence_count": 0
+      }
+    ],
+    "excluded_items": []
+  },
+  "provenance": {
+    "standard_versions": [
+      {
+        "framework": "cwe",
+        "version": "4.20",
+        "pack_title": "MITRE CWE 4.20（RustForge 精选知识卡）",
+        "published_at": "2026-04-30",
+        "source_url": "https://cwe.mitre.org/data/index.html"
+      },
+      {
+        "framework": "owasp-top10",
+        "version": "2021",
+        "pack_title": "OWASP Top 10:2021",
+        "published_at": "2021",
+        "source_url": "https://owasp.org/Top10/2021/"
+      }
+    ],
+    "ai_runs": [
+      {
+        "analysis_run_id": 21,
+        "provider_id": "test-provider",
+        "model": "model-v2",
+        "prompt_id": "traffic_analysis",
+        "prompt_version": 3,
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "validation_status": "valid",
+        "created_at": "2026-07-24 09:12:00"
+      }
+    ],
+    "rule_versions": [],
+    "review_notice": "AI 与被动规则只产生待验证假设。报告中的 confirmed 状态来自人工接受 Evidence 后的显式状态变更；仍需由具备授权和专业能力的人员复核。"
+  }
+}

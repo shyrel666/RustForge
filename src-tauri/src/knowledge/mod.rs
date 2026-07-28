@@ -9,6 +9,7 @@ pub mod registry;
 
 pub use model::{KnowledgeCard, StandardReference};
 pub use registry::{
-    lookup, references_from_json, references_to_json, remediation_for, validate_builtin_registry,
-    validate_references,
+    lookup, references_from_json, references_to_json, remediation_for, resolve,
+    validate_builtin_registry, validate_references, KnowledgeLookup, ReferenceState,
+    UnresolvedReference,
 };

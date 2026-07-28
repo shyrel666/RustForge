@@ -13,7 +13,7 @@
 - `ai/analyzer.rs` / `commands.rs::chat_json` — 透传并**累加**（含解析失败重试的那次调用也计入）
 - `commands.rs::record_usage` — 每次 LLM 调用后把用量累加进 `settings` 表
   （`usage_calls / usage_prompt_tokens / usage_completion_tokens / usage_total_tokens`），
-  接入全部 4 处 LLM 命令（分析 / 生成树 / 展开 / 换思路）
+  接入全部 4 处 LLM 命令（分析 / 生成测试计划 proposal / 展开 / 换思路）
 - 命令：`get_token_usage`（读累计）、`reset_token_usage`（清零）
 
 **前端**
@@ -39,7 +39,7 @@
 
 ### 四、会话恢复 / 复盘
 
-- 项目制 + SQLite 全量持久化（Phase 0 起）：流量 / 发现 / 分析缓存 / 任务树 / 关联关系均落库
+- 项目制 + SQLite 全量持久化（Phase 0 起）：流量 / 发现 / 分析运行 / 测试计划 / revision / 关联关系均落库
 - `current_project_id` 存 `settings`，重启后自动恢复上次项目；切换项目即完整"回放"该会话的
   全部记录；配合本阶段的分页可回溯任意长的历史流量
 
@@ -52,10 +52,10 @@
 
 ## 手工验收（对应 Phase 5 目标）
 
-1. 设置页配置 Key/模型 → 做几次 AI 分析/任务树操作 → 「AI 用量统计」出现调用次数与 token；
+1. 设置页配置 Key/模型 → 做几次 AI 分析/测试计划操作 → 「AI 用量统计」出现调用次数与 token；
    填入每百万单价 → 显示预估成本；「清零」可重置
 2. 抓取大量流量（>200 条）→ 表格底部显示「已加载 200 / 共 N」→ 点「加载更多」增量加载
-3. 关闭并重启应用 → 自动恢复上次项目及其全部流量/发现/任务树
+3. 关闭并重启应用 → 自动恢复上次项目及其全部流量/发现/测试计划
 4. `pnpm tauri build` 产出带完整元数据的安装包（签名需自备证书）
 
 ## 已知限制 / 后续可选增强

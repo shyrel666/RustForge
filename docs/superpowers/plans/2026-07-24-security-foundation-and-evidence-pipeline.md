@@ -1,6 +1,6 @@
 # RustForge 安全基础与证据闭环现代化实施计划
 
-> 状态：执行中（Task 0.1–2.2、Task 3.1–3.2 已完成，Gate A、Gate B 已通过）
+> 状态：执行中（Task 0.1–5.2 已完成，Gate A–Gate C 已通过；M5 进行中）
 >
 > 日期：2026-07-24
 >
@@ -60,17 +60,21 @@ flowchart LR
     Standards --> Report
 ```
 
+
+
 核心对象及职责：
 
-| 对象 | 职责 | 不承担的职责 |
-|---|---|---|
-| `ScopePolicy` | 规范化目标、判断请求是否获授权、记录判定原因 | 不依赖前端提示保证安全 |
-| `TrafficSnapshot` | 保存有界、结构化、带截断状态的 HTTP 证据 | 不把截断内容伪装成完整正文 |
-| `AnalysisRun` | 记录一次 AI 调用的模型、提示词、输入哈希、脱敏清单和校验结果 | 不直接代表已确认 Finding |
-| `RuleEvaluation` | 记录规则版本、命中字段、证据片段和指纹 | 不重复创建相同 Finding |
-| `Finding` | 表达一个待验证或已确认的问题身份 | 不直接复制大量原始敏感数据 |
-| `Evidence` | 引用流量或 Repeater 运行并保存脱敏快照、观察结果与哈希 | 不允许无来源的“已验证”状态 |
-| `TestPlan` | 组织假设、测试、依赖、状态和完成证据 | 不自动执行攻击步骤 |
+
+| 对象                | 职责                               | 不承担的职责           |
+| ----------------- | -------------------------------- | ---------------- |
+| `ScopePolicy`     | 规范化目标、判断请求是否获授权、记录判定原因           | 不依赖前端提示保证安全      |
+| `TrafficSnapshot` | 保存有界、结构化、带截断状态的 HTTP 证据          | 不把截断内容伪装成完整正文    |
+| `AnalysisRun`     | 记录一次 AI 调用的模型、提示词、输入哈希、脱敏清单和校验结果 | 不直接代表已确认 Finding |
+| `RuleEvaluation`  | 记录规则版本、命中字段、证据片段和指纹              | 不重复创建相同 Finding  |
+| `Finding`         | 表达一个待验证或已确认的问题身份                 | 不直接复制大量原始敏感数据    |
+| `Evidence`        | 引用流量或 Repeater 运行并保存脱敏快照、观察结果与哈希 | 不允许无来源的“已验证”状态   |
+| `TestPlan`        | 组织假设、测试、依赖、状态和完成证据               | 不自动执行攻击步骤        |
+
 
 ## 5. 执行顺序与发布闸门
 
@@ -87,6 +91,8 @@ flowchart TD
     M5 --> GateD["Gate D 工作流现代化完成"]
     GateD --> M6["M6 协议与插件化增强"]
 ```
+
+
 
 - **Gate A**：Repeater 无法越过 Scope；未知长度正文不会造成无界内存增长。
 - **Gate B**：API Key 不返回前端；AI 默认输入经过结构化脱敏并可预览。
@@ -479,6 +485,18 @@ flowchart TD
 - AI Schema/提示词/后端校验、14 条现有规则、Finding 与 Task 落库读取、Tauri IPC、Finding/Task UI 知识卡和 Markdown 报告已统一为多值 `StandardReference`；任务测试覆盖两个标准引用的数据库往返，报告测试覆盖版本化引用与派生修复建议。
 - `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 均通过；Rust 为 `106 passed` 单元测试与 `4 passed` MITM 集成测试。前端 `pnpm check` 整体通过，包含 `18 passed`、TypeScript 检查和生产构建。
 
+**后续优化（Task 3.1/3.2 代码评审补充，非阻塞）：**
+
+- [x] `registry.rs` 的 `RegisteredEntry` 目前为每个条目克隆整份 `KnowledgePack`（含该包全部 entries），内存随条目数近似二次方增长。改为存 `pack_index` / `Arc<KnowledgePack>` 或 `(pack_idx, entry_idx)` 索引，纯内部重构、不改外部行为与现有测试。当前六包 93 卡量级可接受，若未来扩到全量 CWE 需先做此项。
+- [x] `KnowledgePack::computed_content_sha256` 用 `serde_json::to_vec(&entries)`，依赖结构体字段顺序而非规范化 JSON（非 RFC 8785）。当前 entries 全为定序结构体，安全；补一条约束注释“不得在 entries 内引入无序容器（如 `serde_json::Map`）”，避免以后哈希不稳定。
+- [x] 知识库对“编号非法”与“编号合法但精选包未收录”统一报 `UnknownReference`。可新增 `not_in_pack` 状态与 UI 提示“未收录，不影响判定”，改善差异化路线下的可读性；须保持“绝不把未知编号静默映射到已知条目”这条红线不变。
+
+**后续优化执行证据（2026-07-27）：**
+
+- 注册表改为 `StandardReference → (pack_idx, entry_idx)`，93 个条目不再各自克隆整包；知识卡仍在查询边界按需派生，外部接口语义不变。
+- `KnowledgeEntry` 明确禁止无序容器进入哈希输入，并用字段顺序/重复序列化测试固定当前非 RFC 8785 编码约束。
+- 查询接口返回 `cards + unresolved`；合法但精选包未收录的引用显示 `not_in_pack`，非法编号显示 `invalid`，两者都不会映射到近似知识卡；严格写入校验仍拒绝两种未知引用。
+
 ### Task 3.2：规则 schema、加载器与结构化提取器
 
 **优先级：** P1
@@ -509,7 +527,7 @@ flowchart TD
 - 规则包 schema 固定为 v1，并对规则包、规则、条件和提取器启用严格未知字段拒绝。加载器只把传入的 JSON 编译为只读条件 AST，不提供文件、网络、进程、动作或脚本节点；解析、schema、标准引用或资源上限校验失败时仅将对应包标记为 `Disabled`，以脱敏原因写入诊断，代理继续运行。
 - 每包最多 256 条规则，条件树深度最多 16 层，单选择器最多 256 个候选，JSONPath 最多 12 段；单流量规则包求值预算为 50 ms，命中证据最多 160 个字符。正则源码最多 512 字节、语法嵌套最多 24 层、编译程序和惰性 DFA 各最多 1 MiB，并使用无回溯的 Rust `regex` 引擎。
 - JSONPath 首版只接受字段和数组下标，不支持递归、通配符或过滤器；JWT 只解析 `alg`、`kid`、`iss`、`aud`、`exp`、`nbf` 等元数据，不把未验签内容当成可信声明。`ForEach` 首版仅允许 request/response cookie，并对每条 `Set-Cookie` 独立判断和产生命中。
-- 指纹对 `rule_id`、规则版本、规范化 method/host/path 和字段路径做长度前缀编码后计算 SHA-256；查询值不参与接口身份，具体 cookie 下标和属性路径参与身份。截断正文命中标记为不完整证据，置信度硬上限为 40。
+- 最终命中身份对 `rule_id`、规范化 method/host/path 和字段路径做长度前缀编码后计算 SHA-256；`rule_version` 按 Task 3.3 决策只作为命中属性、不进入身份。查询值不参与接口身份，具体 cookie 下标和属性路径参与身份。截断正文命中标记为不完整证据，置信度硬上限为 40。
 - 旧规则求值器只保留为 Task 3.3 新旧影子评测的比较基线，生产代理默认只调用声明式规则包。
 
 **步骤：**
@@ -545,28 +563,58 @@ flowchart TD
 **文件：**
 
 - Create: `src-tauri/src/rules/worker.rs`
+- Create: `src-tauri/src/rules/shadow.rs`（仅 `cfg(test)`）
+- Create: `docs/architecture/rule-shadow-evaluation.md`
+- Move: `src-tauri/src/rules/builtin.rs` → `src-tauri/tests/fixtures/rules/legacy_v1.rs`（冻结的 test-only 基线）
 - Modify: `src-tauri/src/proxy/interceptor.rs`
-- Modify: `src-tauri/src/storage/db.rs`
+- Modify: `src-tauri/src/rules/engine.rs`（正文单次解码复用、shadow 后移除 legacy 双轨）
+- Modify: `src-tauri/src/rules/fingerprint.rs`（Finding 身份语义：叠加 project、`rule_version` 不入身份）
+- Modify: `src-tauri/src/storage/migrations.rs`
+- Modify: `src-tauri/src/storage/migrations/v1.sql`
+- Modify: `src-tauri/src/storage/models.rs`
 - Modify: `src-tauri/src/commands.rs`
+- Modify: `src/api/tauri.ts`
 - Modify: `src/stores/findings.ts`
+- Modify: `src/stores/traffic.ts`
 - Modify: `src/views/FindingsView.vue`
+
+**设计要点（来自 Task 3.1/3.2 代码评审）：**
+
+- **规则求值必须移出代理写事务。** 当前 `interceptor.rs::store_and_emit` 在同一个 `unchecked_transaction` 内先 INSERT traffic、再 `engine::evaluate`、再 INSERT findings、最后 commit，最长 50ms 求值预算全程占用一条写连接，与本任务“不持有写事务/不等待”验收直接冲突。拆成两段：短事务先提交 traffic，再只把 `project_id + traffic_id` 投递给 `worker.rs`；worker 消费时按需读取有界快照，避免有界队列把大正文再复制 256 份。
+- **Finding 指纹在引擎指纹上叠加 project，不另造一套。** Task 3.2 初版的 `fingerprint.rs` 已负责 method/host/path/field_path 规范化；Task 3.3 先按下一条决策移除 version，再对 `project_id` 与引擎命中指纹做长度前缀拼接后取 SHA-256，避免两处规范化逻辑漂移。
+- **明确 `rule_version` 不进入 Finding 身份。** 当前引擎指纹把 `rule_version` 计入身份，规则包补丁级升版（1.0.0→1.0.1）会让同一端点同一字段的历史 Finding 与新命中指纹不同、去重失效并炸出重复。定为：Finding 身份只用 `rule_id`，`rule_version` 记为命中/证据属性；仅当规则语义实质变化时才启用新 `rule_id`。
+- **大 body 一次解码、复用给所有规则。** 内置包有 3 条对 `response_body`、1 条对 `request_body` 的正则外加 JsonPath，当前每条规则各自 `from_utf8_lossy`、JsonPath 各自 `serde_json::from_str`。在 `engine::evaluate_pack` 入口对请求/响应正文各解码一次、JSON 各解析一次并缓存复用，避免 worker 在连续大响应下逐规则线性劣化。
+- **诊断必须可见。** 坏包禁用原因、求值超时、队列丢弃目前只 `eprintln!` 到 stderr；本任务需通过 IPC 暴露给前端，配合 `rule_evaluations` 的可诊断/可重试。
 
 **步骤：**
 
-- [ ] 流量事务提交后将规则任务放入有界队列，代理转发不等待规则执行。
-- [ ] 记录 `rule_evaluations`，使失败任务可诊断、可重试且幂等。
-- [ ] 以 `project + rule + normalized endpoint + parameter/location` 生成 Finding 指纹。
-- [ ] 同一指纹再次命中时增加 affected traffic/evidence，不重复创建 Finding。
-- [ ] 先以 shadow mode 同时运行旧引擎和 v2，对比差异。
-- [ ] 评测报告至少包含每条规则的 TP、FP、FN 和跳过原因。
-- [ ] v2 达到基线后切换默认；旧引擎保留一个发布周期作为回滚开关。
+- [x] 拆分 `store_and_emit`：traffic 用短事务先落库并推事件；规则任务经有界 `mpsc` 投递给 `worker.rs`，`try_send` 失败即计 `dropped_evaluations` 指标，绝不 `await` 阻塞响应回调或网络转发。
+- [x] `worker.rs` 用独立连接求值与写库、不持有代理写事务；`rule_evaluations` 以 `(traffic_id, pack_id, pack_version)` 为幂等键并在处理前查重，保证失败可重试、重启不重复建 Finding。
+- [x] 在 `engine::evaluate_pack` 入口对请求/响应正文各解码一次、JSON 各解析一次并复用；大 body 正则沿用 Task 1.2 的截断语义，不做全量重复扫描。
+- [x] `findings` 增加 `fingerprint` 列并建唯一约束；指纹 = SHA-256(project_id 与引擎命中指纹长度前缀拼接)，`rule_id` 不含 version 参与身份。
+- [x] 同一指纹再次命中时追加关联 traffic 与累计计数，不重复创建 Finding；`rejected` 不因再次命中自动恢复。Evidence 关联仍按依赖留给 Task 4.1。
+- [x] 新增规则诊断/包状态查询命令（Disabled 原因、超时次数、`dropped_evaluations`），在前端 Findings 可见；后台补写的 traffic rule tags 也通过增量事件实时更新。
+- [x] 以 test-only shadow mode 同时运行 `legacy_evaluate` 与 v2，把差异（仅 v2 / 仅 legacy / 两者命中）写入内存临时表；人工标注 fixtures 逐规则计算 TP、FP、FN 和跳过原因。
+- [x] v2 通过 shadow 基线后成为唯一生产引擎；项目尚未公开发布，不虚构“已稳定一个公开发布周期”，而以预发布质量闸门完成切换。`engine.rs` 的 legacy 路径、生产 `builtin.rs` 与 `LEGACY_RULES` 已删除，旧语义只冻结为 test-only fixture。
 
 **验收：**
 
-- [ ] 规则处理不持有代理数据库写事务。
-- [ ] 大量重复请求只产生一个 Finding，并能看到多条关联流量。
-- [ ] 队列满时有明确降级和指标，不阻塞网络转发。
-- [ ] shadow mode 差异经过人工审阅并形成记录。
+- [x] 规则处理不持有代理数据库写事务；求值全程不阻塞网络转发。
+- [x] 大量重复请求只产生一个 Finding，并能看到多条关联流量。
+- [x] 队列满时有明确降级和指标（`dropped_evaluations` 可见），不阻塞转发。
+- [x] 规则包升补丁版本后，同一端点同一字段不产生重复 Finding。
+- [x] 大 body 连续响应下，worker 求值不因逐规则重复解码/解析而线性劣化。
+- [x] 坏包、超时、队列丢弃的诊断可在前端查询到。
+- [x] shadow mode 差异经过人工审阅并形成记录。
+
+**执行证据（2026-07-27）：**
+
+- `store_and_emit` 只完成 traffic INSERT、释放连接并推送 `traffic:new`，随后才 `try_send`；容量 256 的同步队列元素固定为两个 `i64` 身份，在满载/断连测试中均立即返回并累计丢弃数。worker 在独立 OS 线程按需读取流量快照，读取连接在规则求值前释放，写入时才开启独立 `IMMEDIATE` 事务。
+- 数据库测试覆盖同包同流量幂等、失败事务回滚后可重试、64 条查询值不同但 route 相同的流量只生成一个 Finding、64 条 traffic 关联、`rejected` 状态保持，以及 `builtin@1.0.0 → 1.0.1` 后不重复建 Finding；`finding_rule_hits` 为每次有效求值保留包/规则版本、命中字段、脱敏证据、置信度和指纹。
+- 请求/响应 body、JSON、header 与 Cookie 都在单次包求值上下文中缓存复用；1 MiB 正文测试验证命中结果不变，截断语义继续限制证据完整性和置信度。
+- Findings 页面展示 worker 状态、队列深度、完成/丢弃/超时/失败计数、规则包 Disabled 原因、最近 20 次持久化求值、同一 Finding 的关联流量及逐次规则命中审计；`finding:updated` 与 `traffic:tags` 事件实现增量刷新。
+- 56 条人工标注 shadow 样本的 v2 汇总为 TP/FP/FN = `30/0/0`，冻结 v1 为 `26/1/4`；2 条未标注跨规则命中按明确原因跳过。三条差异规则均为人工确认的 v2 改进，记录见 `docs/architecture/rule-shadow-evaluation.md`。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 和 `pnpm check` 均通过；Rust 为 `154 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `18 passed`、TypeScript 检查与生产构建通过。
 
 ---
 
@@ -583,9 +631,13 @@ flowchart TD
 - Create: `src-tauri/src/evidence/mod.rs`
 - Create: `src-tauri/src/evidence/model.rs`
 - Create: `src-tauri/src/evidence/service.rs`
-- Modify: `src-tauri/src/storage/db.rs`
+- Modify: `src-tauri/src/storage/migrations/v1.sql`
+- Modify: `src-tauri/src/storage/migrations.rs`
 - Modify: `src-tauri/src/storage/models.rs`
 - Modify: `src-tauri/src/commands.rs`
+- Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/src/report.rs`
+- Modify: `src-tauri/src/rules/worker.rs`
 - Modify: `src/api/tauri.ts`
 - Modify: `src/stores/findings.ts`
 - Modify: `src/views/FindingsView.vue`
@@ -593,11 +645,11 @@ flowchart TD
 
 **新增数据：**
 
-- `findings.fingerprint`、`updated_at`、`analyst_notes`
+- `findings.updated_at`、`analyst_notes`（`fingerprint`、累计命中数与关联 traffic 已由 Task 3.3 提前交付）
 - `finding_events`：状态、严重性和人工备注变化历史
 - `evidence`：来源类型、来源 ID、观察结果、脱敏快照、内容哈希、创建者和时间
 - `finding_evidence`：Finding 与 Evidence 多对多关系
-- `finding_references`：结构化标准引用
+- 计划草案中的 `finding_references` 不再另建：Task 3.1 已将 `findings.standard_references` 锁定为结构化、版本固定的 JSON 数组；按开发态“不双写”策略继续以该字段为唯一真源
 
 **状态规则：**
 
@@ -606,20 +658,35 @@ flowchart TD
 - 规则或 AI 后续再次命中不得自动覆盖人工状态。
 - severity 与 confidence 分离；confidence 不是风险等级。
 
+**技术验证后锁定的实现语义：**
+
+- `finding_events` 由数据库触发器为每个新 Finding 自动写入 `created`；状态、severity、人工备注以及 Evidence 接受/撤销都必须先追加匹配事件，数据库触发器会拒绝绕过审计的直接更新。事件、Evidence 本体以及 Finding 存续期间的 Evidence 关联不可改写或单独删除，项目/Finding 生命周期级联仍可执行。
+- “人工接受”是 `finding_evidence` 关系上的判断，不污染可被多个 Finding 复用的 Evidence 本体。新关联固定从未接受开始；接受说明、操作者和时间戳只能随一次匹配审计事件的状态转换原子写入，`linked_at` 永久不可改写；已确认 Finding 不能撤销最后一条已接受 Evidence。
+- traffic Evidence 只保存方法、脱敏 URL/Header、最多各 8 KiB 的脱敏文本正文、捕获/截断元数据和脱敏清单；二进制正文不进入快照。analysis run Evidence 只保存 provider/model/prompt、输入/输出哈希、策略、脱敏清单、校验与 token 元数据，不复制模型原始输出。快照整体上限 64 KiB，内容哈希为快照规范 JSON 的 SHA-256。
+- `source_id` 是受服务校验的多态来源标识，不对可删除来源建立外键。删除 traffic 后 Evidence 的原来源 ID、观察结果、快照和哈希继续保留，读取结果明确标记 `source_available = false`。
+- `replay_run` 已固定在 schema、Rust/TypeScript 来源类型和服务分派契约中；Task 4.2 创建 `replay_runs` 前，服务明确拒绝引用不存在的重放运行，不创建占位表或伪记录。Task 4.2 将沿用该入口接入实际运行。
+
 **步骤：**
 
-- [ ] 当前数据模型创建 Finding 时同步生成指纹和初始状态事件；不回填旧开发数据。
-- [ ] 把 traffic、analysis run 和 replay run 作为可引用来源，不重复复制原始大正文。
-- [ ] Evidence 保存稳定哈希和用于报告的脱敏快照。
-- [ ] 所有状态修改使用事务，并追加不可变事件。
-- [ ] UI 展示“假设来源、实际证据、人工结论”三个区域。
+- [x] 在 Task 3.3 已有 Finding 指纹上补充初始状态事件；直接更新预发布 v1 基线，不回填旧开发数据。
+- [x] traffic、analysis run 已可直接引用；replay run 已建立来源契约并由 Task 4.2 在实际表创建后接入，不重复复制原始大正文。
+- [x] Evidence 保存稳定 SHA-256 和用于报告的默认脱敏、有界快照。
+- [x] 所有人工状态、severity、备注和 Evidence 接受状态修改使用事务，并追加数据库保护的不可变事件。
+- [x] `EvidencePanel` 展示“假设来源、实际证据、人工结论”三个区域及按序历史。
 
 **验收：**
 
-- [ ] 无 Evidence 的 Finding 不能被标记 confirmed。
-- [ ] rejected Finding 再次命中不会被恢复成 pending。
-- [ ] 删除原 traffic 时按照产品决策保留证据快照或阻止删除，并有测试覆盖。
-- [ ] Finding 历史可按时间顺序完整重放。
+- [x] 无人工接受 Evidence 的 Finding 不能被标记 confirmed；只有未接受 Evidence 也不能绕过。
+- [x] rejected Finding 再次命中不会被恢复成 pending。
+- [x] 删除原 traffic 后保留 Evidence 脱敏快照、来源 ID 和哈希，并有测试覆盖。
+- [x] Finding 历史按 `created_at, id` 稳定排序，可完整重放创建、severity、备注、Evidence 判断与状态变化。
+
+**执行证据（2026-07-27）：**
+
+- 新增 7 条 Evidence 服务测试，覆盖无证据/只有未接受证据不能确认、误报原因必填、直接 SQL 绕过审计被拒绝、事件不可改写/单独删除、已确认状态保留最后证据、跨项目来源拒绝、analysis run 引用、相同脱敏快照哈希稳定，以及删除 traffic 后快照继续可读。
+- Task 3.3 的 64 条重复流量与规则包补丁版本测试改走正式人工状态事务服务，继续证明 `rejected` 不被后续命中覆盖；报告 fixture 也必须通过“创建 Evidence → 人工接受 → 确认”才能生成已确认章节。
+- Findings 页面展开行使用稳定 `row-key`，EvidencePanel 可从首次/关联 traffic 或 AI analysis run 创建证据、查看脱敏快照与哈希、接受/撤销证据、维护独立 severity 和人工备注，并按时间线查看全部审计事件。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets --no-fail-fast` 和 `pnpm check` 均通过；Rust 为 `165 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `21 passed`、TypeScript 检查与生产构建通过。
 
 ### Task 4.2：持久化 Repeater 会话与运行
 
@@ -633,7 +700,11 @@ flowchart TD
 - Create: `src-tauri/src/replay/model.rs`
 - Create: `src-tauri/src/replay/service.rs`
 - Modify: `src-tauri/src/commands.rs`
-- Modify: `src-tauri/src/storage/db.rs`
+- Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/src/storage/migrations/v1.sql`
+- Modify: `src-tauri/src/storage/migrations.rs`
+- Modify: `src-tauri/src/proxy/body_capture.rs`
+- Modify: `src-tauri/src/evidence/service.rs`
 - Modify: `src/api/tauri.ts`
 - Modify: `src/stores/repeater.ts`
 - Modify: `src/views/RepeaterView.vue`
@@ -642,34 +713,48 @@ flowchart TD
 
 **数据模型：**
 
-- `replay_sessions`：项目、标题、来源 traffic、创建和更新时间。
-- `replay_runs`：请求快照、Scope 判定、TLS 策略、响应、耗时、截断状态和哈希。
+- `replay_sessions`：项目、标题、来源 traffic、TLS 策略、项目内选中状态、创建和更新时间。
+- `replay_runs`：请求快照、Scope 判定、TLS 策略、结果类型、失败原因、响应、耗时、截断状态和哈希；run 在会话存续期间不可改写或单独删除。
+- `task_evidence`：当前任务节点与不可变 Evidence 的多对多关系，Task 5.2 扩充测试计划模型时沿用。
 - 每次点击发送创建新的 run，不覆盖上一轮。
+- Scope 拒绝、请求构造/网络失败和响应中途断开也创建 run；只有取得响应头的运行允许保存 status/响应快照。
+- 内部删除 guard 仅允许会话/项目生命周期级联清理 run，不开放为产品数据或 IPC。
 
 **步骤：**
 
-- [ ] 把重放网络逻辑从 `commands.rs` 移入独立 service。
-- [ ] 支持项目内多标签会话和运行历史。
-- [ ] 提供任意两次 run 的 method、URL、header、body、status、duration 和响应 Diff。
-- [ ] 一键把 run 作为 Evidence 关联到 Finding 或 Task。
-- [ ] TLS 忽略证书错误成为可见的会话策略，并写入每次 run。
-- [ ] 正文捕获沿用 Task 1.2 的大小、截断和解码语义。
+- [x] 把重放网络逻辑从 `commands.rs` 移入独立 service。
+- [x] 支持项目内多标签会话和运行历史。
+- [x] 提供任意两次 run 的 method、URL、header、body、status、duration 和响应 Diff。
+- [x] 一键把 run 作为 Evidence 关联到 Finding 或 Task。
+- [x] TLS 忽略证书错误成为可见的会话策略，并写入每次 run。
+- [x] 正文捕获沿用 Task 1.2 的大小、截断和解码语义。
 
 **验收：**
 
-- [ ] 重启应用后会话、历史和选中状态可恢复。
-- [ ] 每次 run 都保存当时的请求，而不是读取后来被修改的草稿。
-- [ ] 越界 run 不写入成功响应，只记录拒绝原因。
-- [ ] Diff 对重复 header 和二进制正文有稳定降级表现。
-- [ ] run 可关联为 Finding 的验证证据。
+- [x] 重启应用后会话、历史和选中状态可恢复。
+- [x] 每次 run 都保存当时的请求，而不是读取后来被修改的草稿。
+- [x] 越界 run 不写入成功响应，只记录拒绝原因。
+- [x] Diff 对重复 header 和二进制正文有稳定降级表现。
+- [x] run 可关联为 Finding 的验证证据。
+
+**执行证据（2026-07-28）：**
+
+- Repeater Tauri command 只负责参数传输；`replay::service` 在创建 reqwest client、解析用户 header 或建立 socket 前重新执行项目 `ScopePolicy`，并直接使用授权后返回的 URL。越界测试同时监听本地 TCP 端口，证明拒绝 run 已持久化但没有连接发生。
+- 允许联网的请求会先在独立事务中提交不可变 `replay_attempts`，再调用 `request.send()`；测试在本地服务端接受连接时直接查询数据库，确认此刻已有 1 条 attempt 且尚无最终 run。活动 attempt 会阻止会话/项目删除，应用启动或后续读取会把无结果 attempt 恢复为带 `APP_INTERRUPTED` 和潜在网络副作用提示的 run。
+- 会话的标题、来源 traffic、TLS 策略和选中状态，以及每次运行的完整请求身份、有界请求/响应快照、Scope/TLS 快照、结果/稳定错误码、耗时和哈希均写入当前 v1 基线。文件数据库关闭重开后，会话、历史和选中状态保持一致。
+- 请求正文分别保存“实际交给 reqwest 的有界 wire 字节”“用于检查/Evidence 的解码预览”和“构造失败时的有界原始编辑器输入”；恢复压缩请求时使用 wire 字节并保留 `Content-Encoding`，非法 Base64 失败 run 也能恢复原输入。请求与响应继续复用 Task 1.2 的 1 MiB 捕获/解码上限和 gzip/deflate/br、文本/二进制、截断语义。
+- 历史接口改为 50 条默认、200 条硬上限的游标分页摘要，正文只在选择/恢复 run 时按 ID 懒加载；`ReplayDiff` 使用完整正文哈希避免相同截断前缀的假阴性，缺少完整哈希时明确返回 `indeterminate`。跨会话可选择两条 run 比较。
+- Repeater 前端草稿以项目和会话共同分区，正文截断/解码警告及确认令牌绑定到具体项目、会话和警告文本；会话读取完成后才原子切换，所有发送、详情、Diff 和 Evidence 异步结果在写回前重新核对项目/会话，避免旧请求污染新工作区。
+- run 可从 Repeater 直接创建脱敏 Evidence 并关联到 Finding 或当前任务节点；Finding 关联默认未接受。只有取得 HTTP 响应头的 `completed` / `response_incomplete` run 才具备确认资格；Scope 拒绝或请求失败 run 即使人工接受也只能作为审计 Evidence，不能单独把 Finding 标为 confirmed。删除来源会话后 Evidence 的快照、资格和哈希保留，`source_available` 变为 false。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets --no-fail-fast` 和 `pnpm check` 均通过；Rust 为 `176 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `27 passed`、TypeScript 检查与生产构建通过。
 
 ### Gate C 验收
 
-- [ ] 规则与 AI 只创建带来源的待验证假设。
-- [ ] 重复命中通过 fingerprint 聚合。
-- [ ] Repeater 历史可复现，并能形成 Evidence。
-- [ ] confirmed Finding 必须具有可审计的人工验证证据。
-- [ ] 当前数据模型中的 Finding 状态和内容在证据闭环内不丢失。
+- [x] 规则与 AI 只创建带来源的待验证假设。
+- [x] 重复命中通过 fingerprint 聚合。
+- [x] Repeater 历史可复现，并能形成 Evidence。
+- [x] confirmed Finding 必须具有可审计的人工验证证据。
+- [x] 当前数据模型中的 Finding 状态和内容在证据闭环内不丢失。
 
 ---
 
@@ -686,28 +771,40 @@ flowchart TD
 - Modify: `src-tauri/src/ai/planner.rs`
 - Modify: `src-tauri/src/ai/digest.rs`
 - Modify: `src-tauri/src/tree/state.rs`
+- Modify: `src-tauri/src/commands.rs`
 
 **步骤：**
 
-- [ ] 对完整生成、展开节点和换思路统一使用递归深度/节点数验证器。
-- [ ] 所有插入前在后端重新计算总节点数，不能相信模型提供的层级。
-- [ ] 摘要排除 rejected Finding。
-- [ ] 对 endpoint 做 route 规范化，查询参数值不进入聚合 key。
-- [ ] 降低静态资源和高频噪声端点权重，增加方法、状态、content type、角色和新颖度信息。
-- [ ] `next_task` 至少跳过 blocked 和不满足前置条件的节点。
+- [x] 对完整生成、展开节点和换思路统一使用递归深度/节点数验证器。
+- [x] 所有插入前在后端重新计算总节点数，不能相信模型提供的层级。
+- [x] 摘要排除 rejected Finding。
+- [x] 对 endpoint 做 route 规范化，查询参数值不进入聚合 key。
+- [x] 降低静态资源和高频噪声端点权重，增加方法、状态、content type、角色和新颖度信息。
+- [x] `next_task` 至少跳过 blocked 和不满足前置条件的节点。
 
 **验收：**
 
-- [ ] 任意嵌套 AI 输出均不能超过最大深度和总节点数。
-- [ ] 被拒绝 Finding 不会重新进入规划提示词。
-- [ ] 带不同 token/query 值的同一路由被聚合为同一 endpoint。
-- [ ] 现有任务树测试全部保持通过。
+- [x] 任意嵌套 AI 输出均不能超过最大深度和总节点数。
+- [x] 被拒绝 Finding 不会重新进入规划提示词。
+- [x] 带不同 token/query 值的同一路由被聚合为同一 endpoint。
+- [x] 现有任务树测试全部保持通过。
+
+**执行证据（2026-07-28）：**
+
+- 本任务按总体顺序在 M4 后实施，并以当前 Evidence/Repeater 代码和 schema 为实际基线；除计划原列出的三个模块外，手工创建节点仍是一个真实插入入口，因此同步修改 `commands.rs`，统一转交后端规划服务校验。
+- `tree::state::validate_forest` 成为完整生成和展开输出共用的递归预算验证器，固定最大 3 层、40 个节点；展开会先验证模型的完整输出再执行原有直接子节点裁剪，换思路输出拒绝未知/夹带字段。所有完整生成、展开和手工插入均在事务内从 `task_nodes` 重建真实父子树，按实际父节点深度和现有总量复核，插入后再次验证再提交；失败不会留下部分节点。换思路虽不插入节点，也会在更新前后验证数据库中的完整树。
+- 完整生成在 AI 等待期间若发现已有树被其他操作写入会拒绝追加；手工创建也不能绕过深度或总量限制。回归测试覆盖任意嵌套输出、隐藏 children、数据库既有三层节点继续展开、40 → 41 节点、失败事务回滚和畸形持久树拒绝修改。
+- 摘要按规范化的 method、scheme、host、port 和不含 query 的 route 聚合；查询参数仅保留经脱敏的参数名集合，值既不进入 key 也不进入提示词。端点排序对静态资源及 health/metrics 等高频噪声降权，并输出方法、状态分布、Content-Type、仅由凭据类 header 名推断的角色上下文、频率/近期性新颖度和最近流量 ID。
+- `rejected` Finding 同时从摘要和规划器可关联 ID 白名单排除。当前 Task 5.1 模型尚无 Task 5.2 才会引入的显式 prerequisite 边，因此 `next_task` 先落实现有模型可表达的前置条件：不推荐 blocked 节点、blocked 祖先下的节点、父引用缺失/成环节点，以及仍有未完成子节点的父节点。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets --no-fail-fast` 和 `pnpm check` 均通过；Rust 为 `184 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `27 passed`、TypeScript 检查与生产构建通过。
 
 ### Task 5.2：从静态 PTT 迁移到版本化测试计划
 
 **优先级：** P1
 
 **依赖：** Task 4.2、Task 5.1
+
+**状态：** 已完成（2026-07-28）
 
 **文件：**
 
@@ -716,11 +813,28 @@ flowchart TD
 - Modify: `src-tauri/src/ai/planner.rs`
 - Modify: `src-tauri/src/ai/digest.rs`
 - Modify: `src-tauri/src/storage/db.rs`
+- Modify: `src-tauri/src/storage/migrations.rs`
+- Modify: `src-tauri/src/storage/migrations/v1.sql`
+- Modify: `src-tauri/src/evidence/service.rs`
 - Modify: `src-tauri/src/commands.rs`
+- Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/src/tree/mod.rs`
+- Create: `src-tauri/src/tree/service.rs`
 - Modify: `src/api/tauri.ts`
 - Modify: `src/stores/tree.ts`
 - Modify: `src/views/TaskTreeView.vue`
 - Create: `src/components/TaskPlanDiffDialog.vue`
+- Modify: `src-tauri/src/report.rs`
+- Modify: `src/components/shell/AppTopbar.vue`
+- Modify: `src/router/index.ts`
+- Modify: `src/utils/workspaceHistory.ts`
+- Modify: `src/views/TrafficView.vue`
+- Modify: `README.md`
+- Modify: `docs/PHASE2.md`
+- Modify: `docs/PHASE3.md`
+- Modify: `docs/PHASE4.md`
+- Modify: `docs/PHASE5.md`
+- Modify: `docs/architecture/0001-modernization-guardrails.md`
 
 **新增语义：**
 
@@ -733,21 +847,35 @@ flowchart TD
 
 **步骤：**
 
-- [ ] 直接更新当前基线 schema 和任务模型；不迁移或映射旧开发态 task node。
-- [ ] `generate` 改为生成 proposal 和 diff，不再直接删除现有树。
-- [ ] 用户确认后以事务合并新增、更新、保留和归档节点。
-- [ ] AI 不得覆盖人工锁定字段、人工状态或已关联 Evidence。
-- [ ] 新证据到达时只标记“计划可更新”，由用户触发生成增量 proposal。
-- [ ] 下一步排序采用确定性规则：依赖满足 → 风险/优先级 → 证据缺口 → 创建时间。
-- [ ] UI 和文档统一改称“测试计划”，除非未来真正加入 AND/OR 攻击树语义。
+- [x] 直接更新当前基线 schema 和任务模型；不迁移或映射旧开发态 task node。
+- [x] `generate` 改为生成 proposal 和 diff，不再直接删除现有树。
+- [x] 用户确认后以事务合并新增、更新、保留和归档节点。
+- [x] AI 不得覆盖人工锁定字段、人工状态或已关联 Evidence。
+- [x] 新证据到达时只标记“计划可更新”，由用户触发生成增量 proposal。
+- [x] 下一步排序采用确定性规则：依赖满足 → 风险/优先级 → 证据缺口 → 创建时间。
+- [x] UI 和文档统一改称“测试计划”，除非未来真正加入 AND/OR 攻击树语义。
 
 **验收：**
 
-- [ ] 重新规划不会丢失人工节点、进度、备注或证据。
-- [ ] 不满足 prerequisite 的节点不会成为下一步。
-- [ ] blocked、skipped、not-applicable 均要求相应原因并可追溯。
-- [ ] 同一个 proposal 重复应用具有幂等性。
-- [ ] 使用当前数据模型创建的测试计划在重启后视觉结构和状态保持一致。
+- [x] 重新规划不会丢失人工节点、进度、备注或证据。
+- [x] 不满足 prerequisite 的节点不会成为下一步。
+- [x] blocked、skipped、not-applicable 均要求相应原因并可追溯。
+- [x] 同一个 proposal 重复应用具有幂等性。
+- [x] 使用当前数据模型创建的测试计划在重启后视觉结构和状态保持一致。
+
+**执行证据（2026-07-28）：**
+
+- 本任务按总体顺序在 Task 4.2 和 Task 5.1 之后实施，以已完成的 Evidence/Repeater、规则与 Task 5.1 树约束为实际基线。遵循开发态兼容策略，直接扩充 v1 schema 身份；没有为旧开发态 `task_nodes` 增加迁移、映射、双读或 legacy 字段，结构不匹配的旧开发数据库需重建。
+- 基线新增 `test_plans`、`task_plan_proposals`、`task_plan_revisions`、`task_plan_events`、`task_prerequisites` 和项目删除 guard；`task_nodes` 增加 stable key、节点类型、priority、角色/会话、预期/实际观察、原因、来源、字段锁、归档和 revision 字段。数据库约束拒绝非法枚举、无原因的 blocked/skipped/not-applicable、跨项目 parent/prerequisite/Finding/Evidence、依赖环和绕过审计事件的状态直写；事件保持 append-only，项目生命周期删除仍可完整级联。
+- 新增 `tree::service` 作为唯一生产写入边界。完整生成、展开节点和“换个思路”都统一生成持久化 proposal 与四类 diff（新增、更新、保留、归档），不再直接修改当前计划；原 Task 5.1 直接插入实现仅保留在 `cfg(test)` 回归测试中。确认时校验 base revision 和保护边界，在单个 immediate transaction 中合并并创建 revision/events；重复应用已完成 proposal 不新增节点或 revision。
+- 合并使用 stable key 对齐节点。人工来源节点、非 `todo` 人工进度、已关联 Evidence 的节点整体保护；AI 节点只更新未锁字段，status、actual observation、blocker reason、source、锁和 Evidence 关系不属于 AI 输出。proposal 省略的安全 AI 节点只做软归档；受保护节点的结构祖先和 prerequisite 一并保留，避免悬空关系。
+- `create_finding_evidence` 与 `create_task_evidence` 在原 Evidence 事务内只设置 `needs_update`、原因和计划事件，不调用 AI、不推进状态、不改节点；同时使已生成但未确认的旧 proposal 变为 `superseded`，防止用户确认 Evidence 到达前看到的过时 diff。用户随后从 UI 明确触发增量 proposal，确认合并后才清除更新标记。
+- 节点状态扩为 todo/in_progress/done/blocked/skipped/not_applicable；后三种特殊状态必须提供原因，专用状态事务先写不可变事件再更新节点。人工创建默认锁定全部可编辑字段，人工编辑可以显式调整锁和 prerequisite。用户删除动作改为保留历史、状态、备注和 Evidence 关系的可审计归档。
+- “下一步”先过滤未满足的显式 prerequisite 和仍有未终结子节点的结构节点，再严格按 Finding 风险降序、priority 升序、Evidence 缺口优先、创建时间和 id 排序。done/skipped/not_applicable 被视为已终结依赖；缺失或已归档 prerequisite 始终不满足。
+- AI 摘要在原有脱敏流量/Finding 聚合后增加当前 revision、stable key、类型、状态、priority、来源、锁、Evidence 数和 prerequisite key，但不发送 actual observation 或 Evidence 内容；提示词版本升至 v2，并明确只产出 proposal 字段、复用稳定键且不得伪造已执行结果。
+- 测试计划页面和导航、路由标题、工作区历史、流量提示、README、Phase 说明、架构约束及现有报告中的当前产品术语统一为“测试计划”；描述迁移前状态或外部 PTT 灵感的历史计划保留原名。页面展示 revision、更新标记、节点类型/来源/priority、parent 与 prerequisite、Finding/Evidence、预期/实际观察、状态原因和字段锁；proposal diff 对话框明确展示新增、更新、保留、归档，只有人工确认才调用合并命令。
+- 回归测试覆盖重新规划保留人工节点/进度/Evidence、只更新未锁字段、proposal 重复应用幂等、特殊状态原因与事件、Evidence 只标记更新并使旧 proposal 失效、未满足 prerequisite 不会被推荐，以及数据库重开后 parent、prerequisite、状态、原因和 revision 保持一致。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets --no-fail-fast` 和 `pnpm check` 均通过；Rust 为 `189 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `27 passed`、TypeScript 检查与生产构建通过。
 
 ### Task 5.3：证据化报告 v2
 
@@ -755,10 +883,13 @@ flowchart TD
 
 **依赖：** Task 4.1、Task 5.2
 
+**状态：** 已完成（2026-07-28；P1 代码审查补强已完成）
+
 **文件：**
 
 - Modify: `src-tauri/src/report.rs`
 - Modify: `src-tauri/src/commands.rs`
+- Modify: `src/api/tauri.ts`
 - Modify: `src/views/FindingsView.vue`
 - Create: `src-tauri/tests/fixtures/report/`
 
@@ -775,27 +906,48 @@ flowchart TD
 
 **步骤：**
 
-- [ ] 报告默认只包含 confirmed Finding；pending 进入独立附录，rejected 默认不导出。
-- [ ] “验证步骤”与“已执行复现”分栏，禁止把计划性文字写成实际结果。
-- [ ] 默认使用 Evidence 的脱敏快照，原始敏感内容需单次明确确认。
-- [ ] 记录标准版本、规则版本、提示词版本和模型。
-- [ ] Markdown 保持首要格式；结构化 JSON 导出作为机器可读备份。
-- [ ] 对文件名、Markdown 内容和外部链接进行安全转义。
-- [ ] 增加快照测试，固定各状态、空证据、截断正文和多标准引用的输出。
+- [x] 报告默认只包含 confirmed Finding；pending 进入独立附录，rejected 默认不导出。
+- [x] “验证步骤”与“已执行复现”分栏，禁止把计划性文字写成实际结果。
+- [x] 默认使用 Evidence 的脱敏快照，原始敏感内容需单次明确确认。
+- [x] 记录标准版本、规则版本、提示词版本和模型。
+- [x] Markdown 保持首要格式；结构化 JSON 导出作为机器可读备份。
+- [x] 对文件名、Markdown 内容和外部链接进行安全转义。
+- [x] 增加快照测试，固定各状态、空证据、截断正文和多标准引用的输出。
 
 **验收：**
 
-- [ ] 报告中每条“已确认”结论都有至少一项 Evidence。
-- [ ] 默认导出中没有未遮盖的 Cookie、Authorization、API Key 测试值。
-- [ ] Scope、限制、时间线、方法、证据、修复与未完成测试均有明确章节。
-- [ ] 同一数据重复构建报告时，除生成时间外内容稳定。
+- [x] 报告中每条“已确认”结论都有至少一项 Evidence。
+- [x] 默认导出中没有未遮盖的 Cookie、Authorization、API Key 测试值。
+- [x] Scope、限制、时间线、方法、证据、修复与未完成测试均有明确章节。
+- [x] 同一数据重复构建报告时，除生成时间外内容稳定。
+
+**执行证据（2026-07-28）：**
+
+- `report` 先从当前数据库构建单一 Evidence Report Schema v2 文档，再由同一文档生成 Markdown 主报告和结构化 JSON 备份。主结论只统计 confirmed Finding，pending 仅进入明确标注“不作为已确认结论”的附录，rejected 只保留省略数量、不导出标题、目标、证据或来源详情；风险分布也只基于 confirmed。
+- 每条 confirmed Finding 在构建时必须至少存在一项“人工已接受、具备确认资格且快照哈希校验通过”的 Evidence，否则整个报告拒绝生成。建议验证步骤、假设依据、实际观察和 Evidence 快照分栏呈现，不再把 `verify_steps` 写成执行结果；Evidence 展示来源身份、可用性、观察、接受判断、资格、创建/接受审计和 SHA-256。
+- 报告包含授权 Scope、明确的 Scope 外排除语义，以及由截断/受限解码流量、pending Finding、未完成与 blocked 计划项生成的限制；同时包含稳定时间线、实际使用方法、RustForge/SQLite/report schema 版本、confirmed 风险分布、受影响目标、标准引用、修复建议、独立复测状态、当前测试计划 revision/覆盖率/未完成/阻塞/跳过项。Finding 创建、状态变化和 Evidence 接受/撤销的时间线只读取 append-only `finding_events`，不再用当前状态或可变 `updated_at` 反推历史。
+- 来源审计可逐条追溯 AI AnalysisRun 的 provider、model、prompt ID/version、input hash 和校验状态，也可追溯规则 pack/version、rule/version、字段路径、证据片段和命中指纹；标准来源按 framework/version、知识包标题、发布日期和受限 HTTP(S) 来源链接列出，所有 AI/规则来源固定标注“需人工复核”。
+- 默认预览和导出只读取 Evidence 的不可变脱敏快照，并再次校验内容哈希。用户选择敏感导出时，`export_report` 在后端弹出原生模态风险确认；renderer 只能请求敏感导出，不能生成、提交或复用确认令牌。只有该次后端命令收到原生确认后，私有 `ReportOptions::confirmed_sensitive` 才会附加有界的当前原始 traffic/Repeater 来源；该选择不会保存为设置，报告正文会写入显著敏感内容警告。
+- 每次导出同时生成 `.md` 与 `.json`，使用 `create_new` 和冲突后缀避免覆盖已有文件，并在任一写入失败时清理本次创建的文件。项目名只允许有界字母数字、连字符和下划线文件组件；Markdown 用户内容、行首结构、动态代码围栏和外部链接均做安全处理，目标 URL 默认遮盖查询值。
+- 新增 Markdown/JSON 固定快照及 8 个报告测试，覆盖 confirmed/pending/rejected、空 Evidence、截断正文、多标准引用、默认秘密不泄漏、缺少合格 Evidence 拒绝构建、规则包/规则版本追溯、后端原生敏感确认边界、安全文件名、Markdown 注入、不可变 Finding 时间线和除生成时间外的重复构建稳定性。夹具链路实际执行“traffic → AI hypothesis → Evidence → 人工接受 → confirmed → Markdown/JSON report”。
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets` 和 `pnpm check` 均通过；Rust 为 `201 passed` 单元测试、`4 passed` MITM 集成测试和 `8 passed` 规则包验收测试，前端为 `29 passed`、TypeScript 检查与生产构建通过。
+
+**P1 代码审查闭环（2026-07-28）：**
+
+- Evidence 的“可审计来源”和“可确认来源”已拆开：AnalysisRun 只能作为审计引用，永不具备确认资格；Traffic 必须持久化真实响应状态且响应捕获状态不是 `not_received`，无响应请求即使被人工接受也不能把 Finding 推进为 confirmed。
+- 当前基线 schema 增加 AnalysisRun/Finding 来源、`finding_traffic`、计划事件与项目关系的 insert/update 约束；任务状态审计只接受同项目、同节点、当前 revision 的最新事件。proposal 创建与应用还会复核 Finding 必须属于当前项目且未被 rejected，避免跨项目关联和把误报重新挂回计划。
+- AI 调用前捕获 plan revision 并纳入 input hash；模型返回后在 `BEGIN IMMEDIATE` 事务内重建完整上下文、核对 revision/hash，再创建 proposal。调用期间若发生人工编辑、新 Evidence 或流量变化，只保留 AnalysisRun 审计，不产生可应用 proposal；应用命令同时绑定显式项目并再次复核 Finding 状态。
+- Findings、测试计划、AI proposal、详情、报告和规则诊断的异步结果均携带项目/代际所有权，项目切换会使旧 Promise 失效并清理旧 UI 状态。Repeater 在第一次 `await` 前同步取得唯一发送令牌，快速按钮连点或 Enter 不会产生双网络副作用，切换项目也会作废旧令牌。
+- “下一步”现在沿 parent 链检查全部结构祖先；祖先 blocked/skipped/not-applicable、已归档、缺失或形成环时均 fail closed。报告的 Finding 状态时间点来自不可变事件及事件 ID 顺序，后续普通更新不会改写历史。
+- 回归测试新增无响应 Traffic/AnalysisRun 不得确认、跨项目关系与伪造计划事件、AI 上下文 TOCTOU、rejected Finding 应用复核、阻塞祖先、不可变报告时间线，以及前端延迟结果/独占操作令牌场景；上述完整检查结果已计入本任务最新测试数字。
 
 ### Gate D 验收
 
-- [ ] 测试计划支持增量提案并保留人工工作。
-- [ ] 下一步选择尊重依赖、阻塞和证据状态。
-- [ ] 报告能够从 Finding 追溯到真实 Evidence 和来源版本。
-- [ ] 整条“流量 → 假设 → 验证 → 结论 → 报告”链路有端到端测试。
+- [x] 测试计划支持增量提案并保留人工工作。
+- [x] 下一步选择尊重依赖、阻塞和证据状态。
+- [x] 报告能够从 Finding 追溯到真实 Evidence 和来源版本。
+- [x] 整条“流量 → 假设 → 验证 → 结论 → 报告”链路有端到端测试。
+- [x] P1 代码审查发现的证据资格、项目隔离、并发竞态与历史真实性问题均有代码修复和回归测试。
 
 ---
 
@@ -846,15 +998,17 @@ flowchart TD
 
 ## 7. 测试矩阵
 
-| 层级 | 必测内容 |
-|---|---|
-| 单元测试 | Scope 规范化、流式上限、解压上限、脱敏、规则 AST、指纹、计划状态机 |
-| 数据库测试 | 空库初始化、当前基线结构校验、重复打开、事务回滚、级联关系；不包含旧开发库升级 |
-| 集成测试 | MITM Scope、Repeater Scope、规则后台队列、AI mock、Evidence 关联、报告生成 |
-| 安全测试 | URL 混淆、提示注入语料、秘密泄露、压缩炸弹、恶意 regex、Markdown 注入 |
-| 性能测试 | 大正文内存、代理延迟、规则吞吐、1 万/10 万流量查询和报告生成 |
-| UI 测试 | AI 预览、截断提示、Repeater 历史/Diff、证据确认、计划 proposal diff |
-| 端到端测试 | 抓取授权流量 → 规则/AI 假设 → Repeater 验证 → confirmed → 脱敏报告 |
+
+| 层级    | 必测内容                                                      |
+| ----- | --------------------------------------------------------- |
+| 单元测试  | Scope 规范化、流式上限、解压上限、脱敏、规则 AST、指纹、计划状态机                    |
+| 数据库测试 | 空库初始化、当前基线结构校验、重复打开、事务回滚、级联关系；不包含旧开发库升级                   |
+| 集成测试  | MITM Scope、Repeater Scope、规则后台队列、AI mock、Evidence 关联、报告生成 |
+| 安全测试  | URL 混淆、提示注入语料、秘密泄露、压缩炸弹、恶意 regex、Markdown 注入              |
+| 性能测试  | 大正文内存、代理延迟、规则吞吐、1 万/10 万流量查询和报告生成                         |
+| UI 测试 | AI 预览、截断提示、Repeater 历史/Diff、证据确认、计划 proposal diff         |
+| 端到端测试 | 抓取授权流量 → 规则/AI 假设 → Repeater 验证 → confirmed → 脱敏报告        |
+
 
 任何涉及真实网络的测试只能访问测试进程启动的 localhost 服务，并且测试项目必须显式把 localhost 加入 Scope。
 
@@ -914,7 +1068,7 @@ flowchart TD
 - [ ] Finding 的确认状态有真实 Evidence 和完整状态历史。
 - [ ] Repeater 运行可持久化、比较并关联为证据。
 - [ ] 测试计划增量更新且保留人工节点、进度、备注与证据。
-- [ ] 默认报告脱敏，并区分“建议验证步骤”和“实际复现结果”。
+- [x] 默认报告脱敏，并区分“建议验证步骤”和“实际复现结果”。
 - [ ] 产品仍保持人在回路，不自动对目标实施攻击。
 
 ## 12. 推荐的首个实施批次

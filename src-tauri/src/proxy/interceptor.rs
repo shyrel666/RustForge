@@ -7,14 +7,13 @@
 //! 作用于同一个 clone，因此可以用 self.pending 暂存请求侧数据。
 
 use crate::authorization::{load_current_project_policy, AuthorizationError};
-use crate::knowledge;
 use crate::proxy::body_capture::{
     tee_body, tee_body_with_callback, BodyMetadata, CaptureHandle, CapturedBody,
 };
-use crate::rules::engine::{self, Severity, TrafficView};
+use crate::rules::worker::{RuleJob, RuleQueue, RuleSink, RuleWorker};
 use crate::secrets::redact_sensitive;
 use crate::storage::db::Pool;
-use crate::storage::models::{Finding, TrafficSummary};
+use crate::storage::models::{Finding, TrafficSummary, TrafficTagsUpdate};
 use hudsucker::hyper::{Request, Response};
 use hudsucker::{Body, HttpContext, HttpHandler, RequestOrResponse};
 use std::sync::Arc;
@@ -23,13 +22,20 @@ use tauri::{AppHandle, Emitter};
 
 /// 流量产出回调：Tauri 运行时推事件给前端，测试时收集断言。
 /// 抽这个 trait 是为了让拦截管线可以在无 GUI 环境下做端到端测试。
+///
+/// Finding 与规则标签由后台 worker 在流量落库之后异步产出，所以它们各有
+/// 独立回调，而不是塞进 `on_flow` 的载荷里。
 pub trait FlowSink: Send + Sync + 'static {
     fn on_flow(&self, summary: &TrafficSummary);
-    /// 规则/AI 产出新 Finding 时回调（默认忽略）
+    /// 规则产出新 Finding 时回调（默认忽略）
     fn on_finding(&self, _finding: &Finding) {}
+    /// 同一指纹再次命中，关联流量或命中审计发生更新
+    fn on_finding_updated(&self, _finding: &Finding) {}
+    /// 后台求值补写 rule_tags
+    fn on_traffic_tags(&self, _update: &TrafficTagsUpdate) {}
 }
 
-/// 生产环境实现：转发为 Tauri 事件 "traffic:new" / "finding:new"
+/// 生产环境实现：转发为 Tauri 事件
 pub struct TauriSink(pub AppHandle);
 
 impl FlowSink for TauriSink {
@@ -38,6 +44,27 @@ impl FlowSink for TauriSink {
     }
     fn on_finding(&self, finding: &Finding) {
         let _ = self.0.emit("finding:new", finding);
+    }
+    fn on_finding_updated(&self, finding: &Finding) {
+        let _ = self.0.emit("finding:updated", finding);
+    }
+    fn on_traffic_tags(&self, update: &TrafficTagsUpdate) {
+        let _ = self.0.emit("traffic:tags", update);
+    }
+}
+
+/// 把 `FlowSink` 接到规则 worker 上，两边共用同一个产出通道。
+struct FlowSinkAsRuleSink(Arc<dyn FlowSink>);
+
+impl RuleSink for FlowSinkAsRuleSink {
+    fn on_finding(&self, finding: &Finding) {
+        self.0.on_finding(finding);
+    }
+    fn on_finding_updated(&self, finding: &Finding) {
+        self.0.on_finding_updated(finding);
+    }
+    fn on_traffic_tags(&self, update: &TrafficTagsUpdate) {
+        self.0.on_traffic_tags(update);
     }
 }
 
@@ -61,14 +88,19 @@ struct PendingReq {
 pub struct TrafficHandler {
     db: Pool,
     sink: Arc<dyn FlowSink>,
+    rules: RuleQueue,
     pending: Option<PendingReq>,
 }
 
 impl TrafficHandler {
+    /// 构造时起一条规则求值线程；handler 每个请求会被 clone，但队列句柄只是
+    /// `Arc` + `SyncSender`，不会重复起线程。所有 clone 释放后线程自行退出。
     pub fn new(db: Pool, sink: Arc<dyn FlowSink>) -> Self {
+        let rules = RuleWorker::spawn(db.clone(), Arc::new(FlowSinkAsRuleSink(Arc::clone(&sink))));
         Self {
             db,
             sink,
+            rules,
             pending: None,
         }
     }
@@ -81,7 +113,11 @@ impl TrafficHandler {
         Ok(project_id)
     }
 
-    /// 合成完整记录写库并推送事件；随后跑被动规则：打标 + 中危以上建 Finding
+    /// 流量落库并推事件，然后把规则求值交给后台。
+    ///
+    /// 这里刻意只保留一个"只有一条 INSERT"的短事务：规则求值有 50ms 的包级
+    /// 预算，跑在这条写连接上会让整段转发回调被数据库写锁卡住。求值改为经有界
+    /// 队列投递，投递失败就降级丢弃，绝不等待。
     fn store_and_emit(
         &self,
         p: PendingReq,
@@ -98,12 +134,7 @@ impl TrafficHandler {
         let resp_body_stored = response_received.then_some(resp_capture.bytes);
 
         let Ok(db) = self.db.get() else { return };
-        // 流量 + 打标 + 建 Finding 放进一个事务，避免中途失败留下半截数据
-        let Ok(tx) = db.unchecked_transaction() else {
-            eprintln!("[proxy] 开启事务失败，流量丢弃");
-            return;
-        };
-        let res = tx.execute(
+        let res = db.execute(
             "INSERT INTO traffic(project_id, method, scheme, host, port, path, url,
                                  req_headers, req_body, status, resp_headers, resp_body,
                                  content_type, req_wire_size, resp_wire_size,
@@ -138,7 +169,7 @@ impl TrafficHandler {
             ],
         );
         let id = match res {
-            Ok(_) => tx.last_insert_rowid(),
+            Ok(_) => db.last_insert_rowid(),
             Err(e) => {
                 eprintln!(
                     "[proxy] 流量写库失败: {}",
@@ -147,116 +178,13 @@ impl TrafficHandler {
                 return;
             }
         };
-
-        // ---- 被动规则：AI 分析前的本地初筛 ----
-        let view = TrafficView {
-            method: &p.method,
-            url: &p.url,
-            req_headers: &p.req_headers,
-            resp_headers: resp_headers.as_deref(),
-            req_body: &req_body_stored,
-            resp_body: resp_body_stored.as_deref(),
-            status,
-            content_type: content_type.as_deref(),
-            req_truncated: req_capture.truncated,
-            resp_truncated: resp_capture.truncated,
-            req_decode_status: req_capture.decode_status.as_str(),
-            resp_decode_status: resp_capture.decode_status.as_str(),
-        };
-        let evaluation = engine::evaluate(&view);
-        for diagnostic in &evaluation.diagnostics {
-            eprintln!(
-                "[rules] {}: {}",
-                diagnostic.code,
-                redact_sensitive(&diagnostic.message, &[])
-            );
-        }
-        let hits = evaluation.hits;
-        let rule_tags: Vec<String> = hits.iter().map(|h| h.rule.tag.to_string()).collect();
-        if !rule_tags.is_empty() {
-            let _ = tx.execute(
-                "UPDATE traffic SET rule_tags = ?1 WHERE id = ?2",
-                rusqlite::params![serde_json::to_string(&rule_tags).unwrap_or_default(), id],
-            );
-        }
-        // 中危及以上 → 生成待验证 Finding
         let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let mut new_findings: Vec<Finding> = Vec::new();
-        for hit in &hits {
-            let rule = hit.rule;
-            if rule.severity < Severity::Medium {
-                continue;
-            }
-            let completeness = if hit.incomplete_evidence {
-                "；捕获正文已截断，仅能作为不完整证据"
-            } else {
-                ""
-            };
-            let reasoning = format!(
-                "{}（规则：{}@{}；命中位置：{}；脱敏证据：{}；指纹：{}{completeness}）",
-                rule.description,
-                rule.rule_id,
-                rule.version,
-                hit.field_path,
-                hit.evidence,
-                hit.fingerprint
-            );
-            let standard_references = match knowledge::validate_references(&rule.references) {
-                Ok(references) => references,
-                Err(error) => {
-                    eprintln!(
-                        "[proxy] 内置规则 `{}` 的标准引用无效，已跳过 Finding: {}",
-                        rule.rule_id,
-                        redact_sensitive(&error, &[])
-                    );
-                    continue;
-                }
-            };
-            let standard_references_json =
-                serde_json::to_string(&standard_references).unwrap_or_else(|_| "[]".to_string());
-            let exec = tx.execute(
-                "INSERT INTO findings(project_id, traffic_id, source, title, vuln_type,
-                                      standard_references, severity, confidence, reasoning, verify_steps)
-                 VALUES(?1,?2,'rule',?3,?4,?5,?6,?7,?8,?9)",
-                rusqlite::params![
-                    p.project_id,
-                    id,
-                    &rule.name,
-                    &rule.vuln_type,
-                    standard_references_json,
-                    rule.severity.as_str(),
-                    hit.confidence as i64,
-                    &reasoning,
-                    &rule.verify_hint,
-                ],
-            );
-            if exec.is_ok() {
-                new_findings.push(Finding {
-                    id: tx.last_insert_rowid(),
-                    project_id: p.project_id,
-                    traffic_id: Some(id),
-                    source: "rule".into(),
-                    title: rule.name.clone(),
-                    vuln_type: rule.vuln_type.clone(),
-                    standard_references,
-                    severity: rule.severity.as_str().into(),
-                    confidence: hit.confidence as i64,
-                    reasoning,
-                    verify_steps: rule.verify_hint.clone(),
-                    status: "pending".into(),
-                    created_at: created_at.clone(),
-                });
-            }
-        }
-        if let Err(e) = tx.commit() {
-            eprintln!(
-                "[proxy] 事务提交失败: {}",
-                redact_sensitive(&e.to_string(), &[])
-            );
-            return;
-        }
         drop(db);
 
+        let job = RuleJob {
+            project_id: p.project_id,
+            traffic_id: id,
+        };
         let summary = TrafficSummary {
             id,
             project_id: p.project_id,
@@ -277,13 +205,13 @@ impl TrafficHandler {
             req_decode_status: req_capture.decode_status.to_string(),
             resp_decode_status: resp_capture.decode_status.to_string(),
             duration_ms,
-            rule_tags,
+            // 规则标签由后台补写，随后走 "traffic:tags" 增量推送
+            rule_tags: Vec::new(),
             created_at,
         };
-        // 通知前端列表实时追加
         self.sink.on_flow(&summary);
-        for f in &new_findings {
-            self.sink.on_finding(f);
+        if !self.rules.try_submit(job) {
+            eprintln!("[rules] 求值队列已满，流量 #{id} 跳过被动规则初筛");
         }
     }
 }

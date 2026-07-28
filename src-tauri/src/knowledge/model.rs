@@ -70,6 +70,13 @@ pub struct PackLicense {
     pub url: String,
 }
 
+/// A single knowledge card.
+///
+/// Every field must serialize in a deterministic order because
+/// [`KnowledgePack::computed_content_sha256`] hashes the serde encoding of
+/// `entries` directly. Only ordered types are allowed here: adding an unordered
+/// container (`serde_json::Map`, `HashMap`, `HashSet`, ...) would make the
+/// content hash unstable across runs and silently break pack verification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeEntry {
@@ -104,6 +111,12 @@ impl KnowledgePack {
         StandardReference::new(&self.framework, &self.version, &entry.id)
     }
 
+    /// Content hash of `entries`.
+    ///
+    /// This is serde's field-ordered encoding, not RFC 8785 canonical JSON. It
+    /// is stable only because every type reachable from [`KnowledgeEntry`] is a
+    /// struct or a `Vec`; see the constraint documented on that type before
+    /// changing the entry shape.
     pub fn computed_content_sha256(&self) -> Result<String, serde_json::Error> {
         let bytes = serde_json::to_vec(&self.entries)?;
         let mut hasher = Sha256::new();
