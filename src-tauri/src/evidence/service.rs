@@ -707,7 +707,7 @@ fn analysis_run_snapshot(conn: &Connection, project_id: i64, run_id: i64) -> Res
             "SELECT traffic_id, provider_id, model, prompt_id, prompt_version,
                     input_hash, policy_json, manifest_json, validation_status,
                     validation_json, raw_output_hash, schema_applied,
-                    prompt_tokens, completion_tokens, total_tokens, created_at
+                    prompt_tokens, cached_tokens, completion_tokens, total_tokens, created_at
              FROM analysis_runs WHERE id = ?1 AND project_id = ?2",
             rusqlite::params![run_id, project_id],
             |row| {
@@ -727,7 +727,8 @@ fn analysis_run_snapshot(conn: &Connection, project_id: i64, run_id: i64) -> Res
                     row.get::<_, i64>(12)?,
                     row.get::<_, i64>(13)?,
                     row.get::<_, i64>(14)?,
-                    row.get::<_, String>(15)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, String>(16)?,
                 ))
             },
         )
@@ -753,10 +754,11 @@ fn analysis_run_snapshot(conn: &Connection, project_id: i64, run_id: i64) -> Res
         "schema_applied": row.11,
         "usage": {
             "prompt_tokens": row.12,
-            "completion_tokens": row.13,
-            "total_tokens": row.14
+            "cached_tokens": row.13,
+            "completion_tokens": row.14,
+            "total_tokens": row.15
         },
-        "source_created_at": row.15
+        "source_created_at": row.16
     }))
 }
 
@@ -1335,11 +1337,11 @@ mod tests {
             "INSERT INTO analysis_runs(
                  project_id, traffic_id, provider_id, provider_base_url, model, prompt_id,
                  prompt_version, input_hash, policy_json, manifest_json,
-                 validation_status, validation_json, raw_output_hash
-             ) VALUES(
+                 prompt_tokens, cached_tokens, validation_status, validation_json, raw_output_hash
+              ) VALUES(
                  ?1,?2,'provider','https://provider.test/v1','model','analyze',1,
-                 ?3,'{}','{}','valid','{}',?4
-             )",
+                 ?3,'{}','{}',10,7,'valid','{}',?4
+              )",
             rusqlite::params![project_id, traffic_id, "a".repeat(64), "b".repeat(64)],
         )
         .unwrap();
@@ -1356,6 +1358,7 @@ mod tests {
 
         let snapshot = serde_json::to_string(&item.redacted_snapshot).unwrap();
         assert!(snapshot.contains("\"analysis_run\""));
+        assert!(snapshot.contains("\"cached_tokens\":7"));
         assert!(snapshot.contains(&"b".repeat(64)));
         assert!(!snapshot.contains("raw model output"));
         assert!(item.source_available);

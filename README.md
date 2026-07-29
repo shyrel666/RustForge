@@ -80,7 +80,7 @@ AnalysisRun 可以证明“模型调用与校验发生过”，但不能证明�
 │ tree           测试计划 proposal / revision / 状态机         │
 │ knowledge      版本化离线标准包                              │
 │ report         Evidence Report Schema v2                     │
-│ storage        SQLite v1 + 事务/外键/触发器约束               │
+│ storage        SQLite v2 + 事务/外键/触发器约束               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -159,7 +159,7 @@ RustForge/
 │  ├─ src/tree/                 版本化测试计划
 │  ├─ src/knowledge/            版本化离线标准包
 │  ├─ src/report.rs             Evidence Report Schema v2
-│  └─ src/storage/              SQLite v1 schema、迁移框架与模型
+│  └─ src/storage/              SQLite v2 schema、迁移框架与模型
 └─ docs/                        授权、阶段说明、架构与实施记录
 ```
 

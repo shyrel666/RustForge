@@ -584,7 +584,18 @@ async function refreshPromptVersions() {
 }
 
 // ---------- 用量统计 ----------
-const usage = ref<TokenUsage>({ calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+const usage = ref<TokenUsage>({
+  calls: 0,
+  prompt_tokens: 0,
+  cached_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+});
+const cacheHitRate = computed(() =>
+  usage.value.prompt_tokens > 0
+    ? ((usage.value.cached_tokens / usage.value.prompt_tokens) * 100).toFixed(1)
+    : "0.0"
+);
 
 async function refreshUsage() {
   try {
@@ -614,7 +625,7 @@ watch(trendGranularity, refreshTrend);
 
 const chartOption = computed(() => ({
   tooltip: { trigger: 'axis' as const },
-  legend: { data: ['总 Token', '输入 Token', '输出 Token'], bottom: 0 },
+  legend: { data: ['总 Token', '输入 Token', '输出 Token', '缓存命中 Token'], bottom: 0 },
   grid: { left: 60, right: 20, top: 20, bottom: 40 },
   xAxis: {
     type: 'category' as const,
@@ -653,6 +664,15 @@ const chartOption = computed(() => ({
       smooth: true,
       showSymbol: false,
       lineStyle: { width: 1.5, type: 'dotted' as const },
+    },
+    {
+      name: '缓存命中 Token',
+      type: 'line',
+      data: trendData.value.map((d) => d.cached_tokens),
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { width: 1.5 },
+      itemStyle: { color: '#a78bfa' },
     },
   ],
 }));
@@ -963,6 +983,11 @@ async function save() {
             <div class="stat-label">输入 Token</div>
             <div class="stat-value">{{ usage.prompt_tokens.toLocaleString() }}</div>
           </div>
+          <div class="stat-card stat-card--cache">
+            <div class="stat-label">缓存命中 Token</div>
+            <div class="stat-value">{{ usage.cached_tokens.toLocaleString() }}</div>
+            <div class="stat-hint">占输入 {{ cacheHitRate }}%</div>
+          </div>
           <div class="stat-card">
             <div class="stat-label">输出 Token</div>
             <div class="stat-value">{{ usage.completion_tokens.toLocaleString() }}</div>
@@ -972,6 +997,9 @@ async function save() {
             <div class="stat-value">{{ usage.total_tokens.toLocaleString() }}</div>
           </div>
         </div>
+        <p class="usage-note">
+          缓存命中来自供应商返回的 usage 明细，仅统计升级后的调用；供应商未提供明细时按 0 记录。
+        </p>
 
         <!-- 使用趋势 -->
         <div class="trend-section">
@@ -1786,9 +1814,9 @@ async function save() {
 
 .stats-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 10px;
 }
 
 .stat-card {
@@ -1809,6 +1837,23 @@ async function save() {
   font-size: 22px;
   font-weight: 600;
   color: var(--rf-text);
+}
+
+.stat-card--cache {
+  border-color: color-mix(in srgb, #a78bfa 42%, var(--rf-border));
+}
+
+.stat-hint {
+  margin-top: 5px;
+  color: var(--rf-text-muted);
+  font-size: 11px;
+}
+
+.usage-note {
+  margin: 0 0 20px;
+  color: var(--rf-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .trend-section {

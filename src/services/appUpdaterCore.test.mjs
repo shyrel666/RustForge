@@ -54,6 +54,26 @@ test("available updates report progress and hand off to the installer", async ()
   assert.equal(updater.status.value, "installing");
 });
 
+test("each detected version queues one automatic prompt per app session", async () => {
+  let version = "0.2.0";
+  const updater = createAppUpdater({
+    check: async () => fakeUpdate({ version }),
+  });
+
+  await updater.checkForUpdates({ automatic: true, silent: true });
+  assert.equal(updater.pendingUpdatePromptVersion.value, "0.2.0");
+
+  updater.acknowledgeUpdatePrompt("0.2.0");
+  assert.equal(updater.pendingUpdatePromptVersion.value, "");
+
+  await updater.checkForUpdates();
+  assert.equal(updater.pendingUpdatePromptVersion.value, "");
+
+  version = "0.3.0";
+  await updater.checkForUpdates();
+  assert.equal(updater.pendingUpdatePromptVersion.value, "0.3.0");
+});
+
 test("failed downloads preserve the update and can be retried", async () => {
   let attempts = 0;
   const update = fakeUpdate({

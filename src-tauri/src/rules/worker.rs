@@ -723,15 +723,13 @@ mod tests {
         }
     }
 
-    fn test_pool(label: &str) -> Pool {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "rustforge-rule-worker-{}-{label}-{id}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        open_pool(&dir.join("worker.db")).unwrap()
+    fn test_pool(label: &str) -> (tempfile::TempDir, Pool) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("rustforge-rule-worker-{label}-"))
+            .tempdir()
+            .unwrap();
+        let pool = open_pool(&dir.path().join("worker.db")).unwrap();
+        (dir, pool)
     }
 
     fn insert_project(pool: &Pool) -> i64 {
@@ -871,7 +869,7 @@ mod tests {
 
     #[test]
     fn repeated_hits_aggregate_traffic_survive_patch_versions_and_preserve_rejection() {
-        let pool = test_pool("dedupe");
+        let (_dir, pool) = test_pool("dedupe");
         let project_id = insert_project(&pool);
         let traffic_ids: Vec<i64> = (0..64)
             .map(|index| insert_traffic(&pool, project_id, None, &index.to_string()))
@@ -974,7 +972,7 @@ mod tests {
 
     #[test]
     fn a_failed_store_does_not_claim_the_idempotency_key_and_can_be_retried() {
-        let pool = test_pool("retry");
+        let (_dir, pool) = test_pool("retry");
         let project_id = insert_project(&pool);
         let sink = Arc::new(VecRuleSink::default());
         let worker = test_worker(pool.clone(), sink);

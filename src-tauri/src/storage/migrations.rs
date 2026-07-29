@@ -1,15 +1,16 @@
 //! SQLite schema versioning.
 //!
-//! The project has not shipped yet, so the current unversioned development
-//! schema becomes v1 in place. Future changes must be added as ordered,
-//! transactional steps instead of extending the bootstrap schema silently.
+//! The unversioned development schema is normalized as v1 first. Released
+//! changes are then applied as ordered, transactional steps instead of
+//! extending the bootstrap schema silently.
 
 use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 pub(crate) const SCHEMA_V1: &str = include_str!("migrations/v1.sql");
+pub(crate) const SCHEMA_V2: &str = include_str!("migrations/v2.sql");
 
 const V1_TABLES: &[(&str, &[&str])] = &[
     ("settings", &["key", "value"]),
@@ -484,10 +485,8 @@ pub enum MigrationError {
 
 /// Bring a connection to the latest schema.
 ///
-/// `user_version = 0` is the current pre-release development schema. It is
-/// normalized with the idempotent v1 DDL, validated, and stamped as v1 in one
-/// transaction. There is intentionally no compatibility path for released
-/// legacy schemas because no such release exists.
+/// `user_version = 0` is normalized with the idempotent v1 DDL first, then
+/// follows the same ordered migration path as every versioned database.
 pub fn migrate(conn: &mut Connection) -> Result<MigrationReport, MigrationError> {
     let from_version = schema_version(conn)?;
     if from_version > LATEST_SCHEMA_VERSION {
@@ -501,6 +500,7 @@ pub fn migrate(conn: &mut Connection) -> Result<MigrationReport, MigrationError>
     while current < LATEST_SCHEMA_VERSION {
         match current {
             0 => apply_step(conn, 1, SCHEMA_V1)?,
+            1 => apply_step(conn, 2, SCHEMA_V2)?,
             from => return Err(MigrationError::MissingStep { from }),
         }
         current = schema_version(conn)?;
@@ -529,6 +529,7 @@ fn apply_step(conn: &mut Connection, target_version: u32, sql: &str) -> Result<(
 fn validate_version(conn: &Connection, version: u32) -> Result<(), MigrationError> {
     match version {
         1 => validate_v1(conn),
+        2 => validate_v2(conn),
         from => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -589,6 +590,18 @@ fn validate_v1(conn: &Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
+fn validate_v2(conn: &Connection) -> Result<(), MigrationError> {
+    validate_v1(conn)?;
+    let columns = table_columns(conn, "analysis_runs")?;
+    if !columns.contains("cached_tokens") {
+        return Err(MigrationError::InvalidSchema {
+            version: 2,
+            reason: "表 `analysis_runs` 缺少字段 `cached_tokens`".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>, rusqlite::Error> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -615,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_initializes_at_v1() {
+    fn fresh_database_initializes_at_latest_version() {
         let mut conn = Connection::open_in_memory().unwrap();
         let report = migrate(&mut conn).unwrap();
 
@@ -623,11 +636,11 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 0,
-                to_version: 1,
+                to_version: 2,
             }
         );
-        assert_eq!(schema_version(&conn).unwrap(), 1);
-        validate_v1(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+        validate_v2(&conn).unwrap();
     }
 
     #[test]
@@ -647,7 +660,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 0);
-        assert_eq!(report.to_version, 1);
+        assert_eq!(report.to_version, 2);
         let project_name: String = conn
             .query_row(
                 "SELECT name FROM projects WHERE id = ?1",
@@ -663,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn reopening_v1_is_idempotent() {
+    fn reopening_latest_schema_is_idempotent() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
         conn.execute(
@@ -677,8 +690,8 @@ mod tests {
         assert_eq!(
             report,
             MigrationReport {
-                from_version: 1,
-                to_version: 1,
+                from_version: 2,
+                to_version: 2,
             }
         );
         let marker: String = conn
@@ -692,19 +705,67 @@ mod tests {
     }
 
     #[test]
+    fn v1_migrates_cached_tokens_without_losing_existing_usage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute("INSERT INTO projects(name) VALUES('existing')", [])
+            .unwrap();
+        let project_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO analysis_runs(
+                project_id, provider_id, provider_base_url, model, prompt_id,
+                prompt_version, input_hash, policy_json, manifest_json,
+                prompt_tokens, completion_tokens, total_tokens,
+                validation_status, validation_json, raw_output_hash
+             ) VALUES(?1,'p','https://provider.test/v1','m','prompt',1,?2,'{}','{}',
+                      12,3,15,'valid','{}',?2)",
+            rusqlite::params![project_id, "a".repeat(64)],
+        )
+        .unwrap();
+
+        let report = migrate(&mut conn).unwrap();
+
+        assert_eq!(
+            report,
+            MigrationReport {
+                from_version: 1,
+                to_version: 2,
+            }
+        );
+        let usage: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT prompt_tokens, cached_tokens, total_tokens FROM analysis_runs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(usage, (12, 0, 15));
+        assert!(
+            conn.execute(
+                "UPDATE analysis_runs SET cached_tokens = prompt_tokens + 1",
+                []
+            )
+            .is_err(),
+            "缓存命中必须保持为输入 Token 的子集"
+        );
+        validate_v2(&conn).unwrap();
+    }
+
+    #[test]
     fn failing_step_rolls_back_schema_and_version() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
 
         let result = apply_step(
             &mut conn,
-            2,
+            3,
             "CREATE TABLE should_rollback(id INTEGER);
              INSERT INTO table_that_does_not_exist(id) VALUES(1);",
         );
 
         assert!(result.is_err());
-        assert_eq!(schema_version(&conn).unwrap(), 1);
+        assert_eq!(schema_version(&conn).unwrap(), 2);
         assert!(!table_exists(&conn, "should_rollback"));
     }
 
@@ -756,7 +817,7 @@ mod tests {
             result,
             Err(MigrationError::NewerSchema {
                 found: 99,
-                latest: 1
+                latest: 2
             })
         ));
         assert_eq!(schema_version(&conn).unwrap(), 99);

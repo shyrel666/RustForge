@@ -344,6 +344,7 @@ export interface AnalysisRun {
   policy: AiDataPolicy;
   manifest: RedactionManifest;
   prompt_tokens: number;
+  cached_tokens: number;
   completion_tokens: number;
   total_tokens: number;
   schema_applied: boolean;
@@ -1126,6 +1127,7 @@ export const exportReport = (
 export interface TokenUsage {
   calls: number;
   prompt_tokens: number;
+  cached_tokens: number;
   completion_tokens: number;
   total_tokens: number;
 }
@@ -1139,6 +1141,7 @@ export interface UsageTrendPoint {
   period: string;
   calls: number;
   prompt_tokens: number;
+  cached_tokens: number;
   completion_tokens: number;
   total_tokens: number;
 }

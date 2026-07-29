@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { Top } from "@element-plus/icons-vue";
 import { useAppUpdater } from "../services/appUpdater";
@@ -10,6 +10,16 @@ const dialogVisible = ref(false);
 
 const buttonBusy = computed(
   () => dialogVisible.value || updater.busy.value,
+);
+
+watch(
+  () => updater.pendingUpdatePromptVersion.value,
+  (version) => {
+    if (!version) return;
+    dialogVisible.value = true;
+    updater.acknowledgeUpdatePrompt(version);
+  },
+  { immediate: true },
 );
 
 const buttonTitle = computed(() => {

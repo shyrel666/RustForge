@@ -10,6 +10,8 @@ use zeroize::Zeroizing;
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Usage {
     pub prompt_tokens: i64,
+    /// 命中供应商提示词缓存的输入 Token；它是 prompt_tokens 的子集。
+    pub cached_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
 }
@@ -17,8 +19,52 @@ pub struct Usage {
 impl Usage {
     pub fn add(&mut self, other: &Usage) {
         self.prompt_tokens += other.prompt_tokens;
+        self.cached_tokens += other.cached_tokens;
         self.completion_tokens += other.completion_tokens;
         self.total_tokens += other.total_tokens;
+    }
+}
+
+fn non_negative_token(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .max(0)
+}
+
+/// OpenAI Chat Completions 把缓存命中放在
+/// `prompt_tokens_details.cached_tokens`，DeepSeek 则返回
+/// `prompt_cache_hit_tokens`。部分兼容网关沿用 Responses API 的
+/// `input_tokens_details.cached_tokens`，这里统一折叠为 cached_tokens。
+fn parse_usage(json: &serde_json::Value) -> Usage {
+    let usage = &json["usage"];
+    let prompt_tokens = non_negative_token(
+        usage
+            .get("prompt_tokens")
+            .or_else(|| usage.get("input_tokens")),
+    );
+    let completion_tokens = non_negative_token(
+        usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens")),
+    );
+    let total_tokens = non_negative_token(usage.get("total_tokens"));
+    let cached_tokens = [
+        usage.pointer("/prompt_tokens_details/cached_tokens"),
+        usage.get("prompt_cache_hit_tokens"),
+        usage.pointer("/input_tokens_details/cached_tokens"),
+    ]
+    .into_iter()
+    .map(non_negative_token)
+    .max()
+    .unwrap_or(0)
+    .min(prompt_tokens);
+
+    Usage {
+        prompt_tokens,
+        cached_tokens,
+        completion_tokens,
+        total_tokens,
     }
 }
 
@@ -146,14 +192,7 @@ impl OpenAiClient {
                     &[self.api_key.expose()],
                 ))
             })?;
-        let usage = Usage {
-            prompt_tokens: json["usage"]["prompt_tokens"].as_i64().unwrap_or(0).max(0),
-            completion_tokens: json["usage"]["completion_tokens"]
-                .as_i64()
-                .unwrap_or(0)
-                .max(0),
-            total_tokens: json["usage"]["total_tokens"].as_i64().unwrap_or(0).max(0),
-        };
+        let usage = parse_usage(&json);
         Ok(ChatResponse { content, usage })
     }
 }
@@ -207,5 +246,67 @@ mod tests {
             schema
         );
         assert!(!structured.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn usage_normalizes_openai_and_deepseek_cache_fields() {
+        let openai = parse_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1_000,
+                "completion_tokens": 200,
+                "total_tokens": 1_200,
+                "prompt_tokens_details": {"cached_tokens": 640}
+            }
+        }));
+        assert_eq!(openai.prompt_tokens, 1_000);
+        assert_eq!(openai.cached_tokens, 640);
+
+        let deepseek = parse_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 800,
+                "completion_tokens": 100,
+                "total_tokens": 900,
+                "prompt_cache_hit_tokens": 512,
+                "prompt_cache_miss_tokens": 288
+            }
+        }));
+        assert_eq!(deepseek.cached_tokens, 512);
+
+        let responses_compatible = parse_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 700,
+                "output_tokens": 80,
+                "total_tokens": 780,
+                "input_tokens_details": {"cached_tokens": 300}
+            }
+        }));
+        assert_eq!(responses_compatible.prompt_tokens, 700);
+        assert_eq!(responses_compatible.completion_tokens, 80);
+        assert_eq!(responses_compatible.cached_tokens, 300);
+    }
+
+    #[test]
+    fn usage_cache_tokens_are_non_negative_bounded_and_additive() {
+        let malformed = parse_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": -4,
+                "total_tokens": 100,
+                "prompt_tokens_details": {"cached_tokens": 999}
+            }
+        }));
+        assert_eq!(malformed.cached_tokens, 100);
+        assert_eq!(malformed.completion_tokens, 0);
+
+        let mut total = malformed;
+        total.add(&Usage {
+            prompt_tokens: 50,
+            cached_tokens: 20,
+            completion_tokens: 10,
+            total_tokens: 60,
+        });
+        assert_eq!(total.prompt_tokens, 150);
+        assert_eq!(total.cached_tokens, 120);
+        assert_eq!(total.total_tokens, 160);
     }
 }

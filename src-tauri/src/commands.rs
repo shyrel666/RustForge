@@ -154,6 +154,7 @@ fn record_usage(conn: &rusqlite::Connection, usage: &crate::ai::client::Usage) {
     };
     bump("usage_calls", 1);
     bump("usage_prompt_tokens", usage.prompt_tokens);
+    bump("usage_cached_tokens", usage.cached_tokens);
     bump("usage_completion_tokens", usage.completion_tokens);
     bump("usage_total_tokens", usage.total_tokens);
 }
@@ -1418,6 +1419,7 @@ pub struct AnalysisRunView {
     pub policy: AiDataPolicy,
     pub manifest: crate::ai::redaction::RedactionManifest,
     pub prompt_tokens: i64,
+    pub cached_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub schema_applied: bool,
@@ -1683,9 +1685,9 @@ pub async fn analyze_traffic(
             "INSERT INTO analysis_runs(
                 project_id, traffic_id, provider_id, provider_base_url, model, prompt_id,
                 prompt_version, input_hash, policy_json, manifest_json, prompt_tokens,
-                completion_tokens, total_tokens, schema_applied, validation_status,
-                validation_json, raw_output_hash
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                cached_tokens, completion_tokens, total_tokens, schema_applied,
+                validation_status, validation_json, raw_output_hash
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             rusqlite::params![
                 project_id,
                 traffic_id,
@@ -1698,6 +1700,7 @@ pub async fn analyze_traffic(
                 policy_json,
                 manifest_json,
                 attempt.usage.prompt_tokens.max(0),
+                attempt.usage.cached_tokens.max(0),
                 attempt.usage.completion_tokens.max(0),
                 attempt.usage.total_tokens.max(0),
                 i64::from(attempt.schema_applied),
@@ -1821,8 +1824,8 @@ pub fn get_analysis_run(state: State<AppState>, run_id: i64) -> CmdResult<Analys
         .query_row(
             "SELECT id, project_id, traffic_id, provider_id, provider_base_url, model,
                     prompt_id, prompt_version, input_hash, policy_json, manifest_json,
-                    prompt_tokens, completion_tokens, total_tokens, schema_applied,
-                    validation_json, raw_output_hash, created_at
+                    prompt_tokens, cached_tokens, completion_tokens, total_tokens,
+                    schema_applied, validation_json, raw_output_hash, created_at
              FROM analysis_runs WHERE id = ?1",
             [run_id],
             |row| {
@@ -1841,10 +1844,11 @@ pub fn get_analysis_run(state: State<AppState>, run_id: i64) -> CmdResult<Analys
                     row.get::<_, i64>(11)?,
                     row.get::<_, i64>(12)?,
                     row.get::<_, i64>(13)?,
-                    row.get::<_, bool>(14)?,
-                    row.get::<_, String>(15)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, bool>(15)?,
                     row.get::<_, String>(16)?,
                     row.get::<_, String>(17)?,
+                    row.get::<_, String>(18)?,
                 ))
             },
         )
@@ -1864,13 +1868,14 @@ pub fn get_analysis_run(state: State<AppState>, run_id: i64) -> CmdResult<Analys
         manifest: serde_json::from_str(&row.10)
             .map_err(|error| format!("分析运行 manifest 损坏: {error}"))?,
         prompt_tokens: row.11,
-        completion_tokens: row.12,
-        total_tokens: row.13,
-        schema_applied: row.14,
-        validation: serde_json::from_str(&row.15)
+        cached_tokens: row.12,
+        completion_tokens: row.13,
+        total_tokens: row.14,
+        schema_applied: row.15,
+        validation: serde_json::from_str(&row.16)
             .map_err(|error| format!("分析运行校验记录损坏: {error}"))?,
-        raw_output_hash: row.16,
-        created_at: row.17,
+        raw_output_hash: row.17,
+        created_at: row.18,
     })
 }
 
@@ -2501,9 +2506,9 @@ fn persist_task_ai_run(
         "INSERT INTO analysis_runs(
             project_id, traffic_id, provider_id, provider_base_url, model, prompt_id,
             prompt_version, input_hash, policy_json, manifest_json, prompt_tokens,
-            completion_tokens, total_tokens, schema_applied, validation_status,
-            validation_json, raw_output_hash
-         ) VALUES(?1,NULL,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?14,?15)",
+            cached_tokens, completion_tokens, total_tokens, schema_applied,
+            validation_status, validation_json, raw_output_hash
+         ) VALUES(?1,NULL,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,?14,?15,?16)",
         rusqlite::params![
             prepared.project_id,
             preview.provider_id,
@@ -2515,6 +2520,7 @@ fn persist_task_ai_run(
             policy_json,
             manifest_json,
             audit.usage.prompt_tokens.max(0),
+            audit.usage.cached_tokens.max(0),
             audit.usage.completion_tokens.max(0),
             audit.usage.total_tokens.max(0),
             audit.validation.status,
@@ -2795,6 +2801,7 @@ mod task_ai_firewall_tests {
         let audit = JsonAudit {
             usage: crate::ai::client::Usage {
                 prompt_tokens: 2,
+                cached_tokens: 1,
                 completion_tokens: 3,
                 total_tokens: 5,
             },
@@ -2802,17 +2809,27 @@ mod task_ai_firewall_tests {
             raw_output_hash: "a".repeat(64),
         };
         let run_id = persist_task_ai_run(&conn, &prepared, &audit).unwrap();
-        let stored: (Option<i64>, String, String) = conn
+        let stored: (Option<i64>, String, String, i64) = conn
             .query_row(
-                "SELECT traffic_id, prompt_id, input_hash
+                "SELECT traffic_id, prompt_id, input_hash, cached_tokens
                  FROM analysis_runs WHERE id = ?1",
                 [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(stored.0, None);
         assert_eq!(stored.1, planner::PLAN_PROMPT_ID);
         assert_eq!(stored.2, prepared.preview.input_hash);
+        assert_eq!(stored.3, 1);
+        let cumulative_cached: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings
+                 WHERE key = 'usage_cached_tokens'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cumulative_cached, 1);
 
         conn.execute(
             "UPDATE traffic SET path = '/changed?password=new-secret' WHERE project_id = ?1",
@@ -3227,6 +3244,7 @@ pub fn count_traffic(
 pub struct TokenUsage {
     pub calls: i64,
     pub prompt_tokens: i64,
+    pub cached_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
 }
@@ -3246,6 +3264,7 @@ pub fn get_token_usage(state: State<AppState>) -> CmdResult<TokenUsage> {
     Ok(TokenUsage {
         calls: read("usage_calls"),
         prompt_tokens: read("usage_prompt_tokens"),
+        cached_tokens: read("usage_cached_tokens"),
         completion_tokens: read("usage_completion_tokens"),
         total_tokens: read("usage_total_tokens"),
     })
@@ -3256,7 +3275,8 @@ pub fn reset_token_usage(state: State<AppState>) -> CmdResult<()> {
     let db = state.db.get().map_err(|e| e.to_string())?;
     db.execute(
         "DELETE FROM settings WHERE key IN
-             ('usage_calls','usage_prompt_tokens','usage_completion_tokens','usage_total_tokens')",
+             ('usage_calls','usage_prompt_tokens','usage_cached_tokens',
+              'usage_completion_tokens','usage_total_tokens')",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -3269,6 +3289,7 @@ pub struct UsageTrendPoint {
     pub period: String,
     pub calls: i64,
     pub prompt_tokens: i64,
+    pub cached_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
 }
@@ -3289,6 +3310,7 @@ pub fn get_usage_trend(
         "SELECT strftime('{}', created_at) AS period, \
                 COUNT(*) AS calls, \
                 COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, \
+                COALESCE(SUM(cached_tokens), 0) AS cached_tokens, \
                 COALESCE(SUM(completion_tokens), 0) AS completion_tokens, \
                 COALESCE(SUM(total_tokens), 0) AS total_tokens \
          FROM analysis_runs \
@@ -3303,8 +3325,9 @@ pub fn get_usage_trend(
                 period: row.get(0)?,
                 calls: row.get(1)?,
                 prompt_tokens: row.get(2)?,
-                completion_tokens: row.get(3)?,
-                total_tokens: row.get(4)?,
+                cached_tokens: row.get(3)?,
+                completion_tokens: row.get(4)?,
+                total_tokens: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?;

@@ -585,11 +585,12 @@ mod tests {
     use super::*;
     use crate::storage::db::Db;
 
-    fn test_db(name: &str) -> (Db, i64) {
-        let dir =
-            std::env::temp_dir().join(format!("rustforge-digest-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = Db::open(&dir.join("t.db")).unwrap();
+    fn test_db(name: &str) -> (tempfile::TempDir, Db, i64) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("rustforge-digest-{name}-"))
+            .tempdir()
+            .unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
         db.conn
             .execute(
                 "INSERT INTO projects(name, target_host, scope) VALUES('t','t.cn','[]')",
@@ -597,12 +598,12 @@ mod tests {
             )
             .unwrap();
         let project_id = db.conn.last_insert_rowid();
-        (db, project_id)
+        (dir, db, project_id)
     }
 
     #[test]
     fn digest_summarizes_and_never_emits_query_values() {
-        let (db, project_id) = test_db("summary");
+        let (_dir, db, project_id) = test_db("summary");
         for (path, headers, tags) in [
             (
                 "/login?token=secret&next=%2Fhome",
@@ -647,7 +648,7 @@ mod tests {
 
     #[test]
     fn rejected_findings_are_excluded_from_planning() {
-        let (db, project_id) = test_db("rejected");
+        let (_dir, db, project_id) = test_db("rejected");
         db.conn
             .execute(
                 "INSERT INTO traffic(project_id, method, host, path, url)
@@ -693,7 +694,7 @@ mod tests {
 
     #[test]
     fn static_and_high_frequency_noise_are_ranked_below_novel_routes() {
-        let (db, project_id) = test_db("weight");
+        let (_dir, db, project_id) = test_db("weight");
         for _ in 0..60 {
             db.conn
                 .execute(
@@ -732,7 +733,7 @@ mod tests {
 
     #[test]
     fn digest_empty_project_errors() {
-        let (db, project_id) = test_db("empty");
+        let (_dir, db, project_id) = test_db("empty");
         assert!(build_digest(&db.conn, project_id).is_err());
     }
 }

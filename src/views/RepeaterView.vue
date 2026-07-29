@@ -434,8 +434,8 @@ onBeforeUnmount(() => {
           :name="String(session.id)"
         >
           <template #label>
-            <span class="tab-label">
-              {{ session.title }}
+            <span class="tab-label" :title="session.title">
+              <span class="tab-title">{{ session.title }}</span>
               <span v-if="session.run_count" class="tab-count">{{
                 session.run_count
               }}</span>
@@ -570,7 +570,7 @@ onBeforeUnmount(() => {
 
         <div class="pane-divider" aria-hidden="true" />
 
-        <div class="pane">
+        <div class="pane response-pane">
           <div class="pane-title">
             响应
             <span v-if="rep.resp" class="run-id">Run #{{ rep.resp.id }}</span>
@@ -605,15 +605,15 @@ onBeforeUnmount(() => {
               · TLS {{ rep.resp.tls_policy }}
               · {{ rep.resp.resp_decode_status }}
             </div>
-            <div class="field">
+            <div class="field response-headers-field">
               <div class="rf-field-label">响应头（重复项逐项保留）</div>
-              <pre class="rf-mono-pre">{{
+              <pre class="rf-mono-pre response-headers">{{
                 rep.resp.response_headers
                   .map((header) => `${header.name}: ${header.value}`)
                   .join("\n") || "(无)"
               }}</pre>
             </div>
-            <div class="field grow">
+            <div class="field grow response-body-field">
               <div class="rf-field-label">响应体</div>
               <pre
                 v-if="rep.resp.response_body_text !== null"
@@ -625,7 +625,7 @@ onBeforeUnmount(() => {
                 :closable="false"
               >
                 二进制有界捕获（Base64 预览）：
-                <pre class="rf-mono-pre">{{
+                <pre class="rf-mono-pre body-view">{{
                   rep.resp.response_body_base64.slice(0, 4000)
                 }}{{ rep.resp.response_body_base64.length > 4000 ? "…" : "" }}</pre>
               </el-alert>
@@ -736,15 +736,26 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .session-tabs {
+  width: 100%;
+  min-width: 0;
   margin-bottom: 8px;
 }
 .tab-label {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   max-width: 180px;
+  overflow: hidden;
+}
+.tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab-count {
+  flex: 0 0 auto;
   min-width: 18px;
   padding: 0 5px;
   border-radius: 9px;
@@ -883,7 +894,20 @@ onBeforeUnmount(() => {
   font-family: var(--rf-font-mono);
   font-size: 12px;
 }
+.response-headers-field {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.response-headers {
+  max-height: 220px;
+}
+.response-body-field {
+  flex: 1 0 240px;
+  min-height: 240px;
+  margin-bottom: 0;
+}
 .body-view {
+  min-height: 210px;
   max-height: none;
   flex: 1;
 }

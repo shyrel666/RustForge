@@ -53,6 +53,8 @@ export function createAppUpdater(dependencies: AppUpdaterDependencies) {
   const totalBytes = ref<number | null>(null);
   const errorMessage = ref("");
   const automaticChecked = ref(false);
+  const pendingUpdatePromptVersion = ref("");
+  const promptedVersions = new Set<string>();
   let activeCheck: Promise<AppUpdateStatus> | null = null;
 
   const progressPercent = computed(() => {
@@ -95,6 +97,11 @@ export function createAppUpdater(dependencies: AppUpdaterDependencies) {
       try {
         const result = await dependencies.check();
         update.value = result;
+        if (result && !promptedVersions.has(result.version)) {
+          pendingUpdatePromptVersion.value = result.version;
+        } else if (!result) {
+          pendingUpdatePromptVersion.value = "";
+        }
         status.value = result ? "available" : "latest";
       } catch (error) {
         errorMessage.value = errorText(error);
@@ -107,6 +114,14 @@ export function createAppUpdater(dependencies: AppUpdaterDependencies) {
       return await activeCheck;
     } finally {
       activeCheck = null;
+    }
+  }
+
+  function acknowledgeUpdatePrompt(version: string) {
+    if (!version) return;
+    promptedVersions.add(version);
+    if (pendingUpdatePromptVersion.value === version) {
+      pendingUpdatePromptVersion.value = "";
     }
   }
 
@@ -155,9 +170,11 @@ export function createAppUpdater(dependencies: AppUpdaterDependencies) {
     progressPercent,
     errorMessage,
     automaticChecked,
+    pendingUpdatePromptVersion,
     busy,
     showUpdateButton,
     checkForUpdates,
+    acknowledgeUpdatePrompt,
     downloadAndInstall,
     resetError,
   };
