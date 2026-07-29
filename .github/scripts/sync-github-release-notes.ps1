@@ -111,6 +111,9 @@ try {
 } catch {
   if ($SkipMissingRelease -and $_.Exception.Message -match '(HTTP 404|Not Found)') {
     Write-Host "::notice title=Release not found::$Tag does not exist yet; skipping."
+    # `gh api` 已按预期返回 1；若不显式复位，pwsh 即使捕获并安全跳过，
+    # 仍会用最后一个原生命令的退出码结束整个 GitHub Actions step。
+    $global:LASTEXITCODE = 0
     return
   }
   throw
