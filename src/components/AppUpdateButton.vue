@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import { Top } from "@element-plus/icons-vue";
 import { useAppUpdater } from "../services/appUpdater";
+import AppUpdateDialog from "./AppUpdateDialog.vue";
 
 const updater = useAppUpdater();
-const confirming = ref(false);
+const dialogVisible = ref(false);
 
 const buttonBusy = computed(
-  () => confirming.value || updater.busy.value,
+  () => dialogVisible.value || updater.busy.value,
 );
 
 const buttonTitle = computed(() => {
-  if (confirming.value) return "等待更新确认";
+  if (dialogVisible.value) return "正在查看更新详情";
   if (updater.status.value === "downloading") {
     const progress = updater.progressPercent.value;
     return progress === null
@@ -23,29 +24,14 @@ const buttonTitle = computed(() => {
   return `发现新版本 v${updater.targetVersion.value}`;
 });
 
-async function installAvailableUpdate() {
+function openUpdateDialog() {
   if (buttonBusy.value) return;
+  dialogVisible.value = true;
+}
 
-  confirming.value = true;
-  try {
-    const versionLine = updater.currentVersion.value
-      ? `v${updater.currentVersion.value} → v${updater.targetVersion.value}`
-      : `更新到 v${updater.targetVersion.value}`;
-    const notes = updater.releaseNotes.value;
-    await ElMessageBox.confirm(
-      notes ? `${versionLine}\n\n${notes}` : versionLine,
-      "应用更新",
-      {
-        confirmButtonText: "立即更新",
-        cancelButtonText: "稍后",
-        type: "info",
-      },
-    );
-  } catch {
-    return;
-  } finally {
-    confirming.value = false;
-  }
+async function installAvailableUpdate() {
+  if (updater.busy.value) return;
+  dialogVisible.value = false;
 
   const succeeded = await updater.downloadAndInstall();
   if (!succeeded) {
@@ -60,12 +46,12 @@ async function installAvailableUpdate() {
     v-if="updater.showUpdateButton.value"
     type="button"
     class="app-update-button"
-    :class="{ busy: buttonBusy }"
+    :class="{ busy: updater.busy.value }"
     :title="buttonTitle"
     :aria-label="buttonTitle"
     :disabled="buttonBusy"
     aria-live="polite"
-    @click.stop="installAvailableUpdate"
+    @click.stop="openUpdateDialog"
   >
     <span
       v-if="
@@ -78,6 +64,15 @@ async function installAvailableUpdate() {
     </span>
     <el-icon v-else :size="16"><Top /></el-icon>
   </button>
+
+  <AppUpdateDialog
+    v-model="dialogVisible"
+    :current-version="updater.currentVersion.value"
+    :target-version="updater.targetVersion.value"
+    :release-notes="updater.releaseNotes.value"
+    :busy="updater.busy.value"
+    @confirm="installAvailableUpdate"
+  />
 </template>
 
 <style scoped>
