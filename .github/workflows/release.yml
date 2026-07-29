@@ -49,6 +49,31 @@ jobs:
             throw "Version mismatch: tag=$tagVersion package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
           }
 
+      - name: Load and validate Chinese release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $notesPath = Join-Path ".github/release-notes" "${{ github.ref_name }}.md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "Missing release notes: $notesPath"
+          }
+
+          $body = (Get-Content -LiteralPath $notesPath -Raw -Encoding utf8).Trim()
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            throw "Release notes must not be empty: $notesPath"
+          }
+          if ($body -notmatch '[\u3400-\u9fff]') {
+            throw "Release notes must contain Chinese text: $notesPath"
+          }
+          if ($body -notmatch '(?m)^## 核心') {
+            throw "Release notes must contain a level-two core features section: $notesPath"
+          }
+
+          $delimiter = "RUSTFORGE_RELEASE_NOTES_$([guid]::NewGuid().ToString('N'))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Value "body<<$delimiter"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Value $body
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Value $delimiter
+
       - name: Build and publish signed updater
         uses: tauri-apps/tauri-action@v0
         env:
@@ -58,7 +83,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "RustForge v__VERSION__"
-          releaseBody: "See the assets below to download and install this version."
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: "--target x86_64-pc-windows-msvc"

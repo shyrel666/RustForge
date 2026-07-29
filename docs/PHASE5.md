@@ -47,6 +47,8 @@
 - 下载/安装状态、确认对话框、`ReleaseNotFound` 作为“已是最新”和并发检查控制均有前端测试。
 - `tauri.conf.json` 固定 updater 公钥与 GitHub Releases `latest.json` endpoint。
 - `.github/workflows/release.yml` 校验 tag/version，并从 GitHub Secrets 注入 Tauri 签名私钥和密码来生成签名产物。
+- 每个标签必须在 `.github/release-notes/vX.Y.Z.md` 提供中文核心更新说明；发布流水线会校验文件存在、内容非空、包含中文和“核心”二级标题，再把完整 Markdown 写入 GitHub Release。
+- `.github/workflows/sync-release-notes.yml` 以版本化说明文件为唯一来源：`main` 上的说明变更会同步到已存在的同名 Release，尚未创建的版本会安全跳过并在打标签时由发布流水线使用。
 
 仍需发布环境完成：
 

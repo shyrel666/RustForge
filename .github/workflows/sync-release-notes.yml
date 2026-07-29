@@ -1,0 +1,68 @@
+name: Sync release notes
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/release-notes/v*.md"
+      - ".github/workflows/sync-release-notes.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-release-notes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate and sync Chinese release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $notesFiles = @(
+            Get-ChildItem -LiteralPath ".github/release-notes" -File -Filter "v*.md" |
+              Sort-Object Name
+          )
+          if ($notesFiles.Count -eq 0) {
+            throw "No versioned release notes were found."
+          }
+
+          foreach ($notesFile in $notesFiles) {
+            $tag = [System.IO.Path]::GetFileNameWithoutExtension($notesFile.Name)
+            if ($tag -notmatch '^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+              throw "Invalid release-notes filename: $($notesFile.Name)"
+            }
+
+            $body = (Get-Content -LiteralPath $notesFile.FullName -Raw -Encoding utf8).Trim()
+            if ([string]::IsNullOrWhiteSpace($body)) {
+              throw "Release notes must not be empty: $($notesFile.FullName)"
+            }
+            if ($body -notmatch '[\u3400-\u9fff]') {
+              throw "Release notes must contain Chinese text: $($notesFile.FullName)"
+            }
+            if ($body -notmatch '(?m)^## 核心') {
+              throw "Release notes must contain a level-two core features section: $($notesFile.FullName)"
+            }
+
+            & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::notice title=Release not found::$tag does not exist yet; skipping."
+              continue
+            }
+
+            & gh release edit $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --notes-file $notesFile.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to update GitHub Release $tag."
+            }
+            Write-Host "Updated GitHub Release $tag from $($notesFile.Name)."
+          }
