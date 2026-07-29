@@ -68,6 +68,9 @@ jobs:
           if ($body -notmatch '(?m)^## 核心') {
             throw "Release notes must contain a level-two core features section: $notesPath"
           }
+          $null = & ".github/scripts/update-updater-manifest-notes.ps1" `
+            -NotesPath $notesPath `
+            -PreviewOnly
 
           $delimiter = "RUSTFORGE_RELEASE_NOTES_$([guid]::NewGuid().ToString('N'))"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Value "body<<$delimiter"
@@ -87,3 +90,15 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: "--target x86_64-pc-windows-msvc"
+
+      - name: Normalize and verify updater release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          & ".github/scripts/sync-github-release-notes.ps1" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -Tag "${{ github.ref_name }}" `
+            -NotesPath ".github/release-notes/${{ github.ref_name }}.md" `
+            -TempDirectory $env:RUNNER_TEMP `
+            -RequireUpdaterManifest

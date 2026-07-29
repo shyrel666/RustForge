@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - ".github/release-notes/v*.md"
+      - ".github/scripts/*.ps1"
       - ".github/workflows/sync-release-notes.yml"
   workflow_dispatch:
 
@@ -14,7 +15,7 @@ permissions:
 
 concurrency:
   group: sync-release-notes-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -37,32 +38,10 @@ jobs:
 
           foreach ($notesFile in $notesFiles) {
             $tag = [System.IO.Path]::GetFileNameWithoutExtension($notesFile.Name)
-            if ($tag -notmatch '^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
-              throw "Invalid release-notes filename: $($notesFile.Name)"
-            }
-
-            $body = (Get-Content -LiteralPath $notesFile.FullName -Raw -Encoding utf8).Trim()
-            if ([string]::IsNullOrWhiteSpace($body)) {
-              throw "Release notes must not be empty: $($notesFile.FullName)"
-            }
-            if ($body -notmatch '[\u3400-\u9fff]') {
-              throw "Release notes must contain Chinese text: $($notesFile.FullName)"
-            }
-            if ($body -notmatch '(?m)^## 核心') {
-              throw "Release notes must contain a level-two core features section: $($notesFile.FullName)"
-            }
-
-            & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::notice title=Release not found::$tag does not exist yet; skipping."
-              continue
-            }
-
-            & gh release edit $tag `
-              --repo $env:GITHUB_REPOSITORY `
-              --notes-file $notesFile.FullName
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to update GitHub Release $tag."
-            }
-            Write-Host "Updated GitHub Release $tag from $($notesFile.Name)."
+            & ".github/scripts/sync-github-release-notes.ps1" `
+              -Repository $env:GITHUB_REPOSITORY `
+              -Tag $tag `
+              -NotesPath $notesFile.FullName `
+              -TempDirectory $env:RUNNER_TEMP `
+              -SkipMissingRelease
           }
