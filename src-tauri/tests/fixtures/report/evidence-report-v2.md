@@ -44,7 +44,7 @@
 
 ### 工具版本
 
-- RustForge：`0.1.0`
+- RustForge：`0.1.1`
 - SQLite：`3.46.0`
 - Evidence Report Schema：`2`
 
