@@ -2460,14 +2460,12 @@ mod tests {
         normalize_fixture_times(&mut document);
         let markdown = render_markdown(&document);
         let json = serde_json::to_string_pretty(&document).unwrap();
-        assert_eq!(
-            markdown.trim_end(),
-            include_str!("../tests/fixtures/report/evidence-report-v2.md").trim_end()
-        );
-        assert_eq!(
-            json,
-            include_str!("../tests/fixtures/report/evidence-report-v2.json").trim_end()
-        );
+        let expected_markdown =
+            include_str!("../tests/fixtures/report/evidence-report-v2.md").replace("\r\n", "\n");
+        let expected_json =
+            include_str!("../tests/fixtures/report/evidence-report-v2.json").replace("\r\n", "\n");
+        assert_eq!(markdown.trim_end(), expected_markdown.trim_end());
+        assert_eq!(json, expected_json.trim_end());
         assert!(!markdown.contains(&fixture.rejected_title));
         assert!(!json.contains(&fixture.rejected_title));
         assert!(!markdown.contains(&fixture.raw_secret));

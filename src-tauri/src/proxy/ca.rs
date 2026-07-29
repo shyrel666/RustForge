@@ -96,22 +96,34 @@ fn secure_private_file(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn secure_new_private_file(path: &Path) -> Result<(), String> {
+    secure_private_file(path)
+}
+
 #[cfg(target_os = "windows")]
-fn apply_and_verify_current_user_acl(path: &Path) -> Result<(), String> {
+fn apply_and_verify_current_user_acl(
+    path: &Path,
+    allow_owner_normalization: bool,
+) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
     // 只给当前 Windows SID 完全控制权限，关闭继承并移除所有既有访问规则；
-    // 随后重新读取 DACL，确认不存在其他主体或继承项。
+    // Windows hosted runner 等环境可能把刚创建对象的默认所有者设为
+    // BUILTIN\Administrators，所以只允许刚由本进程创建的对象规范化 owner；加载既有
+    // CA 材料时仍拒绝其他 owner。最终状态必须重新读取并严格验证。
     const ACL_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $target = $env:RUSTFORGE_ACL_TARGET
 if ([string]::IsNullOrWhiteSpace($target)) { throw 'missing target' }
+$allowOwnerNormalization = $env:RUSTFORGE_ACL_ALLOW_OWNER_NORMALIZATION -eq '1'
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $item = Get-Item -LiteralPath $target -Force
 $acl = Get-Acl -LiteralPath $target
 if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {
-  throw 'unexpected ACL owner'
+  if (-not $allowOwnerNormalization) { throw 'unexpected ACL owner' }
+  $acl.SetOwner($sid)
 }
 $acl.SetAccessRuleProtection($true, $false)
 $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
@@ -134,11 +146,19 @@ $acl.AddAccessRule($rule)
 $item.SetAccessControl($acl)
 $verified = Get-Acl -LiteralPath $target
 $verifiedRules = @($verified.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+if ($verified.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) {
+  throw 'unexpected ACL owner'
+}
 if (-not $verified.AreAccessRulesProtected) { throw 'ACL inheritance remains enabled' }
 if ($verifiedRules.Count -ne 1) { throw 'unexpected ACL rule count' }
 if ($verifiedRules[0].IdentityReference.Value -ne $sid.Value) { throw 'unexpected ACL identity' }
 if ($verifiedRules[0].AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
   throw 'unexpected ACL type'
+}
+if ($verifiedRules[0].IsInherited) { throw 'unexpected inherited ACL rule' }
+$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+if (($verifiedRules[0].FileSystemRights -band $fullControl) -ne $fullControl) {
+  throw 'unexpected ACL rights'
 }
 "#;
 
@@ -161,6 +181,10 @@ if ($verifiedRules[0].AccessControlType -ne [System.Security.AccessControl.Acces
             ACL_SCRIPT,
         ])
         .env("RUSTFORGE_ACL_TARGET", path.as_os_str())
+        .env(
+            "RUSTFORGE_ACL_ALLOW_OWNER_NORMALIZATION",
+            if allow_owner_normalization { "1" } else { "0" },
+        )
         // 从 PowerShell 7 或开发 shell 启动时可能继承不兼容的 PSModulePath；
         // ACL 脚本只加载 Windows PowerShell 自带的 Security 模块。
         .env("PSModulePath", module_path)
@@ -171,7 +195,7 @@ if ($verifiedRules[0].AccessControlType -ne [System.Security.AccessControl.Acces
         })?;
     if !output.status.success() {
         return Err(
-            "CA 私钥 ACL 无法收紧为仅当前用户可访问；代理已停止，请检查应用数据目录所有者".into(),
+            "CA 私钥所有者或 ACL 无法收紧为当前用户独占；代理已停止，请检查应用数据目录权限".into(),
         );
     }
     Ok(())
@@ -179,23 +203,46 @@ if ($verifiedRules[0].AccessControlType -ne [System.Security.AccessControl.Acces
 
 #[cfg(target_os = "windows")]
 fn secure_ca_directory(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|error| format!("创建 CA 目录失败: {error}"))?;
+    let created = match fs::create_dir(dir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = dir.parent().ok_or("CA 目录的父路径解析失败")?;
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用数据目录失败: {error}"))?;
+            match fs::create_dir(dir) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(format!("创建 CA 目录失败: {error}")),
+            }
+        }
+        Err(error) => return Err(format!("创建 CA 目录失败: {error}")),
+    };
     let metadata =
         fs::symlink_metadata(dir).map_err(|error| format!("检查 CA 目录失败: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("CA 目录必须是当前用户拥有的普通目录".into());
     }
-    apply_and_verify_current_user_acl(dir)
+    apply_and_verify_current_user_acl(dir, created)
 }
 
 #[cfg(target_os = "windows")]
-fn secure_private_file(path: &Path) -> Result<(), String> {
+fn secure_windows_private_file(path: &Path, allow_owner_normalization: bool) -> Result<(), String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|error| format!("检查 CA 私钥失败: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err("CA 私钥必须是当前用户拥有的普通文件".into());
     }
-    apply_and_verify_current_user_acl(path)
+    apply_and_verify_current_user_acl(path, allow_owner_normalization)
+}
+
+#[cfg(target_os = "windows")]
+fn secure_private_file(path: &Path) -> Result<(), String> {
+    secure_windows_private_file(path, false)
+}
+
+#[cfg(target_os = "windows")]
+fn secure_new_private_file(path: &Path) -> Result<(), String> {
+    secure_windows_private_file(path, true)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
@@ -206,6 +253,11 @@ fn secure_ca_directory(dir: &Path) -> Result<(), String> {
 #[cfg(not(any(unix, target_os = "windows")))]
 fn secure_private_file(_path: &Path) -> Result<(), String> {
     Err("当前平台不支持 CA 私钥权限校验，代理已停止".into())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn secure_new_private_file(path: &Path) -> Result<(), String> {
+    secure_private_file(path)
 }
 
 struct TempPathGuard {
@@ -246,7 +298,7 @@ fn create_temp_file(dest: &Path, private: bool) -> Result<(File, TempPathGuard),
                     committed: false,
                 };
                 if private {
-                    secure_private_file(&guard.path)?;
+                    secure_new_private_file(&guard.path)?;
                 }
                 return Ok((file, guard));
             }
@@ -455,8 +507,7 @@ mod tests {
         let (_, key_path) = ca_paths(temp.path());
         let dir = key_path.parent().unwrap();
         secure_ca_directory(dir).unwrap();
-        fs::write(&key_path, "incomplete").unwrap();
-        secure_private_file(&key_path).unwrap();
+        atomic_write(&key_path, b"incomplete", true).unwrap();
 
         let error = ensure_ca(temp.path()).err().unwrap();
         assert!(error.contains("不完整"));
