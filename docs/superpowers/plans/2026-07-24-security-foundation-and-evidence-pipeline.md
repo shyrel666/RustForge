@@ -1,6 +1,6 @@
 # RustForge 安全基础与证据闭环现代化实施计划
 
-> 状态：执行中（Task 0.1–5.2 已完成，Gate A–Gate C 已通过；M5 进行中）
+> 状态：Task 0.1–5.3 与第 10 节文档调整已完成，Gate A–Gate D 已通过；M6 保持为独立增强 backlog
 >
 > 日期：2026-07-24
 >
@@ -1034,14 +1034,16 @@ flowchart TD
 
 ## 10. 文档和参考项目调整
 
-在 Gate D 前同步更新：
+**状态：** 已完成（2026-07-29）
 
-- Modify: `README.md`
-- Modify: `docs/PHASE1.md` 至 `docs/PHASE5.md`
-- Modify: `docs/AUTHORIZATION.md`
-- Create: `docs/architecture/data-model.md`
-- Create: `docs/architecture/security-boundaries.md`
-- Create: `docs/architecture/rule-pack-v1.md`
+已同步更新：
+
+- [x] Modify: `README.md`
+- [x] Modify: `docs/PHASE1.md` 至 `docs/PHASE5.md`
+- [x] Modify: `docs/AUTHORIZATION.md`
+- [x] Create: `docs/architecture/data-model.md`
+- [x] Create: `docs/architecture/security-boundaries.md`
+- [x] Create: `docs/architecture/rule-pack-v1.md`
 
 调整原则：
 
@@ -1054,22 +1056,34 @@ flowchart TD
 - hackingBuddyGPT 仅参考能力边界、执行预算和日志。
 - 所有引用记录核查日期，避免再次出现“引用项目已变化但文档未更新”。
 
+执行结果与证据（2026-07-29）：
+
+- 文档内容逐项对照当前 Rust/Tauri、React、SQLite schema、命令接口、测试 fixture 与发布工作流重写；不再沿用旧的同步正则扫描、正文无限保存、纯文本报告等历史描述。
+- `README.md` 记录 Burp、Caido、burpgpt、PentestGPT、Deciduous、Strix、Vulnhuntr、hackingBuddyGPT 的核查日期、官方来源和 RustForge 采用/不采用边界；上述调整原则均已落实。
+- 新增的数据模型、安全边界和规则包文档分别覆盖表关系与不可变条件、信任边界与 fail-closed/fail-open 策略、规则 schema/操作符/资源上限/14 条内置规则。
+- 为保持开发态策略一致，同步修正 `docs/architecture/0001-modernization-guardrails.md` 中已经过时的旧数据库迁移承诺。
+- 本地文档检查通过：12 个本次涉及的 Markdown 文件可解析、本地链接无缺失、无行尾空白，`git diff --check` 通过。
+- 前端门禁通过：`pnpm check`（29 个 Node 测试、TypeScript 检查、Vite 生产构建）。
+- Rust 门禁通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`（201 个库测试、4 个代理/MITM 集成测试、8 个规则包集成测试）、`cargo +1.88.0 check --all-targets`。
+- 全量测试在 Windows 暴露并修复了报告 Markdown/JSON fixture 的 CRLF/LF 比较问题；测试现在仅归一化预期快照换行符，不改变报告生成内容。
+- 签名更新链路的真实 release 安装仍依赖仓库外的 GitHub Environment、签名密钥和 Windows 发布机；该外部边界已在 `docs/PHASE5.md` 明示，不冒充本地已完成的端到端发布验证。
+
 ## 11. 总体验收定义
 
 计划完成必须同时满足：
 
-- [ ] 所有质量门禁通过，没有跳过或临时允许失败的检查。
-- [ ] 当前基线 schema 可从空库初始化并通过结构、完整性和重复打开测试。
-- [ ] Scope 无法通过代理、Repeater 或未来工作流绕过。
-- [ ] 大响应、chunked 和压缩炸弹不会造成无界内存增长。
-- [ ] 默认 AI 请求经过可验证脱敏，API Key 不进入前端。
-- [ ] OWASP 等引用包含版本，不再把未知编号强制映射到 2021。
-- [ ] 规则有版本、来源、证据位置、评测样本和稳定指纹。
-- [ ] Finding 的确认状态有真实 Evidence 和完整状态历史。
-- [ ] Repeater 运行可持久化、比较并关联为证据。
-- [ ] 测试计划增量更新且保留人工节点、进度、备注与证据。
+- [x] 所有质量门禁通过，没有跳过或临时允许失败的检查。
+- [x] 当前基线 schema 可从空库初始化并通过结构、完整性和重复打开测试。
+- [x] Scope 无法通过代理、Repeater 或未来工作流绕过。
+- [x] 大响应、chunked 和压缩炸弹不会造成无界内存增长。
+- [x] 默认 AI 请求经过可验证脱敏，API Key 不进入前端。
+- [x] OWASP 等引用包含版本，不再把未知编号强制映射到 2021。
+- [x] 规则有版本、来源、证据位置、评测样本和稳定指纹。
+- [x] Finding 的确认状态有真实 Evidence 和完整状态历史。
+- [x] Repeater 运行可持久化、比较并关联为证据。
+- [x] 测试计划增量更新且保留人工节点、进度、备注与证据。
 - [x] 默认报告脱敏，并区分“建议验证步骤”和“实际复现结果”。
-- [ ] 产品仍保持人在回路，不自动对目标实施攻击。
+- [x] 产品仍保持人在回路，不自动对目标实施攻击。
 
 ## 12. 推荐的首个实施批次
 
