@@ -1,21 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <defs>
-    <linearGradient id="rf-fav-path" x1="6" y1="26" x2="25" y2="7" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#5B8CFF"/>
-      <stop offset="100%" stop-color="#35E0C1"/>
-    </linearGradient>
-  </defs>
-  <rect width="32" height="32" rx="7" fill="#0B1020"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="216" fill="#050B20"/>
   <path
-    d="M 7.4 24.2 L 11 16.3 H 17.9 L 22.5 8.5"
-    fill="none"
-    stroke="url(#rf-fav-path)"
-    stroke-width="2.9"
-    stroke-linecap="round"
-    stroke-linejoin="round"
+    d="M751.3 311.1 134.7 349.5 303.8 463 245 601 328.3 709.6 453.2 458.1 660.6 423Z"
+    fill="#2070F8"
   />
   <path
-    d="M 24.1 4.9 L 25.15 7.05 L 27.3 8.1 L 25.15 9.15 L 24.1 11.3 L 23.05 9.15 L 20.9 8.1 L 23.05 7.05 Z"
-    fill="#FF7A45"
+    d="M616.5 498.9 477.7 521 427.9 619.8 564.3 592Z"
+    fill="#2070F8"
+  />
+  <path
+    d="M490.8 654.1 402.6 670.4 359.3 757.8 332.4 764.3 231.9 631.2 110.2 902.3 400.1 848.4Z"
+    fill="#19BCB9"
+  />
+  <path
+    d="M813.3 195.2 798.6 194.3 800.3 250.7 769.2 214.8 758.6 226.2 790.5 258 743.1 254 743.9 269.5 789.6 271.9 761.1 290.7 768.4 301.3 797 282.5 780.7 327.5 795.4 333.2 809.2 285 826.4 325 839.5 317.7 819.9 280.9 857.4 297.2 862.3 285.8 826.4 269.5 877.8 256.4 872.9 240.9 823.1 257.2 846.8 224.6 837.8 215.6 813.3 249.9Z"
+    fill="#FC8442"
   />
 </svg>

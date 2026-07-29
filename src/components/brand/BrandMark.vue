@@ -1,18 +1,13 @@
 <script setup lang="ts">
-import { computed, useId } from "vue";
-
-const props = withDefaults(
+withDefaults(
   defineProps<{
     /** Pixel size for width and height */
     size?: number;
-    /** mono: UI chrome stroke; app: full-color packaging mark */
+    /** mono: UI chrome mark; app: full-color packaging mark */
     variant?: "mono" | "app";
   }>(),
   { size: 20, variant: "mono" }
 );
-
-const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-const gradId = computed(() => `rf-path-${uid}`);
 </script>
 
 <template>
@@ -21,53 +16,38 @@ const gradId = computed(() => `rf-path-${uid}`);
     :class="[`is-${variant}`]"
     :width="size"
     :height="size"
-    :viewBox="variant === 'app' ? '0 0 512 512' : '0 0 24 24'"
+    :viewBox="variant === 'app' ? '0 0 1024 1024' : '0 0 24 24'"
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
     aria-hidden="true"
     focusable="false"
   >
     <template v-if="variant === 'app'">
-      <defs>
-        <linearGradient
-          :id="gradId"
-          x1="96"
-          y1="400"
-          x2="400"
-          y2="112"
-          gradientUnits="userSpaceOnUse"
-        >
-          <stop offset="0%" stop-color="#5B8CFF" />
-          <stop offset="100%" stop-color="#35E0C1" />
-        </linearGradient>
-      </defs>
-      <rect width="512" height="512" rx="108" fill="#0B1020" />
+      <rect width="1024" height="1024" rx="216" fill="#050B20" />
       <path
-        d="M 118 388 L 176 260 H 286 L 360 136"
-        fill="none"
-        :stroke="`url(#${gradId})`"
-        stroke-width="46"
-        stroke-linecap="round"
-        stroke-linejoin="round"
+        d="M751.3 311.1 134.7 349.5 303.8 463 245 601 328.3 709.6 453.2 458.1 660.6 423Z"
+        fill="#2070F8"
       />
       <path
-        d="M 386 78 L 402.5 110.5 L 435 127 L 402.5 143.5 L 386 176 L 369.5 143.5 L 337 127 L 369.5 110.5 Z"
-        fill="#FF7A45"
+        d="M616.5 498.9 477.7 521 427.9 619.8 564.3 592Z"
+        fill="#2070F8"
+      />
+      <path
+        d="M490.8 654.1 402.6 670.4 359.3 757.8 332.4 764.3 231.9 631.2 110.2 902.3 400.1 848.4Z"
+        fill="#19BCB9"
+      />
+      <path
+        d="M813.3 195.2 798.6 194.3 800.3 250.7 769.2 214.8 758.6 226.2 790.5 258 743.1 254 743.9 269.5 789.6 271.9 761.1 290.7 768.4 301.3 797 282.5 780.7 327.5 795.4 333.2 809.2 285 826.4 325 839.5 317.7 819.9 280.9 857.4 297.2 862.3 285.8 826.4 269.5 877.8 256.4 872.9 240.9 823.1 257.2 846.8 224.6 837.8 215.6 813.3 249.9Z"
+        fill="#FC8442"
       />
     </template>
     <template v-else>
-      <!-- Guided path implying F: rise → mid bar → rise -->
-      <path
-        d="M 5.5 18.2 L 8.2 12.2 H 13.4 L 16.9 6.4"
-        stroke="currentColor"
-        stroke-width="2.2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      />
-      <path
-        d="M 18.15 2.95 L 19.2 4.9 L 21.15 5.95 L 19.2 7 L 18.15 8.95 L 17.1 7 L 15.15 5.95 L 17.1 4.9 Z"
-        fill="currentColor"
-      />
+      <g fill="currentColor" transform="scale(.0234375)">
+        <path d="M751.3 311.1 134.7 349.5 303.8 463 245 601 328.3 709.6 453.2 458.1 660.6 423Z" />
+        <path d="M616.5 498.9 477.7 521 427.9 619.8 564.3 592Z" />
+        <path d="M490.8 654.1 402.6 670.4 359.3 757.8 332.4 764.3 231.9 631.2 110.2 902.3 400.1 848.4Z" />
+        <path d="M813.3 195.2 798.6 194.3 800.3 250.7 769.2 214.8 758.6 226.2 790.5 258 743.1 254 743.9 269.5 789.6 271.9 761.1 290.7 768.4 301.3 797 282.5 780.7 327.5 795.4 333.2 809.2 285 826.4 325 839.5 317.7 819.9 280.9 857.4 297.2 862.3 285.8 826.4 269.5 877.8 256.4 872.9 240.9 823.1 257.2 846.8 224.6 837.8 215.6 813.3 249.9Z" />
+      </g>
     </template>
   </svg>
 </template>
