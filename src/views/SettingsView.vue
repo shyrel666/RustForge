@@ -21,12 +21,14 @@ import {
   Monitor,
   CopyDocument,
   FolderOpened,
+  Loading,
 } from "@element-plus/icons-vue";
 import { useSettingsStore, type AiProvider } from "../stores/settings";
 import { useAppUpdater } from "../services/appUpdater";
 import AppUpdateButton from "../components/AppUpdateButton.vue";
 import PageHeader from "../components/shell/PageHeader.vue";
 import BrandMark from "../components/brand/BrandMark.vue";
+import packageMetadata from "../../package.json";
 import {
   getPromptTemplate,
   listPromptVersions,
@@ -54,6 +56,7 @@ import {
   type PromptTemplateVersion,
 } from "../api/tauri";
 import type { ThemeMode } from "../utils/theme";
+import { runDiagnosticJobs } from "../utils/runtimeDiagnostics";
 
 use([
   CanvasRenderer,
@@ -94,13 +97,17 @@ const GITHUB_REPO = "shyrel666/RustForge";
 const LINK_GITHUB = `https://github.com/${GITHUB_REPO}`;
 const LINK_CHANGELOG = `https://github.com/${GITHUB_REPO}/releases`;
 
-const appVersion = ref("0.1.0");
+const appVersion = ref(packageMetadata.version);
 
 const runtimeInfo = ref<RuntimeInfo | null>(null);
 const proxyRunning = ref(false);
 const proxyPort = ref(0);
+const proxyLoaded = ref(false);
 const caTrusted = ref<boolean | null>(null);
 const diagLoading = ref(false);
+const diagnosticsLoaded = ref(false);
+const diagnosticsError = ref("");
+let diagnosticsGeneration = 0;
 
 function formatOsLabel(os: string, arch: string): string {
   const osMap: Record<string, string> = {
@@ -117,11 +124,12 @@ function formatOsLabel(os: string, arch: string): string {
 }
 
 const systemLabel = computed(() => {
-  if (!runtimeInfo.value) return "—";
+  if (!runtimeInfo.value) return diagLoading.value ? "正在读取…" : "—";
   return formatOsLabel(runtimeInfo.value.os, runtimeInfo.value.arch);
 });
 
 const proxyLabel = computed(() => {
+  if (!proxyLoaded.value) return diagLoading.value ? "正在读取…" : "—";
   const port =
     proxyRunning.value && proxyPort.value > 0
       ? proxyPort.value
@@ -131,28 +139,60 @@ const proxyLabel = computed(() => {
 });
 
 const caLabel = computed(() => {
-  if (caTrusted.value === null) return "—";
+  if (caTrusted.value === null) {
+    return diagLoading.value ? "正在读取…" : "—";
+  }
   return caTrusted.value ? "已信任" : "未安装 / 未信任";
 });
 
-async function loadDiagnostics() {
+async function loadDiagnostics(force = false) {
+  if (diagLoading.value || (diagnosticsLoaded.value && !force)) return;
+  const generation = ++diagnosticsGeneration;
+  const canCommit = () =>
+    generation === diagnosticsGeneration && diagLoading.value;
   diagLoading.value = true;
+  diagnosticsError.value = "";
   try {
-    const [ver, runtime, proxy, ca] = await Promise.all([
-      getVersion().catch(() => appVersion.value),
-      getRuntimeInfo(),
-      proxyStatus(),
-      getCaInfo(),
+    const result = await runDiagnosticJobs([
+      {
+        label: "应用版本",
+        run: async () => {
+          const version = await getVersion();
+          if (canCommit()) appVersion.value = version;
+        },
+      },
+      {
+        label: "系统信息",
+        run: async () => {
+          const runtime = await getRuntimeInfo();
+          if (canCommit()) runtimeInfo.value = runtime;
+        },
+      },
+      {
+        label: "代理状态",
+        run: async () => {
+          const proxy = await proxyStatus();
+          if (canCommit()) {
+            proxyRunning.value = proxy.running;
+            proxyPort.value = proxy.port;
+            proxyLoaded.value = true;
+          }
+        },
+      },
+      {
+        label: "CA 证书",
+        run: async () => {
+          const ca = await getCaInfo();
+          if (canCommit()) caTrusted.value = ca.trusted;
+        },
+      },
     ]);
-    appVersion.value = ver;
-    runtimeInfo.value = runtime;
-    proxyRunning.value = proxy.running;
-    proxyPort.value = proxy.port;
-    caTrusted.value = ca.trusted;
-  } catch (e) {
-    ElMessage.error(`加载运行环境失败：${String(e)}`);
+    if (generation === diagnosticsGeneration) {
+      diagnosticsLoaded.value = true;
+      diagnosticsError.value = result.failures.join("；");
+    }
   } finally {
-    diagLoading.value = false;
+    if (generation === diagnosticsGeneration) diagLoading.value = false;
   }
 }
 
@@ -1094,16 +1134,49 @@ async function save() {
         </div>
       </div>
 
-      <div class="about-card rf-card env-card" v-loading="diagLoading">
+      <div
+        class="about-card rf-card env-card"
+        :aria-busy="diagLoading"
+      >
         <div class="env-head">
           <div>
             <h3 class="env-title">运行环境</h3>
             <p class="env-desc">本地摘要，便于自查与提交 Issue。</p>
           </div>
           <div class="env-actions">
-            <el-button :icon="CopyDocument" @click="copyDiagnostics">复制诊断信息</el-button>
+            <el-button
+              :icon="Refresh"
+              :loading="diagLoading"
+              @click="loadDiagnostics(true)"
+            >
+              刷新
+            </el-button>
+            <el-button
+              :icon="CopyDocument"
+              :disabled="!diagnosticsLoaded"
+              @click="copyDiagnostics"
+            >
+              复制诊断信息
+            </el-button>
             <el-button :icon="FolderOpened" @click="openDataDir">打开数据目录</el-button>
           </div>
+        </div>
+        <div
+          v-if="diagLoading"
+          class="env-load-status"
+          role="status"
+          aria-live="polite"
+        >
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>正在后台读取本机环境，页面仍可正常操作。</span>
+        </div>
+        <div
+          v-else-if="diagnosticsError"
+          class="env-load-status is-error"
+          role="alert"
+        >
+          <strong>部分信息读取失败，不影响其他功能。</strong>
+          <span>{{ diagnosticsError }}</span>
         </div>
         <div class="env-rows">
           <div class="env-row">
@@ -1112,15 +1185,33 @@ async function save() {
           </div>
           <div class="env-row">
             <span class="env-key">系统</span>
-            <span class="env-val">{{ systemLabel }}</span>
+            <span
+              class="env-val"
+              :class="{ pending: !runtimeInfo && diagLoading }"
+            >
+              {{ systemLabel }}
+            </span>
           </div>
           <div class="env-row">
             <span class="env-key">代理</span>
-            <span class="env-val">{{ proxyLabel }}</span>
+            <span
+              class="env-val"
+              :class="{ pending: !proxyLoaded && diagLoading }"
+            >
+              {{ proxyLabel }}
+            </span>
           </div>
           <div class="env-row">
             <span class="env-key">CA 证书</span>
-            <span class="env-val" :class="{ warn: caTrusted === false }">{{ caLabel }}</span>
+            <span
+              class="env-val"
+              :class="{
+                warn: caTrusted === false,
+                pending: caTrusted === null && diagLoading,
+              }"
+            >
+              {{ caLabel }}
+            </span>
           </div>
         </div>
       </div>
@@ -1621,6 +1712,46 @@ async function save() {
   flex-wrap: wrap;
   gap: 8px;
 }
+.env-load-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid
+    color-mix(in srgb, var(--rf-accent) 28%, var(--rf-border));
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-accent-muted);
+  color: var(--rf-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.env-load-status .el-icon {
+  flex: 0 0 auto;
+  color: var(--rf-accent);
+}
+.env-load-status.is-error {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+  border-color: color-mix(
+    in srgb,
+    var(--rf-warning, #e6a23c) 34%,
+    var(--rf-border)
+  );
+  background: color-mix(
+    in srgb,
+    var(--rf-warning, #e6a23c) 8%,
+    transparent
+  );
+}
+.env-load-status.is-error strong {
+  color: var(--rf-warning, #e6a23c);
+  font-size: 12.5px;
+}
+.env-load-status.is-error span {
+  color: var(--rf-text-secondary);
+  overflow-wrap: anywhere;
+}
 .env-rows {
   display: flex;
   flex-direction: column;
@@ -1645,6 +1776,9 @@ async function save() {
 .env-val {
   color: var(--rf-text);
   font-variant-numeric: tabular-nums;
+}
+.env-val.pending {
+  color: var(--rf-text-muted);
 }
 .env-val.warn {
   color: var(--rf-warning, #e6a23c);

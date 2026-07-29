@@ -1103,52 +1103,76 @@ pub struct CaInfo {
     trusted: bool,
 }
 
+/// CA 初始化与信任检查会访问磁盘并启动 PowerShell/certutil，必须离开
+/// Tauri IPC 运行线程，避免首次安装时阻塞 WebView 消息循环。
+async fn run_blocking_ca_operation<T, F>(operation: &'static str, task: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CmdResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("{operation}后台任务异常结束: {error}"))?
+}
+
 #[tauri::command]
-pub fn get_ca_info(app: AppHandle) -> CmdResult<CaInfo> {
+pub async fn get_ca_info(app: AppHandle) -> CmdResult<CaInfo> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let material = ca::ensure_ca(&dir)?;
-    Ok(CaInfo {
-        cert_path: material.cert_path.to_string_lossy().into_owned(),
-        fingerprint: ca::fingerprint_sha256(&material.cert_pem)?,
-        trusted: ca::is_trusted(),
+    run_blocking_ca_operation("读取 CA 信息", move || {
+        let material = ca::ensure_ca(&dir)?;
+        Ok(CaInfo {
+            cert_path: material.cert_path.to_string_lossy().into_owned(),
+            fingerprint: ca::fingerprint_sha256(&material.cert_pem)?,
+            trusted: ca::is_trusted(),
+        })
     })
+    .await
 }
 
 /// 导出 CA 证书到下载目录，返回目标路径
 #[tauri::command]
-pub fn export_ca_cert(app: AppHandle) -> CmdResult<String> {
+pub async fn export_ca_cert(app: AppHandle) -> CmdResult<String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let material = ca::ensure_ca(&dir)?;
     let dest_dir = app.path().download_dir().unwrap_or_else(|_| dir.clone());
-    let dest = dest_dir.join("RustForge-RootCA.cer");
-    ca::export_cert(&material, &dest)?;
-    Ok(dest.to_string_lossy().into_owned())
+    run_blocking_ca_operation("导出 CA 证书", move || {
+        let material = ca::ensure_ca(&dir)?;
+        let dest = dest_dir.join("RustForge-RootCA.cer");
+        ca::export_cert(&material, &dest)?;
+        Ok(dest.to_string_lossy().into_owned())
+    })
+    .await
 }
 
 /// 一键安装到当前用户根证书 store（Windows 会弹安全警告，由用户确认）
 #[tauri::command]
-pub fn install_ca_cert(app: AppHandle) -> CmdResult<String> {
+pub async fn install_ca_cert(app: AppHandle) -> CmdResult<String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let material = ca::ensure_ca(&dir)?;
-    ca::install_trusted(&material)
+    run_blocking_ca_operation("安装 CA 证书", move || {
+        let material = ca::ensure_ca(&dir)?;
+        ca::install_trusted(&material)
+    })
+    .await
 }
 
 /// 在文件管理器中定位 CA 证书（手动安装用）
 #[tauri::command]
-pub fn reveal_ca_cert(app: AppHandle) -> CmdResult<()> {
+pub async fn reveal_ca_cert(app: AppHandle) -> CmdResult<()> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let material = ca::ensure_ca(&dir)?;
-    #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{}", material.cert_path.to_string_lossy()))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .args(["-R", &material.cert_path.to_string_lossy().into_owned()])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    run_blocking_ca_operation("定位 CA 证书", move || {
+        let material = ca::ensure_ca(&dir)?;
+        #[cfg(target_os = "windows")]
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", material.cert_path.to_string_lossy()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .args(["-R", &material.cert_path.to_string_lossy().into_owned()])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
 }
 
 // ---------- 运行环境（关于页诊断） ----------
