@@ -1125,8 +1125,20 @@ mod tests {
             ctx.cookies(Target::ResponseCookie).as_ptr()
         );
 
-        // 复用不改变判定结果
-        let report = evaluate(&view);
+        // 本测试验证解析复用和命中语义，不验证 50ms 生产预算。全套测试并行
+        // 运行时线程可能被调度挂起超过该预算，因此显式使用宽裕上限，避免把
+        // 主机负载误报成规则回归；预算停止语义由专门的测试覆盖。
+        let PackStatus::Loaded(pack) = builtin_pack() else {
+            panic!("builtin pack disabled")
+        };
+        let report = evaluate_pack_with_limits(
+            pack,
+            &view,
+            EvaluationLimits {
+                max_duration: Duration::from_secs(30),
+            },
+        );
+        assert!(!report.timed_out);
         assert!(hit(&report, "sql-error-leak").is_some());
         assert!(hit(&report, "internal-ip-leak").is_some());
     }

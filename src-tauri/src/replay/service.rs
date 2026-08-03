@@ -3,6 +3,8 @@ use super::model::{
     ReplayRunDiff, ReplayRunPage, ReplayRunSummary, ReplayScopeSnapshot, ReplaySession,
     ReplayValueDiff, TlsPolicy,
 };
+use crate::assessment::model::AssessmentContractPreview;
+use crate::assessment::policy::{AssessmentPolicy, AssessmentRequestCandidate, MAX_RESPONSE_BYTES};
 use crate::authorization::{load_project_policy, AuthorizationError, ScopeMatchKind};
 use crate::proxy::body_capture::{
     capture_complete_bytes, capture_complete_wire_bytes, BodyMetadata, CaptureHandle, CapturedBody,
@@ -14,10 +16,11 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 
 const MAX_SESSION_TITLE_CHARS: usize = 120;
 const MAX_STORED_URL_BYTES: usize = 8192;
@@ -50,6 +53,20 @@ static ACTIVE_ATTEMPT_TOKENS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new()
 struct SessionContext {
     project_id: i64,
     tls_policy: TlsPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssessmentReplayRequest {
+    pub method: String,
+    pub url: String,
+    /// Headers actually sent on the wire. Values in this vector are never persisted.
+    pub live_headers: Vec<ReplayHeader>,
+    /// Redacted headers persisted in attempt/run snapshots.
+    pub audit_headers: Vec<ReplayHeader>,
+    /// Non-secret profile IDs and secret revisions included in the request hash.
+    pub request_hash_context: String,
+    /// Per-request read ceiling, additionally bounded by the hard 1 MiB limit.
+    pub max_response_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -140,7 +157,7 @@ pub fn list_sessions(conn: &Connection, project_id: i64) -> Result<Vec<ReplaySes
                     (SELECT MAX(r.created_at) FROM replay_runs r WHERE r.session_id = s.id),
                     s.created_at, s.updated_at
              FROM replay_sessions s
-             WHERE s.project_id = ?1
+             WHERE s.project_id = ?1 AND s.owner_kind = 'manual'
              ORDER BY s.created_at, s.id",
         )
         .map_err(|error| error.to_string())?;
@@ -192,7 +209,8 @@ pub fn create_session(
     }
     transaction
         .execute(
-            "UPDATE replay_sessions SET is_selected = 0 WHERE project_id = ?1",
+            "UPDATE replay_sessions SET is_selected = 0
+             WHERE project_id = ?1 AND owner_kind = 'manual'",
             [project_id],
         )
         .map_err(|error| error.to_string())?;
@@ -221,7 +239,7 @@ pub fn update_session(
             "UPDATE replay_sessions
              SET title = ?1, tls_policy = ?2,
                  updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')
-             WHERE id = ?3",
+             WHERE id = ?3 AND owner_kind = 'manual'",
             rusqlite::params![title, tls_policy.as_str(), session_id],
         )
         .map_err(|error| error.to_string())?;
@@ -234,7 +252,8 @@ pub fn update_session(
 pub fn select_session(conn: &mut Connection, session_id: i64) -> Result<ReplaySession, String> {
     let project_id: i64 = conn
         .query_row(
-            "SELECT project_id FROM replay_sessions WHERE id = ?1",
+            "SELECT project_id FROM replay_sessions
+             WHERE id = ?1 AND owner_kind = 'manual'",
             [session_id],
             |row| row.get(0),
         )
@@ -244,7 +263,8 @@ pub fn select_session(conn: &mut Connection, session_id: i64) -> Result<ReplaySe
         .map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "UPDATE replay_sessions SET is_selected = 0 WHERE project_id = ?1",
+            "UPDATE replay_sessions SET is_selected = 0
+             WHERE project_id = ?1 AND owner_kind = 'manual'",
             [project_id],
         )
         .map_err(|error| error.to_string())?;
@@ -253,7 +273,7 @@ pub fn select_session(conn: &mut Connection, session_id: i64) -> Result<ReplaySe
             "UPDATE replay_sessions
              SET is_selected = 1,
                  updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime')
-             WHERE id = ?1",
+             WHERE id = ?1 AND owner_kind = 'manual'",
             [session_id],
         )
         .map_err(|error| error.to_string())?;
@@ -268,7 +288,8 @@ pub fn delete_session(conn: &mut Connection, session_id: i64) -> Result<(), Stri
     recover_interrupted_attempts(conn)?;
     let (project_id, selected): (i64, bool) = conn
         .query_row(
-            "SELECT project_id, is_selected FROM replay_sessions WHERE id = ?1",
+            "SELECT project_id, is_selected FROM replay_sessions
+             WHERE id = ?1 AND owner_kind = 'manual'",
             [session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -283,7 +304,7 @@ pub fn delete_session(conn: &mut Connection, session_id: i64) -> Result<(), Stri
         let replacement: Option<i64> = transaction
             .query_row(
                 "SELECT id FROM replay_sessions
-                 WHERE project_id = ?1
+                 WHERE project_id = ?1 AND owner_kind = 'manual'
                  ORDER BY updated_at DESC, id DESC LIMIT 1",
                 [project_id],
                 |row| row.get(0),
@@ -370,6 +391,334 @@ pub fn compare_runs(
     let left = load_project_run(conn, project_id, left_run_id)?;
     let right = load_project_run(conn, project_id, right_run_id)?;
     Ok(build_diff(left, right))
+}
+
+/// Create a hidden Repeater session owned by one immutable Assessment run.
+/// It is intentionally not selected and cannot be opened by manual APIs.
+pub fn create_assessment_session(
+    conn: &Connection,
+    project_id: i64,
+    assessment_run_id: i64,
+    tls_policy: TlsPolicy,
+) -> Result<i64, String> {
+    let run_matches: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM assessment_runs
+                 WHERE id = ?1 AND project_id = ?2
+             )",
+            rusqlite::params![assessment_run_id, project_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !run_matches {
+        return Err("Assessment run 不存在或不属于项目".into());
+    }
+    conn.execute(
+        "INSERT INTO replay_sessions(
+             project_id, title, tls_policy, is_selected, owner_kind, assessment_run_id
+         ) VALUES(?1, ?2, ?3, 0, 'assessment', ?4)",
+        rusqlite::params![
+            project_id,
+            format!("AI Assessment #{assessment_run_id}"),
+            tls_policy.as_str(),
+            assessment_run_id
+        ],
+    )
+    .map_err(|error| format!("创建 Assessment Replay 会话失败: {error}"))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Assessment-only transport. The request is rechecked by both AssessmentPolicy
+/// and ScopePolicy, persists an attempt before polling the network future, and
+/// stores only audit headers. Cancellation produces a final immutable run.
+pub async fn execute_assessment_request(
+    pool: Pool,
+    project_id: i64,
+    assessment_run_id: i64,
+    session_id: i64,
+    request: AssessmentReplayRequest,
+    mut cancel: watch::Receiver<bool>,
+) -> Result<ReplayRun, String> {
+    let (context, preview) = {
+        let conn = pool.get().map_err(|error| error.to_string())?;
+        load_assessment_session_context(&conn, project_id, assessment_run_id, session_id)?
+    };
+    validate_assessment_header_views(&request.live_headers, &request.audit_headers)?;
+    if request.max_response_bytes == 0 || request.max_response_bytes > MAX_RESPONSE_BYTES {
+        return Err("Assessment 响应读取上限无效".into());
+    }
+
+    let scope = {
+        let conn = pool.get().map_err(|error| error.to_string())?;
+        load_project_policy(&conn, project_id).map_err(|error| error.to_string())?
+    };
+    let assessment_policy = AssessmentPolicy::new(&preview.exact_origin, &preview.excluded_paths)
+        .map_err(|error| error.to_string())?;
+    let authorized = assessment_policy
+        .authorize(
+            &scope,
+            AssessmentRequestCandidate {
+                method: request.method.clone(),
+                url: request.url.clone(),
+                headers: request.audit_headers.clone(),
+                has_body: false,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let scope_decision = allowed_scope_snapshot(&authorized.scope_decision);
+    let stored_method = bounded_non_empty(&authorized.method, MAX_STORED_METHOD_BYTES, "<invalid>");
+    let stored_url = bounded_non_empty(
+        authorized.url.as_str(),
+        MAX_STORED_URL_BYTES,
+        "<invalid-url>",
+    );
+    let audit_input = ReplayRequestInput {
+        method: stored_method.clone(),
+        url: stored_url.clone(),
+        headers: request.audit_headers.clone(),
+        body_text: None,
+        body_base64: None,
+    };
+    let request_input = request_input_snapshot(&audit_input)?;
+    let initial_hash = hash_request_input(
+        &stored_method,
+        &stored_url,
+        &request.audit_headers,
+        None,
+        None,
+        context.tls_policy,
+    )?;
+    let mut prepared = prepare_request(
+        stored_method,
+        stored_url,
+        request.audit_headers,
+        None,
+        None,
+        request_input,
+        initial_hash,
+    )
+    .map_err(|failure| failure.error_message)?;
+    let (live_header_map, _) = validated_header_map(&request.live_headers)
+        .map_err(|_| "Assessment 线上 Header 无效".to_string())?;
+    prepared.header_map = live_header_map;
+    prepared.request_hash = hash_assessment_effective_request(
+        &prepared.method,
+        &prepared.url,
+        &prepared.headers,
+        context.tls_policy,
+        &request.request_hash_context,
+    )?;
+
+    let http_method = reqwest::Method::from_bytes(prepared.method.as_bytes())
+        .map_err(|_| "Assessment HTTP 方法无效".to_string())?;
+    let client = assessment_http_client(context.tls_policy)?;
+    let mut outgoing = client.request(http_method, authorized.url);
+    for (name, value) in &prepared.header_map {
+        outgoing = outgoing.header(name, value);
+    }
+
+    let known_secrets = assessment_header_secrets(&request.live_headers, &prepared.headers);
+    let (attempt_id, _attempt_guard) =
+        persist_attempt(&pool, &context, session_id, &prepared, &scope_decision)?;
+    if *cancel.borrow() {
+        return persist_request_failure(
+            &pool,
+            &context,
+            session_id,
+            Some(attempt_id),
+            prepared,
+            scope_decision,
+            "ASSESSMENT_CANCELLED",
+            "用户在请求发送前取消了 Assessment",
+            0,
+        );
+    }
+
+    let started = Instant::now();
+    let send_result = tokio::select! {
+        biased;
+        _ = cancel.changed() => None,
+        result = outgoing.send() => Some(result),
+    };
+    let mut response = match send_result {
+        None => {
+            return persist_request_failure(
+                &pool,
+                &context,
+                session_id,
+                Some(attempt_id),
+                prepared,
+                scope_decision,
+                "ASSESSMENT_CANCELLED",
+                "用户取消了正在等待的 Assessment 请求",
+                elapsed_millis(started),
+            );
+        }
+        Some(Err(error)) => {
+            let (code, message) = safe_reqwest_error(&error);
+            return persist_request_failure(
+                &pool,
+                &context,
+                session_id,
+                Some(attempt_id),
+                prepared,
+                scope_decision,
+                code,
+                &message,
+                elapsed_millis(started),
+            );
+        }
+        Some(Ok(response)) => response,
+    };
+
+    let status = response.status();
+    let response_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| ReplayHeader {
+            name: name.as_str().to_string(),
+            value: redact_known_text(&header_value_for_storage(value), &known_secrets),
+        })
+        .collect::<Vec<_>>();
+    let response_metadata = BodyMetadata::from_headers(response.headers());
+    let response_capture = CaptureHandle::default();
+    let mut incomplete_code: Option<&'static str> = None;
+    let mut observed = 0_usize;
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                incomplete_code = Some("ASSESSMENT_CANCELLED");
+                None
+            },
+            chunk = response.chunk() => Some(chunk),
+        };
+        match next {
+            None => {
+                response_capture.mark_error();
+                break;
+            }
+            Some(Ok(Some(chunk))) => {
+                let remaining = (request.max_response_bytes as usize).saturating_sub(observed);
+                if chunk.len() > remaining {
+                    if remaining > 0 {
+                        response_capture.observe_chunk(&chunk[..remaining]);
+                    }
+                    incomplete_code = Some("RESPONSE_LIMIT");
+                    response_capture.mark_error();
+                    break;
+                }
+                response_capture.observe_chunk(&chunk);
+                observed += chunk.len();
+            }
+            Some(Ok(None)) => {
+                response_capture.mark_complete();
+                break;
+            }
+            Some(Err(_)) => {
+                incomplete_code = Some("RESPONSE_STREAM");
+                response_capture.mark_error();
+                break;
+            }
+        }
+    }
+    let mut captured_response = response_capture.finish(&response_metadata);
+    // Keep exact-response comparisons meaningful without persisting the raw body.
+    // A target may reflect profile A/B credentials; hashing only the redacted
+    // snapshot would make two different responses look identical.
+    let raw_complete_body_hash = incomplete_code
+        .is_none()
+        .then(|| sha256(&captured_response.bytes));
+    captured_response.bytes = redact_known_bytes(&captured_response.bytes, &known_secrets);
+    captured_response.captured_size =
+        i64::try_from(captured_response.bytes.len()).unwrap_or(i64::MAX);
+    let response_headers_json =
+        serde_json::to_string(&response_headers).map_err(|error| error.to_string())?;
+    let mut response_hasher = Sha256::new();
+    response_hasher.update(status.as_u16().to_be_bytes());
+    response_hasher.update(response_headers_json.as_bytes());
+    response_hasher.update(&captured_response.bytes);
+    let response_hash = format!("{:x}", response_hasher.finalize());
+    let resp_body_hash = raw_complete_body_hash;
+    let error_message = match incomplete_code {
+        Some("ASSESSMENT_CANCELLED") => Some("用户取消后停止读取响应；该响应不完整".to_string()),
+        Some("RESPONSE_LIMIT") => {
+            Some("响应超过 1 MiB，已立即停止读取；该响应不能用于自动确认".to_string())
+        }
+        Some("RESPONSE_STREAM") => Some("读取响应时连接中断；该响应不能用于自动确认".to_string()),
+        _ => None,
+    };
+
+    persist_run(
+        &pool,
+        PersistRun {
+            attempt_id: Some(attempt_id),
+            session_id,
+            project_id: context.project_id,
+            method: prepared.method,
+            url: prepared.url,
+            request_headers: prepared.headers,
+            request_wire_body: None,
+            req_wire_captured_size: 0,
+            req_wire_truncated: false,
+            request_input: prepared.input,
+            request_body: None,
+            req_wire_size: 0,
+            req_captured_size: 0,
+            req_truncated: false,
+            req_decode_status: "empty".to_string(),
+            tls_policy: context.tls_policy,
+            scope_decision,
+            outcome: if incomplete_code.is_some() {
+                "response_incomplete"
+            } else {
+                "completed"
+            },
+            error_code: incomplete_code.map(str::to_string),
+            error_message,
+            status: Some(status.as_u16()),
+            status_text: status.canonical_reason().unwrap_or("").to_string(),
+            response_headers,
+            response_body: bytes_or_none(captured_response.bytes),
+            resp_wire_size: captured_response.wire_size,
+            resp_captured_size: captured_response.captured_size,
+            resp_truncated: captured_response.truncated,
+            resp_decode_status: captured_response.decode_status.to_string(),
+            duration_ms: elapsed_millis(started),
+            request_hash: prepared.request_hash,
+            req_body_hash: prepared.body_hash,
+            response_hash: Some(response_hash),
+            resp_body_hash,
+        },
+    )
+}
+
+/// Assessment 专用 HTTP 客户端按 TLS 策略缓存复用。Client 是廉价 Arc，
+/// 复用可避免每个目标请求重新建连与握手；策略配置（跟随重定向、禁用
+/// 压缩、30s 超时）在运行期间固定。
+fn assessment_http_client(tls_policy: TlsPolicy) -> Result<reqwest::Client, String> {
+    static CLIENTS: OnceLock<std::sync::Mutex<HashMap<TlsPolicy, reqwest::Client>>> =
+        OnceLock::new();
+    let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut clients = clients
+        .lock()
+        .map_err(|_| "Assessment HTTP 客户端缓存已损坏".to_string())?;
+    if let Some(client) = clients.get(&tls_policy) {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(tls_policy == TlsPolicy::IgnoreInvalid)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .build()
+        .map_err(|_| "Assessment HTTP 客户端初始化失败".to_string())?;
+    clients.insert(tls_policy, client.clone());
+    Ok(client)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1290,7 +1639,7 @@ fn load_session(conn: &Connection, session_id: i64) -> Result<ReplaySession, Str
                 (SELECT COUNT(*) FROM replay_runs r WHERE r.session_id = s.id),
                 (SELECT MAX(r.created_at) FROM replay_runs r WHERE r.session_id = s.id),
                 s.created_at, s.updated_at
-         FROM replay_sessions s WHERE s.id = ?1",
+         FROM replay_sessions s WHERE s.id = ?1 AND s.owner_kind = 'manual'",
         [session_id],
         |row| {
             Ok(ReplaySession {
@@ -1317,7 +1666,8 @@ fn load_session_context(
 ) -> Result<SessionContext, String> {
     let (actual_project_id, tls_policy): (i64, String) = conn
         .query_row(
-            "SELECT project_id, tls_policy FROM replay_sessions WHERE id = ?1",
+            "SELECT project_id, tls_policy FROM replay_sessions
+             WHERE id = ?1 AND owner_kind = 'manual'",
             [session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1331,11 +1681,51 @@ fn load_session_context(
     })
 }
 
+fn load_assessment_session_context(
+    conn: &Connection,
+    project_id: i64,
+    assessment_run_id: i64,
+    session_id: i64,
+) -> Result<(SessionContext, AssessmentContractPreview), String> {
+    let row: Option<(i64, String, String, String)> = conn
+        .query_row(
+            "SELECT s.project_id, s.tls_policy, ar.contract_json, ar.status
+             FROM replay_sessions s
+             JOIN assessment_runs ar ON ar.id = s.assessment_run_id
+             WHERE s.id = ?1
+               AND s.owner_kind = 'assessment'
+               AND s.assessment_run_id = ?2
+               AND ar.project_id = ?3",
+            rusqlite::params![session_id, assessment_run_id, project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let (actual_project_id, tls_policy, contract_json, status) =
+        row.ok_or_else(|| "Assessment Replay 会话不存在或运行上下文不匹配".to_string())?;
+    if !matches!(
+        status.as_str(),
+        "discovering" | "planning" | "executing" | "verifying"
+    ) {
+        return Err("Assessment run 当前状态不允许目标请求".into());
+    }
+    let preview: AssessmentContractPreview = serde_json::from_str(&contract_json)
+        .map_err(|_| "Assessment 运行契约快照已损坏".to_string())?;
+    Ok((
+        SessionContext {
+            project_id: actual_project_id,
+            tls_policy: TlsPolicy::parse(&tls_policy)?,
+        },
+        preview,
+    ))
+}
+
 fn load_project_run(conn: &Connection, project_id: i64, run_id: i64) -> Result<ReplayRun, String> {
     conn.query_row(
         &format!(
             "SELECT {RUN_DETAIL_SELECT} FROM replay_runs r
-             WHERE r.id = ?1 AND r.project_id = ?2"
+             JOIN replay_sessions s ON s.id = r.session_id
+             WHERE r.id = ?1 AND r.project_id = ?2 AND s.owner_kind = 'manual'"
         ),
         rusqlite::params![run_id, project_id],
         replay_run_from_row,
@@ -1359,7 +1749,9 @@ fn ensure_project_exists(conn: &Connection, project_id: i64) -> Result<(), Strin
 fn ensure_session_exists(conn: &Connection, session_id: i64) -> Result<(), String> {
     let exists: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM replay_sessions WHERE id = ?1)",
+            "SELECT EXISTS(
+                 SELECT 1 FROM replay_sessions WHERE id = ?1 AND owner_kind = 'manual'
+             )",
             [session_id],
             |row| row.get(0),
         )
@@ -1585,6 +1977,120 @@ fn hash_effective_request(
     }))
     .map_err(|error| error.to_string())?;
     Ok(sha256(&canonical))
+}
+
+fn hash_assessment_effective_request(
+    method: &str,
+    url: &str,
+    audit_headers: &[ReplayHeader],
+    tls_policy: TlsPolicy,
+    request_hash_context: &str,
+) -> Result<String, String> {
+    let canonical = serde_json::to_vec(&json!({
+        "mode": "assessment",
+        "method": method,
+        "url": url,
+        "headers": audit_headers,
+        "body_sha256": sha256(&[]),
+        "body_wire_size": 0,
+        "tls_policy": tls_policy.as_str(),
+        "profile_revision_context": request_hash_context
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(sha256(&canonical))
+}
+
+fn validate_assessment_header_views(
+    live_headers: &[ReplayHeader],
+    audit_headers: &[ReplayHeader],
+) -> Result<(), String> {
+    if live_headers.len() != audit_headers.len() || live_headers.len() > 64 {
+        return Err("Assessment 线上 Header 与审计 Header 结构不一致".into());
+    }
+    for (live, audit) in live_headers.iter().zip(audit_headers) {
+        if !live.name.eq_ignore_ascii_case(&audit.name)
+            || live.name.contains(['\r', '\n'])
+            || live.value.contains(['\r', '\n'])
+            || audit.name.contains(['\r', '\n'])
+            || audit.value.contains(['\r', '\n'])
+        {
+            return Err("Assessment 线上 Header 与审计 Header 结构不一致".into());
+        }
+        if is_auth_header(&live.name) {
+            if !is_auth_profile_placeholder(&audit.value) {
+                return Err("Assessment 鉴权 Header 必须使用 profile 占位符审计".into());
+            }
+        } else if live.value != audit.value {
+            return Err("非鉴权 Header 的线上值与审计值必须完全一致".into());
+        }
+    }
+    Ok(())
+}
+
+fn is_auth_header(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "authorization" | "cookie" | "x-api-key" | "x-auth-token"
+    )
+}
+
+fn is_auth_profile_placeholder(value: &str) -> bool {
+    value
+        .strip_prefix("[AUTH_PROFILE:")
+        .and_then(|value| value.strip_suffix(']'))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn assessment_header_secrets(
+    live_headers: &[ReplayHeader],
+    audit_headers: &[ReplayHeader],
+) -> Vec<String> {
+    let mut values = live_headers
+        .iter()
+        .zip(audit_headers)
+        .filter(|(live, _)| is_auth_header(&live.name))
+        .flat_map(|(live, _)| {
+            crate::assessment::service::auth_secret_redaction_values(&live.name, &live.value)
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
+fn redact_known_text(value: &str, known_secrets: &[String]) -> String {
+    let references = known_secrets.iter().map(String::as_str).collect::<Vec<_>>();
+    crate::secrets::redact_sensitive(value, &references)
+}
+
+fn redact_known_bytes(value: &[u8], known_secrets: &[String]) -> Vec<u8> {
+    let mut redacted = value.to_vec();
+    for secret in known_secrets {
+        if !secret.is_empty() {
+            redacted = replace_bytes(&redacted, secret.as_bytes(), b"[REDACTED]");
+        }
+    }
+    redacted
+}
+
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return haystack.to_vec();
+    }
+    let mut output = Vec::with_capacity(haystack.len());
+    let mut start = 0;
+    while let Some(offset) = haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let position = start + offset;
+        output.extend_from_slice(&haystack[start..position]);
+        output.extend_from_slice(replacement);
+        start = position + needle.len();
+    }
+    output.extend_from_slice(&haystack[start..]);
+    output
 }
 
 fn safe_reqwest_error(error: &reqwest::Error) -> (&'static str, String) {
@@ -1820,7 +2326,9 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assessment::model::AssessmentContractInput;
     use crate::evidence::{self, EvidenceSourceType};
+    use crate::secrets::MemorySecretStore;
     use crate::storage::db::open_pool;
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write as _;
@@ -1828,6 +2336,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
     use tokio::time::{timeout, Duration};
 
     fn test_pool(dir: &TempDir) -> Pool {
@@ -1854,6 +2363,61 @@ mod tests {
             TlsPolicy::IgnoreInvalid,
         )
         .unwrap()
+    }
+
+    fn create_test_assessment(pool: &Pool, project_id: i64, start_url: &str) -> (i64, i64) {
+        let store = MemorySecretStore::default();
+        let mut conn = pool.get().unwrap();
+        let preview = crate::assessment::service::preview_contract(
+            &conn,
+            &store,
+            &AssessmentContractInput {
+                project_id,
+                start_url: start_url.into(),
+                excluded_paths: Vec::new(),
+                tls_policy: "strict".into(),
+                request_budget: 120,
+                requests_per_second: 1.0,
+                identity_a_profile_id: None,
+                identity_b_profile_id: None,
+                resource_ownership: Vec::new(),
+                include_recent_traffic: false,
+                provider_id: "provider".into(),
+                model: "model".into(),
+                max_rounds: 3,
+                written_authorization_confirmed: true,
+            },
+        )
+        .unwrap();
+        let run = crate::assessment::service::create_run(&mut conn, &preview).unwrap();
+        crate::assessment::service::transition_run(
+            &mut conn,
+            project_id,
+            run.id,
+            crate::assessment::model::AssessmentStatus::Discovering,
+            None,
+        )
+        .unwrap();
+        let session_id =
+            create_assessment_session(&conn, project_id, run.id, TlsPolicy::Strict).unwrap();
+        (run.id, session_id)
+    }
+
+    fn assessment_request(
+        url: String,
+        live_headers: Vec<ReplayHeader>,
+        audit_headers: Vec<ReplayHeader>,
+        context: &str,
+        max_response_bytes: u64,
+    ) -> AssessmentReplayRequest {
+        AssessmentReplayRequest {
+            method: "GET".into(),
+            url,
+            live_headers,
+            audit_headers,
+            request_hash_context: context.into(),
+            max_response_bytes,
+        }
     }
 
     fn empty_input_snapshot() -> ReplayRequestInputSnapshot {
@@ -2014,6 +2578,288 @@ mod tests {
             list_runs(&conn, session.id, None, None).unwrap().runs.len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn assessment_policy_rejection_never_creates_a_socket_or_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = TempDir::new().unwrap();
+        let pool = test_pool(&dir);
+        let project_id = insert_project(&pool, &["127.0.0.1".to_string()]);
+        let (run_id, session_id) =
+            create_test_assessment(&pool, project_id, &format!("http://{address}/safe"));
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let error = execute_assessment_request(
+            pool.clone(),
+            project_id,
+            run_id,
+            session_id,
+            assessment_request(
+                format!("http://{address}/account/%2564elete"),
+                Vec::new(),
+                Vec::new(),
+                "anonymous:policy-test",
+                1024,
+            ),
+            cancel,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("DESTRUCTIVE_PATH"));
+        assert!(
+            timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "AssessmentPolicy 拒绝必须发生在 socket 创建之前"
+        );
+        let conn = pool.get().unwrap();
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM replay_attempts WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn assessment_uses_live_credentials_but_persists_only_placeholders() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let first_secret = "Bearer credential-alpha-123456";
+        let second_secret = "Bearer credential-beta-654321";
+        let expected = vec![first_secret.to_string(), second_secret.to_string()];
+        let server = tokio::spawn(async move {
+            let mut observed = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request);
+                let authorization = request_text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("authorization: ")
+                            .or_else(|| line.strip_prefix("Authorization: "))
+                    })
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                observed.push(authorization.clone());
+                let bare = authorization.split_once(' ').unwrap().1;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bare);
+                let body = format!("full={authorization}; bare={bare}; encoded={encoded}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Reflected: {bare}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            observed
+        });
+
+        let dir = TempDir::new().unwrap();
+        let pool = test_pool(&dir);
+        let project_id = insert_project(&pool, &["127.0.0.1".to_string()]);
+        let url = format!("http://{address}/credential-reflection");
+        let (run_id, session_id) = create_test_assessment(&pool, project_id, &url);
+        let audit = vec![ReplayHeader {
+            name: "Authorization".into(),
+            value: "[AUTH_PROFILE:7]".into(),
+        }];
+        let mut runs = Vec::new();
+        for secret in [first_secret, second_secret] {
+            let (_cancel_tx, cancel) = watch::channel(false);
+            runs.push(
+                execute_assessment_request(
+                    pool.clone(),
+                    project_id,
+                    run_id,
+                    session_id,
+                    assessment_request(
+                        url.clone(),
+                        vec![ReplayHeader {
+                            name: "Authorization".into(),
+                            value: secret.into(),
+                        }],
+                        audit.clone(),
+                        "profile:7:revision:1",
+                        4096,
+                    ),
+                    cancel,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        assert_eq!(server.await.unwrap(), expected);
+        assert_eq!(runs[0].request_hash, runs[1].request_hash);
+        assert_ne!(
+            runs[0].resp_body_hash, runs[1].resp_body_hash,
+            "raw response hashes must not collapse after credential redaction"
+        );
+        for (run, secret) in runs.iter().zip([first_secret, second_secret]) {
+            let serialized = serde_json::to_string(run).unwrap();
+            let bare = secret.split_once(' ').unwrap().1;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bare);
+            assert!(!serialized.contains(secret));
+            assert!(!serialized.contains(bare));
+            assert!(!serialized.contains(&encoded));
+            assert!(serialized.contains("[AUTH_PROFILE:7]"));
+            assert!(serialized.contains("[REDACTED]"));
+        }
+        let conn = pool.get().unwrap();
+        let persisted: String = conn
+            .query_row(
+                "SELECT group_concat(
+                     request_headers || ' ' || response_headers || ' ' ||
+                     COALESCE(CAST(response_body AS TEXT), '') || ' ' ||
+                     COALESCE(error_message, '') || ' ' || request_hash,
+                     ' '
+                 ) FROM replay_runs WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        for secret in [first_secret, second_secret] {
+            assert!(!persisted.contains(secret));
+            assert!(!persisted.contains(secret.split_once(' ').unwrap().1));
+        }
+    }
+
+    #[tokio::test]
+    async fn assessment_does_not_follow_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (follow_tx, follow_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{address}/must-not-follow\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let followed = timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_ok();
+            let _ = follow_tx.send(followed);
+        });
+        let dir = TempDir::new().unwrap();
+        let pool = test_pool(&dir);
+        let project_id = insert_project(&pool, &["127.0.0.1".to_string()]);
+        let url = format!("http://{address}/redirect");
+        let (run_id, session_id) = create_test_assessment(&pool, project_id, &url);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let run = execute_assessment_request(
+            pool,
+            project_id,
+            run_id,
+            session_id,
+            assessment_request(url, Vec::new(), Vec::new(), "anonymous", 1024),
+            cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.status, Some(302));
+        assert!(!follow_rx.await.unwrap());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assessment_response_limit_and_cancellation_are_audited_as_incomplete() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = vec![b'x'; 16 * 1024];
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            let _ = socket.write_all(&body).await;
+        });
+        let dir = TempDir::new().unwrap();
+        let pool = test_pool(&dir);
+        let project_id = insert_project(&pool, &["127.0.0.1".to_string()]);
+        let url = format!("http://{address}/large");
+        let (run_id, session_id) = create_test_assessment(&pool, project_id, &url);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let limited = execute_assessment_request(
+            pool.clone(),
+            project_id,
+            run_id,
+            session_id,
+            assessment_request(url, Vec::new(), Vec::new(), "anonymous", 1024),
+            cancel,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(limited.outcome, "response_incomplete");
+        assert_eq!(limited.error_code.as_deref(), Some("RESPONSE_LIMIT"));
+        assert!(limited.resp_captured_size <= 1024);
+        assert!(limited.resp_body_hash.is_none());
+
+        let waiting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let waiting_address = waiting_listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let waiting_server = tokio::spawn(async move {
+            let (mut socket, _) = waiting_listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            let _ = accepted_tx.send(());
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        // A new run is required because the persisted exact origin is immutable.
+        {
+            let mut conn = pool.get().unwrap();
+            crate::assessment::service::transition_run(
+                &mut conn,
+                project_id,
+                run_id,
+                crate::assessment::model::AssessmentStatus::Cancelled,
+                Some("fixture_complete"),
+            )
+            .unwrap();
+        }
+        let waiting_url = format!("http://{waiting_address}/wait");
+        let (waiting_run_id, waiting_session_id) =
+            create_test_assessment(&pool, project_id, &waiting_url);
+        let (cancel_tx, cancel) = watch::channel(false);
+        let request_task = tokio::spawn(execute_assessment_request(
+            pool.clone(),
+            project_id,
+            waiting_run_id,
+            waiting_session_id,
+            assessment_request(waiting_url, Vec::new(), Vec::new(), "anonymous", 1024),
+            cancel,
+        ));
+        accepted_rx.await.unwrap();
+        cancel_tx.send(true).unwrap();
+        let cancelled = request_task.await.unwrap().unwrap();
+        waiting_server.abort();
+        assert_eq!(cancelled.outcome, "request_failed");
+        assert_eq!(
+            cancelled.error_code.as_deref(),
+            Some("ASSESSMENT_CANCELLED")
+        );
+        assert!(cancelled.attempt_id.is_some());
     }
 
     #[tokio::test]

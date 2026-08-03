@@ -70,6 +70,8 @@ pub struct Finding {
     pub analysis_run_id: Option<i64>,
     /// 'ai' | 'rule'
     pub source: String,
+    /// 'ai' | 'passive_rule' | 'safe_verifier'
+    pub producer: String,
     pub title: String,
     pub vuln_type: String,
     /// Version-pinned references; titles are derived from validated offline packs.
@@ -99,7 +101,7 @@ impl Finding {
     pub const COLUMNS: &'static str =
         "id, project_id, traffic_id, source, title, vuln_type, standard_references, \
          severity, confidence, reasoning, verify_steps, status, fingerprint, \
-         occurrences, last_seen_at, created_at, analysis_run_id, analyst_notes, updated_at";
+         occurrences, last_seen_at, created_at, analysis_run_id, analyst_notes, updated_at, producer";
 
     pub fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         let raw_references: String = row.get(6)?;
@@ -117,6 +119,7 @@ impl Finding {
             traffic_id: row.get(2)?,
             analysis_run_id: row.get(16)?,
             source: row.get(3)?,
+            producer: row.get(19)?,
             title: row.get(4)?,
             vuln_type: row.get(5)?,
             standard_references,

@@ -1,4 +1,4 @@
-//! Evidence-backed report v2.
+//! Evidence-backed report v3.
 //!
 //! The report is built once as a deterministic structured document and then
 //! rendered to Markdown (primary) and JSON (machine-readable backup). The
@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub const REPORT_SCHEMA_VERSION: u32 = 2;
+pub const REPORT_SCHEMA_VERSION: u32 = 3;
 const RAW_FIELD_MAX_BYTES: usize = 8 * 1024;
 const RAW_HEADER_MAX_BYTES: usize = 4 * 1024;
 
@@ -55,7 +55,17 @@ pub struct ReportDocument {
     pub summary: ReportSummary,
     pub timeline: Vec<ReportTimelineEntry>,
     pub confirmed_findings: Vec<ReportFinding>,
+    pub suspected_findings: Vec<ReportFinding>,
+    pub not_observed_checks: Vec<ReportAssessmentCheckOutcome>,
+    pub coverage_gaps: Vec<ReportCoverageGap>,
+    pub assessment_run: Option<ReportAssessmentRun>,
+    pub legacy_plan_summary: Option<ReportTestPlan>,
+    /// Kept in the Rust model for one release so existing internal callers and
+    /// deterministic regression fixtures can migrate without treating proposal
+    /// nodes as execution. It is intentionally absent from report v3 JSON.
+    #[serde(skip_serializing)]
     pub pending_appendix: Vec<ReportFinding>,
+    #[serde(skip_serializing)]
     pub test_plan: ReportTestPlan,
     pub provenance: ReportProvenance,
 }
@@ -101,12 +111,107 @@ pub struct ReportToolVersion {
 pub struct ReportSummary {
     pub traffic_count: i64,
     pub confirmed_findings: usize,
+    #[serde(skip_serializing)]
     pub pending_findings_in_appendix: usize,
     pub rejected_findings_omitted: usize,
     pub confirmed_risk_distribution: Vec<RiskCount>,
     pub accepted_supporting_evidence: usize,
+    #[serde(skip_serializing)]
     pub test_plan_terminal: usize,
+    #[serde(skip_serializing)]
     pub test_plan_total: usize,
+    pub suspected_findings: usize,
+    pub not_observed_checks: usize,
+    pub coverage_gaps: usize,
+    pub assessment_run_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReportAssessmentRun {
+    pub id: i64,
+    pub status: String,
+    pub start_url: String,
+    pub exact_origin: String,
+    pub contract_hash: String,
+    pub template_registry_hash: String,
+    pub provider_id: String,
+    pub model: String,
+    pub tls_policy: String,
+    pub request_budget: i64,
+    pub request_count: i64,
+    pub discovery_budget: i64,
+    pub requests_per_second: f64,
+    pub response_byte_budget: i64,
+    pub response_bytes_read: i64,
+    pub max_rounds: i64,
+    pub completed_rounds: i64,
+    pub identity_labels: Vec<String>,
+    pub excluded_paths: Vec<String>,
+    pub builtin_excluded_segments: Vec<String>,
+    pub data_disclosure: Vec<String>,
+    pub stop_reason: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub rounds: Vec<ReportAssessmentRound>,
+    pub timeline: Vec<ReportAssessmentEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReportAssessmentRound {
+    pub round_number: i64,
+    pub status: String,
+    pub analysis_run_id: Option<i64>,
+    pub input_hash: String,
+    pub output_hash: Option<String>,
+    pub selected_checks: i64,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReportAssessmentEvent {
+    pub event_type: String,
+    pub check_id: Option<i64>,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub details: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReportAssessmentCheckOutcome {
+    pub check_id: i64,
+    pub template_id: String,
+    pub template_version: String,
+    pub endpoint_id: String,
+    pub path: String,
+    pub parameter_name: Option<String>,
+    pub identity_mode: String,
+    pub verifier_id: String,
+    pub verifier_version: String,
+    pub verdict: String,
+    pub observations: Value,
+    pub content_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReportCoverageGap {
+    pub check_id: Option<i64>,
+    pub category: String,
+    pub reason_code: String,
+    pub detail: String,
+    pub template_id: Option<String>,
+    pub verdict: Option<String>,
+    pub observations: Option<Value>,
+    pub created_at: String,
+}
+
+struct AssessmentReportContext {
+    run: Option<ReportAssessmentRun>,
+    not_observed_checks: Vec<ReportAssessmentCheckOutcome>,
+    coverage_gaps: Vec<ReportCoverageGap>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -179,6 +284,13 @@ pub struct ReportEvidence {
     pub acceptance_note: String,
     pub accepted_by: Option<String>,
     pub accepted_at: Option<String>,
+    pub acceptance_kind: String,
+    pub verification_id: Option<i64>,
+    pub check_id: Option<i64>,
+    pub template_id: Option<String>,
+    pub template_version: Option<String>,
+    pub verifier_id: Option<String>,
+    pub verifier_version: Option<String>,
     pub content_hash: String,
     pub snapshot_hash_verified: bool,
     pub created_by: String,
@@ -197,6 +309,7 @@ pub struct ReportRetestStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReportFindingSource {
     pub source_type: String,
+    pub producer: String,
     pub requires_human_review: bool,
     pub ai_run: Option<AiSourceVersion>,
     pub rule_hits: Vec<RuleSourceVersion>,
@@ -291,6 +404,7 @@ pub struct RulePackVersion {
 struct FindingRow {
     id: i64,
     source: String,
+    producer: String,
     title: String,
     vulnerability_type: String,
     standard_references: Vec<StandardReference>,
@@ -312,6 +426,23 @@ pub fn build_markdown(conn: &Connection, project_id: i64) -> Result<String, Stri
     Ok(build_bundle(conn, project_id, ReportOptions::redacted())?.markdown)
 }
 
+/// Build a redacted report for one immutable assessment run. Passing `None`
+/// keeps the cumulative project Finding view and attaches the latest terminal
+/// assessment coverage snapshot.
+pub fn build_markdown_for_assessment(
+    conn: &Connection,
+    project_id: i64,
+    assessment_run_id: Option<i64>,
+) -> Result<String, String> {
+    Ok(build_bundle_for_assessment(
+        conn,
+        project_id,
+        ReportOptions::redacted(),
+        assessment_run_id,
+    )?
+    .markdown)
+}
+
 /// Build the default redacted structured JSON backup.
 pub fn build_json(conn: &Connection, project_id: i64) -> Result<String, String> {
     Ok(build_bundle(conn, project_id, ReportOptions::redacted())?.json)
@@ -322,17 +453,38 @@ pub fn build_bundle(
     project_id: i64,
     options: ReportOptions,
 ) -> Result<ReportBundle, String> {
-    let generated_at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    build_bundle_at(conn, project_id, options, &generated_at)
+    build_bundle_for_assessment(conn, project_id, options, None)
 }
 
+pub fn build_bundle_for_assessment(
+    conn: &Connection,
+    project_id: i64,
+    options: ReportOptions,
+    assessment_run_id: Option<i64>,
+) -> Result<ReportBundle, String> {
+    let generated_at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    build_bundle_at_for_assessment(conn, project_id, options, &generated_at, assessment_run_id)
+}
+
+#[cfg(test)]
 fn build_bundle_at(
     conn: &Connection,
     project_id: i64,
     options: ReportOptions,
     generated_at: &str,
 ) -> Result<ReportBundle, String> {
-    let document = build_document(conn, project_id, options, generated_at)?;
+    build_bundle_at_for_assessment(conn, project_id, options, generated_at, None)
+}
+
+fn build_bundle_at_for_assessment(
+    conn: &Connection,
+    project_id: i64,
+    options: ReportOptions,
+    generated_at: &str,
+    assessment_run_id: Option<i64>,
+) -> Result<ReportBundle, String> {
+    let document =
+        build_document_for_assessment(conn, project_id, options, generated_at, assessment_run_id)?;
     let markdown = render_markdown(&document);
     let json = serde_json::to_string_pretty(&document)
         .map_err(|error| format!("序列化结构化报告失败: {error}"))?;
@@ -344,11 +496,22 @@ fn build_bundle_at(
     })
 }
 
+#[cfg(test)]
 fn build_document(
     conn: &Connection,
     project_id: i64,
     options: ReportOptions,
     generated_at: &str,
+) -> Result<ReportDocument, String> {
+    build_document_for_assessment(conn, project_id, options, generated_at, None)
+}
+
+fn build_document_for_assessment(
+    conn: &Connection,
+    project_id: i64,
+    options: ReportOptions,
+    generated_at: &str,
+    requested_assessment_run_id: Option<i64>,
 ) -> Result<ReportDocument, String> {
     let (project_name, target_host, scope_json, project_created_at): (
         String,
@@ -372,7 +535,18 @@ fn build_document(
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| error.to_string())?;
-    let findings = load_finding_rows(conn, project_id)?;
+    let AssessmentReportContext {
+        run: assessment_run,
+        not_observed_checks,
+        coverage_gaps,
+    } = load_assessment_report_context(conn, project_id, requested_assessment_run_id)?;
+    let mut findings = load_finding_rows(conn, project_id)?;
+    let linked_ids = requested_assessment_run_id
+        .map(|run_id| assessment_finding_ids(conn, project_id, run_id))
+        .transpose()?;
+    if let Some(linked_ids) = &linked_ids {
+        findings.retain(|finding| linked_ids.contains(&finding.id));
+    }
     let rejected_findings_omitted = findings
         .iter()
         .filter(|finding| finding.status == "rejected")
@@ -381,15 +555,29 @@ fn build_document(
     let mut targets = load_targets(conn, project_id)?;
     let mut evidence = load_evidence(conn, project_id, options)?;
     let mut rule_hits = load_rule_hits(conn, project_id)?;
+    // 指定 AssessmentRun 时，目标与规则命中也只保留该 run 链接的 Finding，
+    // 避免单 run 报告混入项目其它来源的命中。
+    if let Some(linked_ids) = &linked_ids {
+        targets.retain(|finding_id, _| linked_ids.contains(finding_id));
+        rule_hits.retain(|finding_id, _| linked_ids.contains(finding_id));
+    }
     let test_plan = load_test_plan(conn, project_id)?;
 
     let mut confirmed_findings = Vec::new();
     let mut pending_appendix = Vec::new();
+    // 疑似发现 = 非终态且由安全验证器产生过观察结果的 Finding（验证器证据
+    // 未被接受）。区别于纯 AI 假说：它们有确定性验证器输出但没有满足自动
+    // 确认条件，是需要人工复核的"疑似"。
+    let mut suspected_findings = Vec::new();
     for row in findings
         .into_iter()
         .filter(|finding| finding.status != "rejected")
     {
         let finding_evidence = evidence.remove(&row.id).unwrap_or_default();
+        // 疑似发现 = 安全验证器产出（producer=safe_verifier）但尚未自动确认的
+        // Finding。区别于纯 AI 假说：它们有确定性验证器输出，但缺少自动确认
+        // 条件（如 suspected 判定或资源归属声明缺失），需要人工复核。
+        let is_suspected = row.producer == "safe_verifier";
         if row.status == "confirmed"
             && !finding_evidence.iter().any(|item| {
                 item.accepted && item.qualifies_for_confirmation && item.snapshot_hash_verified
@@ -423,7 +611,13 @@ fn build_document(
 
         let source = ReportFindingSource {
             source_type: row.source.clone(),
-            requires_human_review: true,
+            producer: row.producer.clone(),
+            requires_human_review: !finding_evidence.iter().any(|item| {
+                item.accepted
+                    && item.qualifies_for_confirmation
+                    && item.snapshot_hash_verified
+                    && item.acceptance_kind == "safe_verifier"
+            }),
             ai_run: row.ai_run.clone(),
             rule_hits: rule_hits.remove(&row.id).unwrap_or_default(),
         };
@@ -470,7 +664,7 @@ fn build_document(
             retest: ReportRetestStatus {
                 status: "not_recorded".to_string(),
                 statement:
-                    "当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。"
+                    "当前数据模型未记录独立的修复后复测结论；评估中未观察到也不等同于复测通过。"
                         .to_string(),
             },
             analyst_notes: sanitize_text(&row.analyst_notes, "report.finding.analyst_notes"),
@@ -481,12 +675,16 @@ fn build_document(
         if report_finding.status == "confirmed" {
             confirmed_findings.push(report_finding);
         } else {
+            if is_suspected {
+                suspected_findings.push(report_finding.clone());
+            }
             pending_appendix.push(report_finding);
         }
     }
 
     sort_findings(&mut confirmed_findings);
     sort_findings(&mut pending_appendix);
+    sort_findings(&mut suspected_findings);
 
     let accepted_supporting_evidence = confirmed_findings
         .iter()
@@ -494,14 +692,35 @@ fn build_document(
         .filter(|item| item.accepted && item.qualifies_for_confirmation)
         .count();
     let risk_distribution = risk_distribution(&confirmed_findings);
-    let testing_limitations =
+    let mut testing_limitations =
         build_limitations(conn, project_id, &scope, pending_appendix.len(), &test_plan)?;
-    let methodology = build_methodology(
+    if let Some(run) = &assessment_run {
+        testing_limitations.push(
+            "非破坏边界仅允许 GET / HEAD / OPTIONS 且无正文；客户端无法数学证明目标服务器不会错误地让 GET 产生副作用。"
+                .to_string(),
+        );
+        if !coverage_gaps.is_empty() {
+            testing_limitations.push(format!(
+                "AssessmentRun #{} 记录了 {} 个覆盖缺口；未执行不代表不存在漏洞。",
+                run.id,
+                coverage_gaps.len()
+            ));
+        }
+    }
+    let mut methodology = build_methodology(
         traffic_count,
         &confirmed_findings,
         &pending_appendix,
         &test_plan,
     );
+    if assessment_run.is_some() {
+        methodology.methods.push(ReportMethod {
+            id: "ai_guided_safe_assessment".to_string(),
+            label: "AI 引导式非破坏评估".to_string(),
+            description: "AI 只选择后端版本化模板与不透明端点 ID；实际请求、策略和漏洞结论由本地代码生成并验证。"
+                .to_string(),
+        });
+    }
     let timeline = build_timeline(
         conn,
         project_id,
@@ -513,6 +732,21 @@ fn build_document(
     )?;
     let provenance = build_provenance(&confirmed_findings, &pending_appendix)?;
 
+    let legacy_plan_summary = (test_plan.total_nodes > 0).then(|| test_plan.clone());
+    let excluded_scope = assessment_run
+        .as_ref()
+        .map(|run| {
+            let mut values = run.excluded_paths.clone();
+            if !run.builtin_excluded_segments.is_empty() {
+                values.push(format!(
+                    "内置危险路径段：{}",
+                    run.builtin_excluded_segments.join("、")
+                ));
+            }
+            values
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["所有未列入授权范围的目标均视为排除范围。".to_string()]);
     Ok(ReportDocument {
         schema_version: REPORT_SCHEMA_VERSION,
         generated_at: generated_at.to_string(),
@@ -533,10 +767,7 @@ fn build_document(
                 .iter()
                 .map(|entry| sanitize_text(entry, "report.project.scope"))
                 .collect(),
-            excluded_scope: vec![
-                "当前项目模型未单独记录排除项；所有未列入授权范围的目标均视为排除范围。"
-                    .to_string(),
-            ],
+            excluded_scope,
             testing_limitations,
             created_at: project_created_at,
         },
@@ -550,13 +781,406 @@ fn build_document(
             accepted_supporting_evidence,
             test_plan_terminal: test_plan.terminal_nodes,
             test_plan_total: test_plan.total_nodes,
+            suspected_findings: suspected_findings.len(),
+            not_observed_checks: not_observed_checks.len(),
+            coverage_gaps: coverage_gaps.len(),
+            assessment_run_id: assessment_run.as_ref().map(|run| run.id),
         },
         timeline,
         confirmed_findings,
+        suspected_findings,
+        not_observed_checks,
+        coverage_gaps,
+        assessment_run,
+        legacy_plan_summary,
         pending_appendix,
         test_plan,
         provenance,
     })
+}
+
+fn assessment_finding_ids(
+    conn: &Connection,
+    project_id: i64,
+    run_id: i64,
+) -> Result<HashSet<i64>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT link.finding_id
+             FROM assessment_finding_links link
+             JOIN assessment_verifications verification
+               ON verification.id = link.verification_id
+             JOIN assessment_checks check_row ON check_row.id = verification.check_id
+             JOIN assessment_runs run ON run.id = check_row.run_id
+             JOIN findings finding ON finding.id = link.finding_id
+             WHERE run.id = ?1 AND run.project_id = ?2
+               AND finding.project_id = run.project_id
+             ORDER BY link.finding_id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params![run_id, project_id], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    rows.map(|row| row.map_err(|error| error.to_string()))
+        .collect()
+}
+
+fn load_assessment_report_context(
+    conn: &Connection,
+    project_id: i64,
+    requested_run_id: Option<i64>,
+) -> Result<AssessmentReportContext, String> {
+    let run_id = match requested_run_id {
+        Some(run_id) => {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM assessment_runs
+                         WHERE id = ?1 AND project_id = ?2
+                     )",
+                    rusqlite::params![run_id, project_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Err(format!(
+                    "AssessmentRun #{run_id} 不存在或不属于项目 #{project_id}"
+                ));
+            }
+            Some(run_id)
+        }
+        None => conn
+            .query_row(
+                "SELECT id FROM assessment_runs
+                 WHERE project_id = ?1
+                   AND status IN ('completed','stopped','cancelled','failed','interrupted')
+                 ORDER BY id DESC LIMIT 1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?,
+    };
+    let Some(run_id) = run_id else {
+        return Ok(AssessmentReportContext {
+            run: None,
+            not_observed_checks: Vec::new(),
+            coverage_gaps: Vec::new(),
+        });
+    };
+
+    let run_row = conn
+        .query_row(
+            "SELECT id, status, start_url, exact_origin, contract_json, contract_hash,
+                    template_registry_hash, provider_id, model, tls_policy,
+                    request_budget, request_count, discovery_budget, requests_per_second,
+                    response_byte_budget, response_bytes_read, max_rounds, completed_rounds,
+                    stop_reason, created_at, started_at, ended_at
+             FROM assessment_runs
+             WHERE id = ?1 AND project_id = ?2",
+            rusqlite::params![run_id, project_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, f64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, Option<String>>(21)?,
+                ))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let contract: Value = serde_json::from_str(&run_row.4)
+        .map_err(|error| format!("AssessmentRun #{run_id} 契约 JSON 损坏: {error}"))?;
+    let mut identity_labels = Vec::new();
+    for key in ["identityALabel", "identityBLabel"] {
+        if let Some(label) = contract.get(key).and_then(Value::as_str) {
+            let label = sanitize_text(label, "report.assessment.identity_label");
+            if !label.trim().is_empty() && !identity_labels.contains(&label) {
+                identity_labels.push(label);
+            }
+        }
+    }
+    let contract_strings = |key: &str, location: &str| -> Vec<String> {
+        contract
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|value| sanitize_text(value, location))
+            .collect()
+    };
+    let excluded_paths = contract_strings("excludedPaths", "report.assessment.excluded_path");
+    let builtin_excluded_segments = contract_strings(
+        "builtinExcludedSegments",
+        "report.assessment.builtin_excluded_segment",
+    );
+    let data_disclosure = contract_strings("dataDisclosure", "report.assessment.data_disclosure");
+
+    let mut round_statement = conn
+        .prepare(
+            "SELECT round_number, status, analysis_run_id, input_hash, output_hash,
+                    selected_checks, created_at, completed_at
+             FROM assessment_rounds WHERE run_id = ?1
+             ORDER BY round_number, id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rounds = round_statement
+        .query_map([run_id], |row| {
+            Ok(ReportAssessmentRound {
+                round_number: row.get(0)?,
+                status: row.get(1)?,
+                analysis_run_id: row.get(2)?,
+                input_hash: row.get(3)?,
+                output_hash: row.get(4)?,
+                selected_checks: row.get(5)?,
+                created_at: row.get(6)?,
+                completed_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .map(|row| row.map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut event_statement = conn
+        .prepare(
+            "SELECT event_type, check_id, old_value, new_value, details_json, created_at
+             FROM assessment_events WHERE run_id = ?1 ORDER BY id",
+        )
+        .map_err(|error| error.to_string())?;
+    let event_rows = event_statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut assessment_timeline = Vec::new();
+    for row in event_rows {
+        let row = row.map_err(|error| error.to_string())?;
+        assessment_timeline.push(ReportAssessmentEvent {
+            event_type: sanitize_text(&row.0, "report.assessment.event_type"),
+            check_id: row.1,
+            old_value: row
+                .2
+                .map(|value| sanitize_text(&value, "report.assessment.event.old")),
+            new_value: row
+                .3
+                .map(|value| sanitize_text(&value, "report.assessment.event.new")),
+            details: parse_and_redact_json(&row.4, "report.assessment.event.details", run_id)?,
+            created_at: row.5,
+        });
+    }
+
+    let mut outcome_statement = conn
+        .prepare(
+            "SELECT check_row.id, check_row.template_id, check_row.template_version,
+                    check_row.requested_endpoint_id, COALESCE(endpoint.path, ''),
+                    check_row.parameter_name, check_row.identity_mode,
+                    verification.verifier_id, verification.verifier_version,
+                    verification.verdict, verification.observations_json,
+                    verification.content_hash, verification.created_at
+             FROM assessment_verifications verification
+             JOIN assessment_checks check_row ON check_row.id = verification.check_id
+             LEFT JOIN assessment_endpoints endpoint ON endpoint.id = check_row.endpoint_id
+             WHERE check_row.run_id = ?1 AND verification.verdict = 'not_observed'
+             ORDER BY check_row.id, verification.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let outcome_rows = outcome_statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut not_observed = Vec::new();
+    for row in outcome_rows {
+        let row = row.map_err(|error| error.to_string())?;
+        not_observed.push(ReportAssessmentCheckOutcome {
+            check_id: row.0,
+            template_id: row.1,
+            template_version: row.2,
+            endpoint_id: row.3,
+            path: sanitize_text(&row.4, "report.assessment.endpoint_path"),
+            parameter_name: row
+                .5
+                .map(|value| sanitize_text(&value, "report.assessment.parameter")),
+            identity_mode: row.6,
+            verifier_id: row.7,
+            verifier_version: row.8,
+            verdict: row.9,
+            observations: parse_and_redact_json(&row.10, "report.assessment.not_observed", row.0)?,
+            content_hash: row.11,
+            created_at: row.12,
+        });
+    }
+
+    let mut gap_statement = conn
+        .prepare(
+            "SELECT gap.check_id, gap.category, gap.reason_code, gap.detail, gap.created_at,
+                    check_row.template_id
+             FROM assessment_coverage_gaps gap
+             LEFT JOIN assessment_checks check_row ON check_row.id = gap.check_id
+             WHERE gap.run_id = ?1 ORDER BY gap.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let gap_rows = gap_statement
+        .query_map([run_id], |row| {
+            Ok(ReportCoverageGap {
+                check_id: row.get(0)?,
+                category: row.get(1)?,
+                reason_code: row.get(2)?,
+                detail: row.get(3)?,
+                created_at: row.get(4)?,
+                template_id: row.get(5)?,
+                verdict: None,
+                observations: None,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let mut gaps = Vec::new();
+    for row in gap_rows {
+        let mut gap = row.map_err(|error| error.to_string())?;
+        gap.category = sanitize_text(&gap.category, "report.assessment.gap.category");
+        gap.reason_code = sanitize_text(&gap.reason_code, "report.assessment.gap.reason_code");
+        gap.detail = sanitize_text(&gap.detail, "report.assessment.gap.detail");
+        gaps.push(gap);
+    }
+
+    let mut incomplete_statement = conn
+        .prepare(
+            "SELECT check_row.id, check_row.template_id, verification.verdict,
+                    verification.observations_json, verification.created_at
+             FROM assessment_verifications verification
+             JOIN assessment_checks check_row ON check_row.id = verification.check_id
+             WHERE check_row.run_id = ?1
+               AND verification.verdict IN ('inconclusive','skipped')
+             ORDER BY check_row.id, verification.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let incomplete_rows = incomplete_statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in incomplete_rows {
+        let row = row.map_err(|error| error.to_string())?;
+        gaps.push(ReportCoverageGap {
+            check_id: Some(row.0),
+            category: "verification_incomplete".to_string(),
+            reason_code: row.2.clone(),
+            detail: "确定性验证未达到完整、可自动确认的证据阈值。".to_string(),
+            template_id: Some(row.1),
+            verdict: Some(row.2),
+            observations: Some(parse_and_redact_json(
+                &row.3,
+                "report.assessment.incomplete_verification",
+                row.0,
+            )?),
+            created_at: row.4,
+        });
+    }
+
+    let run = ReportAssessmentRun {
+        id: run_row.0,
+        status: run_row.1,
+        start_url: redact_report_url(&run_row.2),
+        exact_origin: sanitize_text(&run_row.3, "report.assessment.origin"),
+        contract_hash: run_row.5,
+        template_registry_hash: run_row.6,
+        provider_id: sanitize_text(&run_row.7, "report.assessment.provider"),
+        model: sanitize_text(&run_row.8, "report.assessment.model"),
+        tls_policy: run_row.9,
+        request_budget: run_row.10,
+        request_count: run_row.11,
+        discovery_budget: run_row.12,
+        requests_per_second: run_row.13,
+        response_byte_budget: run_row.14,
+        response_bytes_read: run_row.15,
+        max_rounds: run_row.16,
+        completed_rounds: run_row.17,
+        identity_labels,
+        excluded_paths,
+        builtin_excluded_segments,
+        data_disclosure,
+        stop_reason: sanitize_text(&run_row.18, "report.assessment.stop_reason"),
+        created_at: run_row.19,
+        started_at: run_row.20,
+        ended_at: run_row.21,
+        rounds,
+        timeline: assessment_timeline,
+    };
+    Ok(AssessmentReportContext {
+        run: Some(run),
+        not_observed_checks: not_observed,
+        coverage_gaps: gaps,
+    })
+}
+
+fn parse_and_redact_json(raw: &str, location: &str, record_id: i64) -> Result<Value, String> {
+    let mut value: Value = serde_json::from_str(raw)
+        .map_err(|error| format!("{location} #{record_id} JSON 损坏: {error}"))?;
+    redact_json_strings(&mut value, location);
+    Ok(value)
+}
+
+fn redact_json_strings(value: &mut Value, location: &str) {
+    match value {
+        Value::String(text) => *text = sanitize_text(text, location),
+        Value::Array(items) => {
+            for item in items {
+                redact_json_strings(item, location);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                redact_json_strings(item, location);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn load_finding_rows(conn: &Connection, project_id: i64) -> Result<Vec<FindingRow>, String> {
@@ -566,7 +1190,7 @@ fn load_finding_rows(conn: &Connection, project_id: i64) -> Result<Vec<FindingRo
                     f.severity, f.confidence, f.reasoning, f.verify_steps, f.status,
                     f.analyst_notes, f.fingerprint, f.occurrences, f.created_at, f.updated_at,
                     run.id, run.provider_id, run.model, run.prompt_id, run.prompt_version,
-                    run.input_hash, run.validation_status, run.created_at
+                    run.input_hash, run.validation_status, run.created_at, f.producer
              FROM findings f
              LEFT JOIN analysis_runs run ON run.id = f.analysis_run_id
              WHERE f.project_id = ?1
@@ -599,6 +1223,7 @@ fn load_finding_rows(conn: &Connection, project_id: i64) -> Result<Vec<FindingRo
                 row.get::<_, Option<String>>(20)?,
                 row.get::<_, Option<String>>(21)?,
                 row.get::<_, Option<String>>(22)?,
+                row.get::<_, String>(23)?,
             ))
         })
         .map_err(|error| error.to_string())?;
@@ -638,6 +1263,7 @@ fn load_finding_rows(conn: &Connection, project_id: i64) -> Result<Vec<FindingRo
         Ok(FindingRow {
             id: row.0,
             source: row.1,
+            producer: row.23,
             title: row.2,
             vulnerability_type: row.3,
             standard_references: knowledge::references_from_json(&row.4)?,
@@ -722,10 +1348,17 @@ fn load_evidence(
                     END,
                     e.observation, fe.accepted, e.qualifies_for_confirmation,
                     fe.acceptance_note, fe.accepted_by, fe.accepted_at,
-                    e.content_hash, e.created_by, e.created_at, e.redacted_snapshot
+                    e.content_hash, e.created_by, e.created_at, e.redacted_snapshot,
+                    fe.acceptance_kind, fe.verification_id, verification.check_id,
+                    check_row.template_id, check_row.template_version,
+                    verification.verifier_id, verification.verifier_version
              FROM finding_evidence fe
              JOIN findings f ON f.id = fe.finding_id
              JOIN evidence e ON e.id = fe.evidence_id
+             LEFT JOIN assessment_verifications verification
+                    ON verification.id = fe.verification_id
+             LEFT JOIN assessment_checks check_row
+                    ON check_row.id = verification.check_id
              WHERE f.project_id = ?1
              ORDER BY fe.finding_id, fe.accepted DESC, e.created_at, e.id",
         )
@@ -748,6 +1381,13 @@ fn load_evidence(
                 row.get::<_, String>(12)?,
                 row.get::<_, String>(13)?,
                 row.get::<_, String>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, Option<i64>>(16)?,
+                row.get::<_, Option<i64>>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
             ))
         })
         .map_err(|error| error.to_string())?;
@@ -786,6 +1426,13 @@ fn load_evidence(
                 .9
                 .map(|value| sanitize_text(&value, "report.evidence.accepted_by")),
             accepted_at: row.10,
+            acceptance_kind: row.15,
+            verification_id: row.16,
+            check_id: row.17,
+            template_id: row.18,
+            template_version: row.19,
+            verifier_id: row.20,
+            verifier_version: row.21,
             content_hash: row.11,
             snapshot_hash_verified,
             created_by: sanitize_text(&row.12, "report.evidence.created_by"),
@@ -1045,18 +1692,18 @@ fn build_limitations(
     }
     if pending_count > 0 {
         limitations.push(format!(
-            "{pending_count} 条 Finding 尚未人工确认，仅列入待验证附录，不作为报告结论。"
+            "{pending_count} 条 Finding 的非破坏式证据尚未达到确认阈值，仅作为疑似结果。"
         ));
     }
     if !test_plan.unfinished_items.is_empty() {
         limitations.push(format!(
-            "{} 个测试计划节点尚未完成。",
+            "旧版任务树中有 {} 个未终结文字节点；这些节点不代表已执行网络测试。",
             test_plan.unfinished_items.len()
         ));
     }
     if !test_plan.blocked_items.is_empty() {
         limitations.push(format!(
-            "{} 个测试计划节点受阻；阻塞原因见测试计划章节。",
+            "旧版任务树中有 {} 个受阻文字节点；仅在 legacy_plan_summary 中保留。",
             test_plan.blocked_items.len()
         ));
     }
@@ -1122,9 +1769,9 @@ fn build_methodology(
     });
     if test_plan.total_nodes > 0 {
         methods.push(ReportMethod {
-            id: "evidence_driven_test_plan".to_string(),
-            label: "证据驱动测试计划".to_string(),
-            description: "计划节点、未完成项和阻塞项按当前持久化 revision 汇总。".to_string(),
+            id: "legacy_plan_summary".to_string(),
+            label: "旧版任务树迁移摘要".to_string(),
+            description: "文字 proposal 节点仅作为历史附录保留，明确不代表已执行测试。".to_string(),
         });
     }
     ReportMethodology {
@@ -1404,7 +2051,7 @@ fn build_provenance(
         standard_versions: standards.into_values().collect(),
         ai_runs: ai_runs.into_iter().collect(),
         rule_versions: rules.into_iter().collect(),
-        review_notice: "AI 与被动规则只产生待验证假设。报告中的 confirmed 状态来自人工接受 Evidence 后的显式状态变更；仍需由具备授权和专业能力的人员复核。"
+        review_notice: "AI 与被动规则只产生待验证假设。confirmed 状态只能来自人工接受或版本化安全验证器接受的完整 Evidence；安全验证器结论仍可由人工重置、撤销或判定冲突。"
             .to_string(),
     })
 }
@@ -1685,7 +2332,7 @@ fn render_markdown(document: &ReportDocument) -> String {
         markdown_text(&document.classification.sensitivity)
     ));
     out.push_str(
-        "> **授权与复核声明**：本报告仅适用于项目中明确记录的授权范围。AI 与被动规则只产生待验证假设；confirmed 结论来自人工接受的真实 Evidence，但仍需专业人员复核。禁止将本报告用于未授权目标。\n\n",
+        "> **授权与复核声明**：本报告仅适用于项目中明确记录的授权范围。AI 只能选择版本化安全模板，不能构造请求或改写事实结论；confirmed 结论来自人工接受或版本化安全验证器接受且哈希有效的 Evidence。禁止将本报告用于未授权目标。\n\n",
     );
     if document.classification.contains_live_raw_source_snapshots {
         out.push_str(
@@ -1749,14 +2396,19 @@ fn render_markdown(document: &ReportDocument) -> String {
 
     out.push_str("## 3. 执行摘要与风险分布\n\n");
     out.push_str(&format!(
-        "- 已记录流量：{} 条\n- 已确认 Finding：{} 条\n- 待验证附录：{} 条\n- 默认省略 rejected Finding：{} 条\n- 已接受且可支撑确认的 Evidence：{} 项\n- 测试计划覆盖：{}/{} 个节点已终结\n",
+        "- 已记录流量：{} 条\n- 已确认 Finding：{} 条\n- 疑似 Finding：{} 条\n- 未观察到检查：{} 项\n- 覆盖缺口：{} 项\n- 默认省略 rejected Finding：{} 条\n- 已接受且可支撑确认的 Evidence：{} 项\n- AssessmentRun：{}\n",
         document.summary.traffic_count,
         document.summary.confirmed_findings,
-        document.summary.pending_findings_in_appendix,
+        document.summary.suspected_findings,
+        document.summary.not_observed_checks,
+        document.summary.coverage_gaps,
         document.summary.rejected_findings_omitted,
         document.summary.accepted_supporting_evidence,
-        document.summary.test_plan_terminal,
-        document.summary.test_plan_total
+        document
+            .summary
+            .assessment_run_id
+            .map(|id| format!("#{id}"))
+            .unwrap_or_else(|| "未附加".to_string())
     ));
     out.push_str("- confirmed 风险分布：");
     out.push_str(
@@ -1779,10 +2431,25 @@ fn render_markdown(document: &ReportDocument) -> String {
         }
     }
 
-    out.push_str("## 5. 测试计划覆盖、未完成项与阻塞项\n\n");
-    render_test_plan(&mut out, &document.test_plan);
+    out.push_str("## 5. 疑似 Findings\n\n");
+    if document.suspected_findings.is_empty() {
+        out.push_str("> 暂无疑似 Finding。\n\n");
+    } else {
+        for (index, finding) in document.suspected_findings.iter().enumerate() {
+            render_finding(&mut out, index + 1, finding, false);
+        }
+    }
 
-    out.push_str("## 6. 来源版本与人工复核说明\n\n");
+    out.push_str("## 6. 未观察到的检查\n\n");
+    render_not_observed_checks(&mut out, &document.not_observed_checks);
+
+    out.push_str("## 7. 覆盖缺口\n\n");
+    render_coverage_gaps(&mut out, &document.coverage_gaps);
+
+    out.push_str("## 8. AssessmentRun 与运行契约审计\n\n");
+    render_assessment_run(&mut out, document.assessment_run.as_ref());
+
+    out.push_str("## 9. 来源版本与复核说明\n\n");
     out.push_str(&format!(
         "> {}\n\n",
         markdown_text(&document.provenance.review_notice)
@@ -1836,15 +2503,146 @@ fn render_markdown(document: &ReportDocument) -> String {
         out.push('\n');
     }
 
-    out.push_str("## 附录 A. 待验证 Findings（不作为已确认结论）\n\n");
-    if document.pending_appendix.is_empty() {
-        out.push_str("> 暂无待验证 Finding。\n\n");
-    } else {
-        for (index, finding) in document.pending_appendix.iter().enumerate() {
-            render_finding(&mut out, index + 1, finding, false);
-        }
+    if let Some(plan) = &document.legacy_plan_summary {
+        out.push_str("## 附录 A. 旧版测试计划摘要（不代表已执行）\n\n");
+        out.push_str(
+            "> 以下节点来自旧版文字 proposal / 任务树，仅保留迁移审计；节点状态不能证明网络测试已经执行。\n\n",
+        );
+        render_test_plan(&mut out, plan);
     }
     out
+}
+
+fn render_not_observed_checks(out: &mut String, checks: &[ReportAssessmentCheckOutcome]) {
+    if checks.is_empty() {
+        out.push_str("> 本次未记录“已执行但未观察到”的完整检查。\n\n");
+        return;
+    }
+    for check in checks {
+        out.push_str(&format!(
+            "- Check {} · template {}@{} · endpoint {} · path {} · verifier {}@{} · verdict {} · hash {}\n",
+            inline_code(&check.check_id.to_string()),
+            inline_code(&check.template_id),
+            inline_code(&check.template_version),
+            inline_code(&check.endpoint_id),
+            inline_code(&check.path),
+            inline_code(&check.verifier_id),
+            inline_code(&check.verifier_version),
+            inline_code(&check.verdict),
+            inline_code(&check.content_hash)
+        ));
+    }
+    out.push('\n');
+}
+
+fn render_coverage_gaps(out: &mut String, gaps: &[ReportCoverageGap]) {
+    if gaps.is_empty() {
+        out.push_str("> 未记录额外覆盖缺口；这不代表授权范围外或破坏式类别已被测试。\n\n");
+        return;
+    }
+    for gap in gaps {
+        let check = gap
+            .check_id
+            .map(|id| format!("check {}", inline_code(&id.to_string())))
+            .unwrap_or_else(|| "run 级".to_string());
+        out.push_str(&format!(
+            "- {} · {} · {} · {}{}\n",
+            check,
+            inline_code(&gap.category),
+            inline_code(&gap.reason_code),
+            markdown_text(&gap.detail),
+            gap.template_id
+                .as_ref()
+                .map(|template| format!(" · template {}", inline_code(template)))
+                .unwrap_or_default()
+        ));
+    }
+    out.push('\n');
+}
+
+fn render_assessment_run(out: &mut String, run: Option<&ReportAssessmentRun>) {
+    let Some(run) = run else {
+        out.push_str("> 项目尚无终态 AssessmentRun；本报告仅汇总累计 Finding。\n\n");
+        return;
+    };
+    out.push_str(&format!(
+        "- Run：{} · 状态 {}\n- 起始 URL：{}\n- 精确 origin：{}\n- 契约 hash：{}\n- 模板注册表 hash：{}\n- AI：{} / {}\n- 请求：{}/{}（发现预算 {}，{} 次/秒，并发固定 1）\n- 响应读取：{}/{} bytes\n- AI 轮次：{}/{}\n- 身份标签：{}\n- 停止原因：{}\n- 时间：{} → {}\n\n",
+        inline_code(&run.id.to_string()),
+        inline_code(&run.status),
+        inline_code(&run.start_url),
+        inline_code(&run.exact_origin),
+        inline_code(&run.contract_hash),
+        inline_code(&run.template_registry_hash),
+        inline_code(&run.provider_id),
+        inline_code(&run.model),
+        run.request_count,
+        run.request_budget,
+        run.discovery_budget,
+        run.requests_per_second,
+        run.response_bytes_read,
+        run.response_byte_budget,
+        run.completed_rounds,
+        run.max_rounds,
+        if run.identity_labels.is_empty() {
+            "匿名".to_string()
+        } else {
+            run.identity_labels
+                .iter()
+                .map(|label| inline_code(label))
+                .collect::<Vec<_>>()
+                .join("、")
+        },
+        value_or_dash(&run.stop_reason),
+        inline_code(run.started_at.as_deref().unwrap_or(&run.created_at)),
+        inline_code(run.ended_at.as_deref().unwrap_or("运行中")),
+    ));
+    out.push_str("### AI 规划轮次\n\n");
+    if run.rounds.is_empty() {
+        out.push_str("> 没有成功进入 AI 规划轮次。\n\n");
+    } else {
+        for round in &run.rounds {
+            out.push_str(&format!(
+                "- Round {} · {} · AnalysisRun {} · checks {} · input {} · output {}\n",
+                round.round_number,
+                inline_code(&round.status),
+                round
+                    .analysis_run_id
+                    .map(|id| inline_code(&id.to_string()))
+                    .unwrap_or_else(|| "—".to_string()),
+                round.selected_checks,
+                inline_code(&round.input_hash),
+                round
+                    .output_hash
+                    .as_ref()
+                    .map(|value| inline_code(value))
+                    .unwrap_or_else(|| "—".to_string())
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str("### 运行事件\n\n");
+    for event in &run.timeline {
+        out.push_str(&format!(
+            "- {} · {}{} · {} → {}\n",
+            inline_code(&event.created_at),
+            inline_code(&event.event_type),
+            event
+                .check_id
+                .map(|id| format!(" · check {}", inline_code(&id.to_string())))
+                .unwrap_or_default(),
+            event
+                .old_value
+                .as_ref()
+                .map(|value| inline_code(value))
+                .unwrap_or_else(|| "—".to_string()),
+            event
+                .new_value
+                .as_ref()
+                .map(|value| inline_code(value))
+                .unwrap_or_else(|| "—".to_string())
+        ));
+    }
+    out.push('\n');
 }
 
 fn render_finding(out: &mut String, index: usize, finding: &ReportFinding, confirmed: bool) {
@@ -1856,7 +2654,7 @@ fn render_finding(out: &mut String, index: usize, finding: &ReportFinding, confi
     ));
     out.push_str("#### 身份、目标与风险\n\n");
     out.push_str(&format!(
-        "- Finding ID：{}\n- 稳定身份：{}\n- 状态：{}\n- 类型：{}\n- 风险：{}　置信度：{}　累计出现：{}\n- 来源：{}（需人工复核）\n- 标准引用：{}\n",
+        "- Finding ID：{}\n- 稳定身份：{}\n- 状态：{}\n- 类型：{}\n- 风险：{}　置信度：{}　累计出现：{}\n- 来源：{} / {}（{}）\n- 标准引用：{}\n",
         inline_code(&finding.id.to_string()),
         inline_code(&finding.identity),
         markdown_text(finding_status_cn(&finding.status)),
@@ -1865,6 +2663,12 @@ fn render_finding(out: &mut String, index: usize, finding: &ReportFinding, confi
         finding.confidence,
         finding.occurrences,
         markdown_text(source_cn(&finding.source.source_type)),
+        inline_code(&finding.source.producer),
+        if finding.source.requires_human_review {
+            "需要人工复核"
+        } else {
+            "版本化安全验证器自动确认"
+        },
         format_references(&finding.standard_references)
     ));
     if let Some(fingerprint) = &finding.fingerprint {
@@ -1939,11 +2743,28 @@ fn render_evidence(out: &mut String, evidence: &ReportEvidence) {
         inline_code(&evidence.source_id.to_string())
     ));
     out.push_str(&format!(
-        "- 实际观察：{}\n- 人工接受：{}　可用于确认：{}　来源仍可用：{}\n- 快照 SHA-256：{}（校验{}）\n- 创建者：{}　创建时间：{}\n",
+        "- 实际观察：{}\n- 已接受：{}　接受来源：{}　可用于确认：{}　来源仍可用：{}\n- Verification：{}　Check：{}　Template：{}　Verifier：{}\n- 快照 SHA-256：{}（校验{}）\n- 创建者：{}　创建时间：{}\n",
         value_or_dash(&evidence.observation),
         yes_no(evidence.accepted),
+        inline_code(&evidence.acceptance_kind),
         yes_no(evidence.qualifies_for_confirmation),
         yes_no(evidence.source_available),
+        evidence
+            .verification_id
+            .map(|id| inline_code(&id.to_string()))
+            .unwrap_or_else(|| "—".to_string()),
+        evidence
+            .check_id
+            .map(|id| inline_code(&id.to_string()))
+            .unwrap_or_else(|| "—".to_string()),
+        match (&evidence.template_id, &evidence.template_version) {
+            (Some(id), Some(version)) => inline_code(&format!("{id}@{version}")),
+            _ => "—".to_string(),
+        },
+        match (&evidence.verifier_id, &evidence.verifier_version) {
+            (Some(id), Some(version)) => inline_code(&format!("{id}@{version}")),
+            _ => "—".to_string(),
+        },
         inline_code(&evidence.content_hash),
         if evidence.snapshot_hash_verified { "通过" } else { "失败" },
         inline_code(&evidence.created_by),
@@ -1970,6 +2791,15 @@ fn render_evidence(out: &mut String, evidence: &ReportEvidence) {
 
 fn render_source_details(out: &mut String, source: &ReportFindingSource) {
     out.push_str("#### 来源审计\n\n");
+    out.push_str(&format!(
+        "- producer {} · {}\n",
+        inline_code(&source.producer),
+        if source.requires_human_review {
+            "结论需要人工复核"
+        } else {
+            "confirmed 来源为版本化安全验证器"
+        }
+    ));
     if let Some(run) = &source.ai_run {
         out.push_str(&format!(
             "- AI：AnalysisRun {} · provider {} · model {} · prompt {} v{} · validation {}\n",
@@ -2295,11 +3125,11 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO findings(
-                    id, project_id, traffic_id, analysis_run_id, source, title, vuln_type,
+                    id, project_id, traffic_id, analysis_run_id, source, producer, title, vuln_type,
                     standard_references, severity, confidence, reasoning, verify_steps,
                     analyst_notes, created_at, updated_at
                  ) VALUES(
-                    31,?1,11,21,'ai','登录存在 SQL 注入 # 标题','SQL 注入',?2,'high',87,
+                    31,?1,11,21,'ai','ai','登录存在 SQL 注入 # 标题','SQL 注入',?2,'high',87,
                     'AI 假设：参数 username 可能触发报错，不是已执行结果。',
                     '1. 在授权环境输入单引号\n2. 对比响应',
                     '由分析员复核。','2026-07-24 09:13:00','2026-07-24 09:13:00'
@@ -2343,11 +3173,11 @@ mod tests {
         db.conn
             .execute(
                 "INSERT INTO findings(
-                    id, project_id, traffic_id, analysis_run_id, source, title, vuln_type,
+                    id, project_id, traffic_id, analysis_run_id, source, producer, title, vuln_type,
                     standard_references, severity, confidence, reasoning, verify_steps,
                     created_at, updated_at
                  ) VALUES(
-                    32,?1,11,21,'ai','待确认的会话问题','会话管理','[]','medium',55,
+                    32,?1,11,21,'ai','ai','待确认的会话问题','会话管理','[]','medium',55,
                     '仅为待验证假设。','检查会话轮换。','2026-07-24 09:14:00',
                     '2026-07-24 09:14:00'
                  )",
@@ -2448,6 +3278,218 @@ mod tests {
     }
 
     #[test]
+    fn run_specific_v3_report_uses_persisted_assessment_results_and_project_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("assessment-report.db")).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO projects(id, name, target_host, scope, created_at)
+                 VALUES(1, 'assessment report', 'example.test', '[\"example.test\"]',
+                        '2026-08-01 09:00:00')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO projects(id, name, target_host, scope)
+                 VALUES(2, 'other', 'other.test', '[\"other.test\"]')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO analysis_runs(
+                     id, project_id, provider_id, provider_base_url, model,
+                     prompt_id, prompt_version, input_hash, policy_json, manifest_json,
+                     validation_status, validation_json, raw_output_hash, created_at
+                 ) VALUES(
+                     10, 1, 'provider', 'https://provider.test/v1', 'model',
+                     'assessment_safe_planner', 1, ?1, '{}', '{}', 'valid', '{}', ?2,
+                     '2026-08-01 09:02:00'
+                 )",
+                params!["a".repeat(64), "b".repeat(64)],
+            )
+            .unwrap();
+        let contract = json!({
+            "identityALabel": "普通用户 A",
+            "identityBLabel": "普通用户 B",
+            "excludedPaths": ["/billing"],
+            "builtinExcludedSegments": ["delete", "logout"],
+            "dataDisclosure": ["不透明 endpoint ID", "路径与 query 参数名（不含值）"]
+        })
+        .to_string();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_runs(
+                     id, project_id, status, start_url, exact_origin, contract_json,
+                     contract_hash, template_registry_hash, provider_id, model, tls_policy,
+                     request_budget, request_count, discovery_budget, requests_per_second,
+                     response_byte_budget, response_bytes_read, max_rounds, completed_rounds,
+                     stop_reason, created_at, started_at, ended_at
+                 ) VALUES(
+                     20, 1, 'completed',
+                     'https://example.test/search?q=top-secret-query-value',
+                     'https://example.test:443', ?1, ?2, ?3, 'provider', 'model', 'strict',
+                     120, 7, 40, 1.0, 20971520, 2048, 3, 1, 'assessment_complete',
+                     '2026-08-01 09:01:00', '2026-08-01 09:01:01',
+                     '2026-08-01 09:03:00'
+                 )",
+                params![contract, "c".repeat(64), "d".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_rounds(
+                     id, run_id, round_number, status, analysis_run_id, input_hash,
+                     output_hash, selected_checks, rejection_json, created_at, completed_at
+                 ) VALUES(
+                     30, 20, 1, 'valid', 10, ?1, ?2, 2, '[]',
+                     '2026-08-01 09:02:00', '2026-08-01 09:02:01'
+                 )",
+                params!["e".repeat(64), "f".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_endpoints(
+                     id, run_id, endpoint_key, method, url, path,
+                     query_parameter_names, source_kind, status, content_type,
+                     response_complete
+                 ) VALUES(
+                     40, 20, ?1, 'GET',
+                     'https://example.test/search?q=top-secret-query-value', '/search',
+                     '[\"q\"]', 'start_url', 200, 'text/html', 1
+                 )",
+                ["1".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_checks(
+                     id, run_id, round_id, endpoint_id, requested_endpoint_id,
+                     template_id, template_version, identity_mode, rationale,
+                     policy_result, policy_reason, status, request_cost, completed_at
+                 ) VALUES
+                    (50,20,30,40,'ep_safe','security_headers_cookie','1','anonymous',
+                     'fact check','allowed','allowed','completed',0,'2026-08-01 09:02:20'),
+                    (51,20,30,40,'ep_safe','lazy_reflection','1','anonymous',
+                     'reflection check','allowed','allowed','completed',1,'2026-08-01 09:02:30')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_verifications(
+                     id, check_id, verifier_id, verifier_version, verdict,
+                     observations_json, content_hash, created_at
+                 ) VALUES
+                    (60,50,'security_headers_cookie','1','not_observed',
+                     '{\"facts\":[]}',?1,'2026-08-01 09:02:21'),
+                    (61,51,'lazy_reflection','1','suspected',
+                     '{\"markerObserved\":true}',?2,'2026-08-01 09:02:31')",
+                params!["2".repeat(64), "3".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO findings(
+                     id, project_id, source, producer, title, vuln_type, severity,
+                     confidence, reasoning, verify_steps, fingerprint,
+                     created_at, updated_at
+                 ) VALUES
+                    (70,1,'rule','safe_verifier','只读反射迹象','reflection','info',70,
+                     'marker reflected','manual review',?1,
+                     '2026-08-01 09:02:31','2026-08-01 09:02:31'),
+                    (71,1,'rule','passive_rule','项目累计但非本轮','other','low',20,
+                     'unlinked','manual review',?2,
+                     '2026-08-01 09:02:32','2026-08-01 09:02:32')",
+                params!["4".repeat(64), "5".repeat(64)],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_finding_links(verification_id, finding_id, relation)
+                 VALUES(61,70,'supports')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_coverage_gaps(
+                     run_id, check_id, category, reason_code, detail, created_at
+                 ) VALUES(
+                     20,51,'identity','resource_ownership_missing',
+                     '没有资源归属声明，不能自动确认', '2026-08-01 09:02:32'
+                 )",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO assessment_events(
+                     run_id, event_type, old_value, new_value, details_json, created_at
+                 ) VALUES
+                    (20,'run_created',NULL,'queued','{}','2026-08-01 09:01:00'),
+                    (20,'status_changed','verifying','completed',
+                     '{\"authorization\":\"Bearer event-secret-must-not-leak\"}',
+                     '2026-08-01 09:03:00')",
+                [],
+            )
+            .unwrap();
+
+        let document = build_document_for_assessment(
+            &db.conn,
+            1,
+            ReportOptions::redacted(),
+            "2026-08-01T10:00:00+08:00",
+            Some(20),
+        )
+        .unwrap();
+        let run = document.assessment_run.as_ref().unwrap();
+        assert_eq!(run.id, 20);
+        assert_eq!(run.rounds[0].analysis_run_id, Some(10));
+        assert_eq!(run.identity_labels, vec!["普通用户 A", "普通用户 B"]);
+        assert_eq!(document.not_observed_checks.len(), 1);
+        assert_eq!(document.coverage_gaps.len(), 1);
+        assert_eq!(document.suspected_findings.len(), 1);
+        assert_eq!(document.suspected_findings[0].id, 70);
+        assert!(document.legacy_plan_summary.is_none());
+        let markdown = render_markdown(&document);
+        let json = serde_json::to_string_pretty(&document).unwrap();
+        assert!(markdown.contains("未观察到检查"));
+        assert!(markdown.contains("覆盖缺口"));
+        assert!(json.contains("\"assessment_run\""));
+        assert!(!json.contains("pending_findings_in_appendix"));
+        assert!(!json.contains("test_plan_terminal"));
+        assert!(!markdown.contains("top-secret-query-value"));
+        assert!(!json.contains("top-secret-query-value"));
+        assert!(!markdown.contains("event-secret-must-not-leak"));
+        assert!(!json.contains("event-secret-must-not-leak"));
+
+        let cumulative = build_document_for_assessment(
+            &db.conn,
+            1,
+            ReportOptions::redacted(),
+            "2026-08-01T10:00:00+08:00",
+            None,
+        )
+        .unwrap();
+        assert_eq!(cumulative.assessment_run.as_ref().unwrap().id, 20);
+        // 疑似 = 安全验证器产出且未确认；passive_rule 的累计 Finding 不算疑似。
+        assert_eq!(cumulative.suspected_findings.len(), 1);
+        assert_eq!(cumulative.suspected_findings[0].id, 70);
+        let error = build_document_for_assessment(
+            &db.conn,
+            2,
+            ReportOptions::redacted(),
+            "2026-08-01T10:00:00+08:00",
+            Some(20),
+        )
+        .unwrap_err();
+        assert!(error.contains("不属于项目 #2"));
+    }
+
+    #[test]
     fn report_snapshot_covers_statuses_empty_evidence_truncation_and_multiple_standards() {
         let fixture = fixture();
         let mut document = build_document(
@@ -2460,10 +3502,16 @@ mod tests {
         normalize_fixture_times(&mut document);
         let markdown = render_markdown(&document);
         let json = serde_json::to_string_pretty(&document).unwrap();
+        let fixture_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/report");
+        if std::env::var_os("RUSTFORGE_UPDATE_REPORT_FIXTURES").is_some() {
+            std::fs::write(fixture_dir.join("evidence-report-v3.md"), &markdown).unwrap();
+            std::fs::write(fixture_dir.join("evidence-report-v3.json"), &json).unwrap();
+        }
         let expected_markdown =
-            include_str!("../tests/fixtures/report/evidence-report-v2.md").replace("\r\n", "\n");
+            include_str!("../tests/fixtures/report/evidence-report-v3.md").replace("\r\n", "\n");
         let expected_json =
-            include_str!("../tests/fixtures/report/evidence-report-v2.json").replace("\r\n", "\n");
+            include_str!("../tests/fixtures/report/evidence-report-v3.json").replace("\r\n", "\n");
         assert_eq!(markdown.trim_end(), expected_markdown.trim_end());
         assert_eq!(json, expected_json.trim_end());
         assert!(!markdown.contains(&fixture.rejected_title));

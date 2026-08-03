@@ -1,6 +1,7 @@
 mod commands;
 // pub 暴露给集成测试（tests/）做无 GUI 的端到端验证
 pub mod ai;
+pub mod assessment;
 pub mod authorization;
 pub mod evidence;
 pub mod knowledge;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub db: Pool,
     pub proxy: proxy::ProxyManager,
     pub secrets: Arc<dyn secrets::SecretStore>,
+    pub assessments: Arc<assessment::AssessmentManager>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,15 +41,18 @@ pub fn run() {
             let db = storage::db::open_pool(&dir.join("rustforge.db"))
                 .map_err(|e| format!("打开数据库失败: {e}"))?;
             {
-                let conn = db.get().map_err(|e| format!("检查设置安全基线失败: {e}"))?;
+                let mut conn = db.get().map_err(|e| format!("检查设置安全基线失败: {e}"))?;
                 secrets::validate_no_plaintext_settings(&conn)?;
                 replay::service::recover_interrupted_attempts(&conn)
                     .map_err(|e| format!("恢复中断的 Repeater 请求失败: {e}"))?;
+                assessment::service::recover_interrupted_runs(&mut conn)
+                    .map_err(|e| format!("恢复中断的 AI 评估失败: {e}"))?;
             }
             app.manage(AppState {
                 db,
                 proxy: proxy::ProxyManager::default(),
                 secrets: Arc::new(secrets::SystemSecretStore::new()),
+                assessments: Arc::new(assessment::AssessmentManager::default()),
             });
             Ok(())
         })
@@ -60,6 +65,7 @@ pub fn run() {
             commands::set_provider_api_key,
             commands::delete_provider_api_key,
             commands::fetch_models,
+            commands::fetch_models_for_draft,
             commands::list_projects,
             commands::create_project,
             commands::delete_project,
@@ -126,6 +132,17 @@ pub fn run() {
             commands::get_replay_run,
             commands::compare_replay_runs,
             commands::replay_request,
+            commands::list_assessment_auth_profiles,
+            commands::create_assessment_auth_profile,
+            commands::set_assessment_auth_profile,
+            commands::import_assessment_auth_profile,
+            commands::list_assessment_auth_candidates,
+            commands::delete_assessment_auth_profile,
+            commands::preview_assessment_contract,
+            commands::start_assessment,
+            commands::cancel_assessment,
+            commands::list_assessment_runs,
+            commands::get_assessment_detail,
             commands::build_report,
             commands::export_report,
             commands::count_traffic,

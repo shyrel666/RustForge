@@ -30,7 +30,7 @@ pub struct ReplayRequestInputSnapshot {
     pub content_hash: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsPolicy {
     Strict,

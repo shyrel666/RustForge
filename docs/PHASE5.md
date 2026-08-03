@@ -1,16 +1,16 @@
 # Phase 5 · 持久化、容量、诊断与桌面发布 — 当前说明
 
-> 实现核查日期：2026-07-29。本文区分“仓库内已实现”与“需要外部发布凭据才能完成”的事项。
+> 实现核查日期：2026-08-01。本文区分“仓库内已实现”与“需要外部发布凭据才能完成”的事项。
 
 ## SQLite 基线与会话恢复
 
-- 当前预发布 schema 由 `src-tauri/src/storage/migrations/v1.sql` 单一维护，`PRAGMA user_version = 1`。
+- 当前 schema 为 v3：空库顺序执行 v1/v2/v3，既有 v2 通过真实 v3 migration 增量升级；启动 validation 检查新增表、列、索引、触发器、外键目标及 `ON DELETE` action。
 - 应用在创建连接池前用独占连接完成 schema 初始化/验证；每个池连接启用 WAL、foreign keys、5 秒 busy timeout 和 NORMAL synchronous。
 - 连接池最大 8 条，代理写入、后台规则和 UI 查询不共享一个全局 Mutex 连接。
 - schema 异常、外键/完整性失败或版本高于应用支持范围时明确拒绝启动，不猜测修复或静默降级。
-- 项目、流量、AI run、Finding、Evidence、Repeater 会话/run、测试计划/revision/events 和报告所需 provenance 均持久化。
+- 项目、流量、AI run、Finding、Evidence、Repeater、旧测试计划以及 Assessment 契约/轮次/端点/check/verification/gap/events 和报告 provenance 均持久化。
 - `current_project_id` 保存在非敏感 settings 中；重启恢复上次项目。项目切换会让旧异步结果和 Repeater 发送令牌失效，避免跨项目污染。
-- 应用启动会把没有最终 run 的 Repeater attempt 恢复为 `APP_INTERRUPTED`，再允许用户继续操作。
+- 应用启动会把没有最终 run 的 Repeater attempt 恢复为 `APP_INTERRUPTED`，并把遗留活动 Assessment 标为 `interrupted`、终结开放 check；两者都不会自动恢复网络动作。
 
 数据关系和删除语义见 [architecture/data-model.md](architecture/data-model.md)。
 
@@ -25,7 +25,7 @@
 
 ## AI 用量与本地成本提示
 
-- OpenAI 兼容响应中的 `usage` 会贯穿分析和测试计划调用；校验失败后的固定重试也计入总量。
+- OpenAI 兼容响应中的 `usage` 会贯穿分析、隐藏旧计划和 Assessment 规划轮次；校验失败后的固定重试也计入总量。
 - `analysis_runs` 保存每次响应的 prompt/completion/total tokens；设置页可按日或月聚合趋势。
 - `usage_calls / usage_prompt_tokens / usage_completion_tokens / usage_total_tokens` 提供本机累计视图和清零操作。
 - 每百万 token 单价由用户自行填写，只做本地估算；RustForge 不内置可能快速过时的供应商价格表。
@@ -75,7 +75,7 @@ pnpm build
 
 ## 手工验收
 
-1. 切换项目、关闭并重启应用，确认恢复正确项目及其流量、Finding、Evidence、Repeater 和测试计划。
+1. 切换项目、关闭并重启应用，确认恢复正确项目及其流量、Finding、Evidence、Repeater、Assessment 历史和隐藏旧计划；活动 Assessment 只能恢复为 interrupted。
 2. 抓取超过 200 条流量，确认默认窗口、总数和“加载更多”一致，实时流量不会无限扩大 DOM。
 3. 完成多次 AI 分析/计划调用，确认累计用量与按日/月趋势一致；无 usage 的 provider 显示 0 而非估算值。
 4. 检查生产 CSP、系统凭据库状态、CA 权限和规则诊断。
@@ -87,4 +87,4 @@ pnpm build
 - traffic 列表是扩大窗口，不是游标分页/虚拟列表；10 万级交互需要 M6 容量专项验证。
 - 用量累计是本机全局视图，趋势来自 `analysis_runs`；尚未按项目、provider 或模型提供完整成本账本。
 - WebSocket/SSE/HTTP/2 语义、结构化过滤 DSL、受限插件能力和源码辅助模式属于独立 backlog。
-- 首次公开发布前不支持旧开发数据库迁移；发布后必须另立备份和版本迁移策略。
+- 已支持 v1→v2→v3 顺序迁移和 v2→v3 数据保留；公开发布后的长期备份、降级与跨大版本迁移策略仍需另立计划。

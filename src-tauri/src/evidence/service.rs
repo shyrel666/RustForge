@@ -33,7 +33,7 @@ pub fn list_finding_evidence(conn: &Connection, finding_id: i64) -> Result<Vec<E
                     e.redacted_snapshot, e.content_hash, e.qualifies_for_confirmation,
                     e.created_by, e.created_at,
                     fe.linked_at, fe.accepted, fe.acceptance_note,
-                    fe.accepted_by, fe.accepted_at
+                    fe.accepted_by, fe.accepted_at, fe.acceptance_kind, fe.verification_id
              FROM finding_evidence fe
              JOIN evidence e ON e.id = fe.evidence_id
              WHERE fe.finding_id = ?1
@@ -183,7 +183,7 @@ pub fn create_task_evidence(
     Ok(evidence_id)
 }
 
-fn insert_evidence(
+pub(crate) fn insert_evidence(
     transaction: &Transaction<'_>,
     project_id: i64,
     source_type: EvidenceSourceType,
@@ -265,7 +265,9 @@ pub fn set_finding_evidence_accepted(
             )
             .map_err(|error| error.to_string())?;
         if accepted_count <= 1 {
-            return Err("已确认 Finding 必须至少保留一条人工接受的 Evidence".to_string());
+            return Err(
+                "已确认 Finding 必须至少保留一条已接受的 Evidence；请先重置为待验证".to_string(),
+            );
         }
     }
 
@@ -360,7 +362,7 @@ pub fn update_finding_status(
             .map_err(|error| error.to_string())?;
         if accepted_count == 0 {
             return Err(
-                "至少人工接受一条具备响应验证结果的 Evidence 后才能确认 Finding".to_string(),
+                "至少需要一条已接受且具备响应验证结果的 Evidence 后才能确认 Finding".to_string(),
             );
         }
     }
@@ -491,6 +493,8 @@ fn evidence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Evidence> {
         acceptance_note: row.get(12)?,
         accepted_by: row.get(13)?,
         accepted_at: row.get(14)?,
+        acceptance_kind: row.get(15)?,
+        verification_id: row.get(16)?,
     })
 }
 
@@ -505,7 +509,7 @@ fn load_linked_evidence(
                     e.redacted_snapshot, e.content_hash, e.qualifies_for_confirmation,
                     e.created_by, e.created_at,
                     fe.linked_at, fe.accepted, fe.acceptance_note,
-                    fe.accepted_by, fe.accepted_at
+                    fe.accepted_by, fe.accepted_at, fe.acceptance_kind, fe.verification_id
              FROM finding_evidence fe
              JOIN evidence e ON e.id = fe.evidence_id
              WHERE fe.finding_id = ?1 AND fe.evidence_id = ?2",
@@ -567,11 +571,25 @@ fn source_qualifies_for_confirmation(
             )
             .map_err(|error| format!("项目内不存在 Traffic #{source_id}: {error}")),
         EvidenceSourceType::ReplayRun => {
-            let run = replay::service::load_run_for_project(conn, project_id, source_id)?;
-            Ok(
+            let run = replay::service::load_run(conn, source_id)?;
+            if run.project_id != project_id {
+                return Err(format!(
+                    "项目 #{project_id} 内不存在 Repeater run #{source_id}"
+                ));
+            }
+            let owner_kind: String = conn
+                .query_row(
+                    "SELECT owner_kind FROM replay_sessions WHERE id = ?1",
+                    [run.session_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(if owner_kind == "assessment" {
+                run.outcome == "completed" && run.status.is_some() && !run.resp_truncated
+            } else {
                 matches!(run.outcome.as_str(), "completed" | "response_incomplete")
-                    && run.status.is_some(),
-            )
+                    && run.status.is_some()
+            })
         }
     }
 }

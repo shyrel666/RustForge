@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { getVersion } from "@tauri-apps/api/app";
 import VChart from "vue-echarts";
@@ -21,7 +22,6 @@ import {
   Monitor,
   CopyDocument,
   FolderOpened,
-  Loading,
 } from "@element-plus/icons-vue";
 import { useSettingsStore, type AiProvider } from "../stores/settings";
 import { useAppUpdater } from "../services/appUpdater";
@@ -41,6 +41,7 @@ import {
   getTokenUsage,
   resetTokenUsage,
   fetchModels,
+  fetchModelsForDraft,
   setProviderApiKey,
   deleteProviderApiKey,
   openUrl,
@@ -68,6 +69,7 @@ use([
 ]);
 
 const settings = useSettingsStore();
+const route = useRoute();
 const updater = useAppUpdater();
 const saving = ref(false);
 const activeTab = ref<"general" | "prompt" | "about">("general");
@@ -304,6 +306,16 @@ const editingProvider = computed(() =>
 const providerHasStoredKey = computed(
   () => editingProvider.value?.has_api_key === true
 );
+const storedBaseMatchesForm = computed(() => {
+  const storedBase = editingProvider.value?.base_url;
+  if (!storedBase) return false;
+  return normalizeBaseUrl(storedBase) === normalizeBaseUrl(form.base_url);
+});
+const canQueryModels = computed(() => {
+  if (!form.base_url.trim()) return false;
+  if (form.api_key.trim()) return true;
+  return providerHasStoredKey.value && storedBaseMatchesForm.value;
+});
 
 // 模型下拉候选：已获取模型 ∪ 当前已填模型（避免自定义值被下拉覆盖）
 const modelSelectOptions = computed(() => {
@@ -353,25 +365,32 @@ function applyPreset(label: string) {
   modelOptions.value = preset.model ? [preset.model] : [];
 }
 
-async function doFetchModels() {
-  if (!form.base_url.trim()) {
-    ElMessage.warning("请先填写 Base URL");
-    return;
+function normalizeBaseUrl(baseUrl: string) {
+  return baseUrl.trim().replace(/\/+$/, "");
+}
+
+async function fetchModelsFromForm() {
+  const baseUrl = form.base_url.trim();
+  if (!baseUrl) {
+    throw new Error("请先填写 Base URL");
+  }
+  if (form.api_key.trim()) {
+    return fetchModelsForDraft(baseUrl, form.api_key);
   }
   const providerId = editingId.value;
-  if (!providerId) {
-    ElMessage.warning("新增供应商请先保存，再编辑并获取模型");
-    return;
+  if (!providerId || !providerHasStoredKey.value) {
+    throw new Error("请先填写 API Key");
   }
-  const stored = settings.providers.find((provider) => provider.id === providerId);
-  if (!stored || stored.base_url.replace(/\/+$/, "") !== form.base_url.trim().replace(/\/+$/, "")) {
-    ElMessage.warning("Base URL 已修改，请先保存供应商后再获取模型");
-    return;
+  if (!storedBaseMatchesForm.value) {
+    throw new Error("Base URL 已修改，请重新输入 API Key 后再获取模型");
   }
+  return fetchModels(providerId);
+}
+
+async function doFetchModels() {
   fetchingModels.value = true;
   try {
-    await persistDraftKey(providerId);
-    const list = await fetchModels(providerId);
+    const list = await fetchModelsFromForm();
     modelOptions.value = list;
     if (!form.model && list.length) form.model = list[0];
     ElMessage.success(`获取到 ${list.length} 个模型`);
@@ -384,24 +403,9 @@ async function doFetchModels() {
 
 // 复用 /models 端点校验 Base URL + API Key 是否可用（免费、不烧 token）
 async function testConnection() {
-  if (!form.base_url.trim()) {
-    ElMessage.warning("请先填写 Base URL");
-    return;
-  }
-  const providerId = editingId.value;
-  if (!providerId) {
-    ElMessage.warning("新增供应商请先保存，再编辑并测试连接");
-    return;
-  }
-  const stored = settings.providers.find((provider) => provider.id === providerId);
-  if (!stored || stored.base_url.replace(/\/+$/, "") !== form.base_url.trim().replace(/\/+$/, "")) {
-    ElMessage.warning("Base URL 已修改，请先保存供应商后再测试连接");
-    return;
-  }
   testing.value = true;
   try {
-    await persistDraftKey(providerId);
-    const list = await fetchModels(providerId);
+    const list = await fetchModelsFromForm();
     ElMessage.success(`连接成功：鉴权通过，可用模型 ${list.length} 个`);
   } catch (e) {
     ElMessage.error(`连接失败：${String(e)}`);
@@ -560,6 +564,7 @@ const aiPolicy = reactive<AiDataPolicy>({
   response_body_max_bytes: 12 * 1024,
   total_context_max_bytes: 32 * 1024,
 });
+const policyExpanded = ref(false);
 const policyRelaxed = computed(
   () =>
     !aiPolicy.redact_query_values ||
@@ -584,6 +589,8 @@ async function refreshPromptVersions() {
 }
 
 // ---------- 用量统计 ----------
+const TOKEN_USAGE_HASH = "#token-usage";
+const tokenUsageSection = ref<HTMLElement | null>(null);
 const usage = ref<TokenUsage>({
   calls: 0,
   prompt_tokens: 0,
@@ -604,6 +611,19 @@ async function refreshUsage() {
     ElMessage.error(String(e));
   }
 }
+
+function scrollToTokenUsage() {
+  if (route.hash !== TOKEN_USAGE_HASH) return;
+  activeTab.value = "general";
+  void nextTick(() => {
+    tokenUsageSection.value?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  });
+}
+
+watch(() => route.hash, scrollToTokenUsage, { flush: "post" });
 
 // ---------- 使用趋势 ----------
 const trendGranularity = ref<'day' | 'month'>('day');
@@ -688,6 +708,7 @@ async function doResetUsage() {
 }
 
 onMounted(async () => {
+  scrollToTokenUsage();
   applyPromptState(await getPromptTemplate());
   await refreshPromptVersions();
   Object.assign(aiPolicy, await getAiDataPolicy());
@@ -897,74 +918,107 @@ async function save() {
       </section>
 
       <section class="setting-block">
-        <div class="setting-head">
-          <h2 class="rf-section-title">AI 默认数据策略</h2>
-          <p class="rf-section-desc">
-            每次分析仍会显示最终发送预览；这里控制预览初始值。正文和总上下文上限由后端强制校验。
-          </p>
-        </div>
-        <el-alert
-          v-if="policyRelaxed"
-          type="warning"
-          :closable="false"
-          title="当前默认策略放宽了至少一项最小披露保护；每次发送仍需在预览页再次确认。"
-          class="policy-warning"
-        />
-        <div class="rf-card control-card">
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">遮盖 URL 查询值</div>
-              <div class="row-desc">保留 scheme、host、path 与参数名</div>
-            </div>
-            <el-switch v-model="aiPolicy.redact_query_values" />
+        <div class="setting-head with-action">
+          <div>
+            <h2 class="rf-section-title">AI 默认数据策略</h2>
+            <p class="rf-section-desc">
+              每次分析仍会显示最终发送预览；这里控制预览初始值。正文和总上下文上限由后端强制校验。
+            </p>
           </div>
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">遮盖敏感 Header</div>
-              <div class="row-desc">Authorization、Cookie、Set-Cookie 与常见 Token Header</div>
-            </div>
-            <el-switch v-model="aiPolicy.redact_sensitive_headers" />
-          </div>
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">结构化正文秘密脱敏</div>
-              <div class="row-desc">JSON、表单、multipart、秘密格式和高熵值</div>
-            </div>
-            <el-switch v-model="aiPolicy.redact_body_secrets" />
-          </div>
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">异常正文显式放宽</div>
-              <div class="row-desc">默认不发送截断、二进制或解码/流异常正文</div>
-            </div>
-            <div class="inline-switches">
-              <el-checkbox v-model="aiPolicy.include_truncated_bodies">截断</el-checkbox>
-              <el-checkbox v-model="aiPolicy.include_binary_bodies">二进制</el-checkbox>
-              <el-checkbox v-model="aiPolicy.include_decode_failed_bodies">解码异常</el-checkbox>
-            </div>
-          </div>
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">请求 / 响应正文上限</div>
-              <div class="row-desc">每方向最高 24 KiB</div>
-            </div>
-            <div class="inline-limits">
-              <el-input-number v-model="aiPolicy.request_body_max_bytes" :min="0" :max="24576" :step="1024" />
-              <span>/</span>
-              <el-input-number v-model="aiPolicy.response_body_max_bytes" :min="0" :max="24576" :step="1024" />
-            </div>
-          </div>
-          <div class="row-item">
-            <div class="row-label">
-              <div class="row-title">总上下文硬上限</div>
-              <div class="row-desc">包含 system 与 user 消息，范围 16–64 KiB</div>
-            </div>
-            <el-input-number v-model="aiPolicy.total_context_max_bytes" :min="16384" :max="65536" :step="1024" />
+          <div class="policy-head-actions">
+            <el-tag
+              v-if="policyRelaxed"
+              type="warning"
+              effect="plain"
+              size="small"
+            >
+              已放宽
+            </el-tag>
+            <el-button
+              link
+              type="primary"
+              :aria-expanded="policyExpanded"
+              aria-controls="ai-default-policy-details"
+              @click="policyExpanded = !policyExpanded"
+            >
+              {{ policyExpanded ? "收起" : "展开" }}
+            </el-button>
           </div>
         </div>
+        <el-collapse-transition>
+          <div
+            v-show="policyExpanded"
+            id="ai-default-policy-details"
+            class="policy-details"
+          >
+            <el-alert
+              v-if="policyRelaxed"
+              type="warning"
+              :closable="false"
+              title="当前默认策略放宽了至少一项最小披露保护；每次发送仍需在预览页再次确认。"
+              class="policy-warning"
+            />
+            <div class="rf-card control-card">
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">遮盖 URL 查询值</div>
+                  <div class="row-desc">保留 scheme、host、path 与参数名</div>
+                </div>
+                <el-switch v-model="aiPolicy.redact_query_values" />
+              </div>
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">遮盖敏感 Header</div>
+                  <div class="row-desc">Authorization、Cookie、Set-Cookie 与常见 Token Header</div>
+                </div>
+                <el-switch v-model="aiPolicy.redact_sensitive_headers" />
+              </div>
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">结构化正文秘密脱敏</div>
+                  <div class="row-desc">JSON、表单、multipart、秘密格式和高熵值</div>
+                </div>
+                <el-switch v-model="aiPolicy.redact_body_secrets" />
+              </div>
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">异常正文显式放宽</div>
+                  <div class="row-desc">默认不发送截断、二进制或解码/流异常正文</div>
+                </div>
+                <div class="inline-switches">
+                  <el-checkbox v-model="aiPolicy.include_truncated_bodies">截断</el-checkbox>
+                  <el-checkbox v-model="aiPolicy.include_binary_bodies">二进制</el-checkbox>
+                  <el-checkbox v-model="aiPolicy.include_decode_failed_bodies">解码异常</el-checkbox>
+                </div>
+              </div>
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">请求 / 响应正文上限</div>
+                  <div class="row-desc">每方向最高 24 KiB</div>
+                </div>
+                <div class="inline-limits">
+                  <el-input-number v-model="aiPolicy.request_body_max_bytes" :min="0" :max="24576" :step="1024" />
+                  <span>/</span>
+                  <el-input-number v-model="aiPolicy.response_body_max_bytes" :min="0" :max="24576" :step="1024" />
+                </div>
+              </div>
+              <div class="row-item">
+                <div class="row-label">
+                  <div class="row-title">总上下文硬上限</div>
+                  <div class="row-desc">包含 system 与 user 消息，范围 16–64 KiB</div>
+                </div>
+                <el-input-number v-model="aiPolicy.total_context_max_bytes" :min="16384" :max="65536" :step="1024" />
+              </div>
+            </div>
+          </div>
+        </el-collapse-transition>
       </section>
 
-      <section class="setting-block">
+      <section
+        id="token-usage"
+        ref="tokenUsageSection"
+        class="setting-block token-usage-section"
+      >
         <div class="setting-head with-action">
           <div>
             <h2 class="rf-section-title">Token 统计</h2>
@@ -1149,12 +1203,6 @@ async function save() {
           正在安装更新，完成后将自动重启
         </div>
         <div
-          v-else-if="updater.status.value === 'latest'"
-          class="about-banner latest"
-        >
-          当前已是最新版本
-        </div>
-        <div
           v-else-if="updater.status.value === 'error'"
           class="about-banner error"
         >
@@ -1190,17 +1238,8 @@ async function save() {
           </div>
         </div>
         <div
-          v-if="diagLoading"
-          class="env-load-status"
-          role="status"
-          aria-live="polite"
-        >
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span>正在后台读取本机环境，页面仍可正常操作。</span>
-        </div>
-        <div
-          v-else-if="diagnosticsError"
-          class="env-load-status is-error"
+          v-if="diagnosticsError"
+          class="env-diagnostic-error"
           role="alert"
         >
           <strong>部分信息读取失败，不影响其他功能。</strong>
@@ -1293,7 +1332,9 @@ async function save() {
               {{
                 providerHasStoredKey
                   ? "已配置；完整 Key 不会回填到界面"
-                  : "尚未配置"
+                  : form.api_key.trim()
+                    ? "已输入；获取模型或测试连接不会保存 Key"
+                    : "尚未配置"
               }}
             </div>
           </div>
@@ -1305,7 +1346,7 @@ async function save() {
             </el-select>
             <el-button
               :loading="fetchingModels"
-              :disabled="!editingId"
+              :disabled="!canQueryModels || testing"
               @click="doFetchModels"
             >
               获取模型
@@ -1323,10 +1364,14 @@ async function save() {
         </el-form-item>
       </el-form>
       <p v-if="!editingId" class="dialog-hint">
-        新增供应商先保存元数据和 Key；之后可重新编辑并获取模型或测试连接。
+        可先获取模型或测试连接；只有点击保存后，配置和 Key 才会写入本机。
       </p>
       <template #footer>
-        <el-button :loading="testing" :disabled="!editingId" @click="testConnection">
+        <el-button
+          :loading="testing"
+          :disabled="!canQueryModels || fetchingModels"
+          @click="testConnection"
+        >
           测试连接
         </el-button>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -1384,6 +1429,10 @@ async function save() {
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-3);
+}
+
+.token-usage-section {
+  scroll-margin-top: var(--rf-space-3);
 }
 
 .setting-head .rf-section-title {
@@ -1588,6 +1637,12 @@ async function save() {
 .policy-warning {
   margin-bottom: 10px;
 }
+.policy-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .inline-switches,
 .inline-limits {
   display: flex;
@@ -1703,11 +1758,6 @@ async function save() {
   color: var(--rf-accent);
   border: 1px solid rgba(45, 212, 191, 0.35);
 }
-.about-banner.latest {
-  background: rgba(52, 211, 153, 0.1);
-  color: var(--rf-success);
-  border: 1px solid rgba(52, 211, 153, 0.3);
-}
 .about-banner.error {
   background: rgba(248, 113, 113, 0.1);
   color: var(--rf-danger);
@@ -1740,43 +1790,32 @@ async function save() {
   flex-wrap: wrap;
   gap: 8px;
 }
-.env-load-status {
+.env-diagnostic-error {
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 10px 12px;
-  border: 1px solid
-    color-mix(in srgb, var(--rf-accent) 28%, var(--rf-border));
-  border-radius: var(--rf-radius-control);
-  background: var(--rf-accent-muted);
-  color: var(--rf-text-secondary);
-  font-size: 12.5px;
-  line-height: 1.5;
-}
-.env-load-status .el-icon {
-  flex: 0 0 auto;
-  color: var(--rf-accent);
-}
-.env-load-status.is-error {
   align-items: flex-start;
   flex-direction: column;
   gap: 3px;
-  border-color: color-mix(
+  padding: 10px 12px;
+  border: 1px solid color-mix(
     in srgb,
     var(--rf-warning, #e6a23c) 34%,
     var(--rf-border)
   );
+  border-radius: var(--rf-radius-control);
   background: color-mix(
     in srgb,
     var(--rf-warning, #e6a23c) 8%,
     transparent
   );
+  color: var(--rf-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
-.env-load-status.is-error strong {
+.env-diagnostic-error strong {
   color: var(--rf-warning, #e6a23c);
   font-size: 12.5px;
 }
-.env-load-status.is-error span {
+.env-diagnostic-error span {
   color: var(--rf-text-secondary);
   overflow-wrap: anywhere;
 }

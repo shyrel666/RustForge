@@ -1,17 +1,17 @@
 # RustForge 当前数据模型
 
-> 基线：SQLite schema v1；实现核查日期：2026-07-29；源码真值：[`src-tauri/src/storage/migrations/v1.sql`](../../src-tauri/src/storage/migrations/v1.sql)、[`storage/models.rs`](../../src-tauri/src/storage/models.rs) 及各领域 service。
+> 基线：SQLite schema v3；实现核查日期：2026-08-01；源码真值：[`src-tauri/src/storage/migrations/`](../../src-tauri/src/storage/migrations/)、[`storage/models.rs`](../../src-tauri/src/storage/models.rs) 与各领域 service。
 
-本文描述当前预发布数据模型及其数据库强制约束。它不是未来迁移承诺；字段和枚举若与本文冲突，以 v1 SQL、Rust 模型和测试为准。
+本文描述当前预发布数据模型及数据库强制约束。字段或枚举若与本文冲突，以迁移 SQL、Rust 模型和自动测试为准。
 
-## 版本与连接策略
+## 版本与迁移策略
 
-- `LATEST_SCHEMA_VERSION = 1`，身份保存在 `PRAGMA user_version`。
-- 空数据库直接创建当前 v1。无版本数据库只有在执行幂等 DDL 后完整符合当前结构、索引、外键和完整性检查时才标记为 v1。
-- 版本高于应用、schema 畸形、外键损坏或完整性失败都会拒绝启动，不自动删除、降级或猜测修复。
-- 应用先用独占连接完成 schema 检查，再创建最大 8 连接的 r2d2 pool。
-- 每条连接启用 WAL、`foreign_keys = ON`、5 秒 `busy_timeout` 和 `synchronous = NORMAL`。
-- 首次公开发布前不支持旧开发 schema 的兼容迁移、回填、legacy 列、双写或 dual-read；不一致的开发数据库应重建。发布后的迁移与备份必须另立计划。
+- `LATEST_SCHEMA_VERSION = 3`，版本保存在 `PRAGMA user_version`。
+- 空库依次执行 v1、v2、v3；既有 v2 数据库通过真实 v3 migration 增量升级，不重建核心表，不删除旧 task tree。
+- v3 为 Assessment 新建领域表，并通过 `ALTER TABLE` 扩展 `replay_sessions`、`findings` 与 `finding_evidence`。旧 replay session 回填为 `manual`，旧 Evidence 接受来源回填为 `human`。
+- 每一步迁移在事务中执行；失败回滚且不提高 `user_version`。重复打开已升级数据库不重复写入。
+- 启动验证列、表、索引、触发器、外键目标与 `ON DELETE` action；版本过高、schema 畸形、foreign key/integrity 检查失败均拒绝启动。
+- 应用先用独占连接完成迁移/验证，再创建最大 8 连接的 r2d2 pool；连接启用 WAL、`foreign_keys = ON`、5 秒 `busy_timeout` 和 `synchronous = NORMAL`。
 
 ## 领域关系总览
 
@@ -19,185 +19,155 @@
 flowchart LR
     Project["projects\n授权与生命周期根"]
     Traffic["traffic\n有界 HTTP 快照"]
-    AnalysisRun["analysis_runs\nAI 调用审计"]
-    Analysis["analyses\n结构化分析缓存"]
-    RuleEval["rule_evaluations\n包级求值审计"]
-    RuleHit["finding_rule_hits\n命中快照"]
-    Finding["findings\n待验证/确认/排除"]
-    FindingTraffic["finding_traffic\n重复命中关系"]
-    FindingEvent["finding_events\n不可变复核事件"]
+    Analysis["analysis_runs\n模型调用审计"]
+    Finding["findings\n问题身份 + producer"]
     Evidence["evidence\n不可变脱敏快照"]
-    FindingEvidence["finding_evidence\n人工接受判断"]
+    FindingEvidence["finding_evidence\nhuman / safe_verifier"]
+
+    Auth["assessment_auth_profiles\n仅秘密元数据"]
+    Run["assessment_runs\n契约与预算"]
+    Round["assessment_rounds\nAI 轮次"]
+    Endpoint["assessment_endpoints\n发现清单"]
+    Check["assessment_checks\n模板选择与策略结果"]
+    Replay["assessment_check_replays\n角色化 ReplayRun"]
+    Verification["assessment_verifications\n版本化确定性结论"]
+    Link["assessment_finding_links"]
+    Gap["assessment_coverage_gaps"]
+    Event["assessment_events\nappend-only"]
 
     Project --> Traffic
-    Project --> AnalysisRun
-    Project --> RuleEval
-    Project --> Finding
-    Project --> Evidence
-    Traffic --> AnalysisRun
-    AnalysisRun --> Analysis
-    Traffic --> RuleEval
-    RuleEval --> RuleHit
-    Finding --> RuleHit
-    Finding --> FindingTraffic
-    Traffic --> FindingTraffic
-    Finding --> FindingEvent
-    Finding --> FindingEvidence
-    Evidence --> FindingEvidence
+    Project --> Analysis
+    Project --> Finding --> FindingEvidence --> Evidence
+    Project --> Auth
+    Project --> Run
+    Run --> Round --> Analysis
+    Run --> Endpoint
+    Run --> Check
+    Endpoint --> Check
+    Check --> Replay
+    Check --> Verification --> Link --> Finding
+    Run --> Gap
+    Run --> Event
 ```
 
-```mermaid
-flowchart LR
-    Project["projects"]
-    ReplaySession["replay_sessions"]
-    ReplayAttempt["replay_attempts\n网络副作用前落库"]
-    ReplayRun["replay_runs\n不可变结果"]
-    Proposal["task_plan_proposals"]
-    Plan["test_plans"]
-    Revision["task_plan_revisions"]
-    Node["task_nodes"]
-    Prerequisite["task_prerequisites"]
-    PlanEvent["task_plan_events"]
-    TaskFinding["task_findings"]
-    TaskEvidence["task_evidence"]
-    Finding["findings"]
-    Evidence["evidence"]
+Assessment 的内部 replay 仍使用既有 `replay_sessions → replay_attempts → replay_runs` 传输与不可变审计，但 session 标记为 `owner_kind = assessment` 并绑定 run；手动 Repeater API 只读取 `owner_kind = manual`。
 
-    Project --> ReplaySession --> ReplayAttempt --> ReplayRun
-    Project --> Proposal
-    Project --> Plan --> Revision
-    Plan --> Node
-    Node --> Prerequisite
-    Node --> PlanEvent
-    Node --> TaskFinding --> Finding
-    Node --> TaskEvidence --> Evidence
-    Proposal --> Revision
-```
+旧 `task_plan_proposals / test_plans / task_plan_revisions / task_nodes / task_*` 关系完整保留，继续支持历史 API，但与 Assessment 没有外键或双写。`/tasks` 主导航不再加载旧树。
 
-`evidence.source_type + source_id` 是有意设计的多态来源引用，不设置跨表外键；因此原 Traffic、AnalysisRun 或 ReplayRun 生命周期结束后，Evidence 的脱敏快照、来源身份与 hash 仍可保留。读取时再计算 `source_available`。
+`evidence.source_type + source_id` 是有意的多态来源引用，不设置跨表外键；原 Traffic、AnalysisRun 或 ReplayRun 生命周期结束后，Evidence 的脱敏快照、来源身份与 hash 仍可保留，读取时计算 `source_available`。
 
-## 表目录
+## Assessment 表目录
 
 | 表 | 作用 | 关键约束 / 写入模型 |
 |---|---|---|
-| `settings` | 全局非敏感配置、当前项目和用量累计 | API Key 禁止写入；启动时扫描明文秘密 |
-| `projects` | 一个授权目标/会话的生命周期根 | `scope` 为后端规范化 JSON 字符串数组 |
-| `traffic` | MITM 请求/响应的有界快照 | 保存 wire/captured size、truncated、decode status；项目删除级联 |
-| `replay_sessions` | Repeater 标签页/工作区 | 项目内只能有一个 selected；来源 Traffic 必须同项目 |
-| `replay_attempts` | 网络副作用前的发送意图 | execution token 唯一；不可更新/单独删除 |
-| `replay_runs` | 成功、拒绝、失败或中断的不可变结果 | outcome/Scope/status 组合有 CHECK；attempt 至多一个 run |
-| `replay_run_delete_guards` | 允许父级生命周期级联的内部 guard | 无应用命令直接访问 |
-| `prompt_versions` | 自定义分析提示词历史 | `(prompt_id, version)` 唯一；append-only |
-| `analysis_runs` | 每次模型响应的审计 | valid/invalid 都保留；traffic 若存在必须同项目 |
-| `analyses` | 通过校验的结构化流量分析缓存 | 每条记录唯一引用一个 AnalysisRun |
-| `findings` | AI/规则产生的问题身份 | 新建必须 pending；状态/严重度/备注受事件约束 |
-| `finding_events` | Finding 人工复核时间线 | append-only；rejected 原因必填 |
-| `finding_traffic` | 同一 Finding 命中过的流量集合 | Finding 与 Traffic 必须同项目 |
-| `evidence` | 来源独立的脱敏小快照 | 不可变；JSON ≤ 64 KiB；保存 SHA-256 和确认资格 |
-| `finding_evidence` | Evidence 对某 Finding 的人工判断 | 初始 unaccepted；接受/撤销必须有匹配事件 |
-| `rule_evaluations` | 单 traffic/包版本的求值审计 | `(traffic_id, pack_id, pack_version)` 唯一、可重试幂等 |
-| `finding_rule_hits` | 升级为 Finding 的逐次命中快照 | 保存 pack/rule version、field、证据、置信度和 hit fingerprint |
-| `task_plan_proposals` | 尚未直接执行的 AI 计划候选 | operation/status 白名单；绑定 base revision |
-| `test_plans` | 项目当前计划头 | 每项目一行，保存 revision 和更新标记 |
-| `task_plan_revisions` | 已提交计划版本 | `(project_id, revision)` 主键 |
-| `task_nodes` | 当前与软归档计划节点 | stable key 项目内唯一；枚举、原因和归档时间有 CHECK |
-| `task_prerequisites` | 与 parent 分离的执行依赖 | 同项目、活动节点、无自依赖、无环 |
-| `task_findings` | 节点与 Finding | 同项目且 Finding 不能是 rejected |
-| `task_evidence` | 节点与 Evidence | 同项目；只引用不可变快照 |
-| `task_plan_events` | 计划变更审计 | append-only；项目/revision/node/proposal 上下文必须一致 |
-| `task_plan_delete_guards` | 允许项目级联删除计划事件的内部 guard | 无应用命令直接访问 |
+| `assessment_auth_profiles` | 身份标签、允许的 Header、来源 Traffic、秘密修订 | 不保存秘密值；项目内 label 唯一；来源 Traffic 必须同项目 |
+| `assessment_runs` | 状态、URL/origin、契约及 hash、registry hash、身份、AI、TLS、预算、停止原因 | 全局唯一活动 run；最多三轮、300 请求、2 RPS、20 MiB；状态更新前必须已有事件 |
+| `assessment_rounds` | 每轮 planning 状态、AnalysisRun、输入/输出 hash、选择/拒绝数量 | `(run_id, round_number)` 唯一；轮次 1..3、check ≤ 12 |
+| `assessment_endpoints` | start/crawl/redirect/traffic 端点、参数名、响应元数据、资源归属 | `(run_id, endpoint_key)` 唯一；只允许 GET/HEAD 清单；身份与 Traffic 必须同项目 |
+| `assessment_checks` | AI 请求的 endpoint/template/parameter/identity 与后端策略/执行状态 | 保存被拒绝的伪造选择；端点/轮次必须属于同 run；单选择组合唯一 |
+| `assessment_check_replays` | check 与 baseline/probe/A/B 等角色 ReplayRun 的关系 | ReplayRun 必须来自同 run 的 assessment session；不可跨项目借证据 |
+| `assessment_verifications` | verifier ID/version、verdict、结构化观察与 content hash | 每 check 最多一个；不可更新或单独删除 |
+| `assessment_finding_links` | verification 与 Finding 的 supports/human_conflict 关系 | 必须同项目；运行存在期间关系不可修改/删除 |
+| `assessment_coverage_gaps` | 策略跳过、身份不足、预算/响应限制和主动不覆盖 | 可选关联同 run check；结构化 category/reason code |
+| `assessment_events` | run/check 的状态与审计时间线 | append-only；run/check 必须一致；run 状态变化要求先写事件 |
 
-报告不持久化为业务表。`report.rs` 从上述当前状态与不可变审计构建 Evidence Report Schema v2，再同时渲染 Markdown 和 JSON。
+## 既有表的 v3 扩展
+
+| 表 | 新字段 | 语义 |
+|---|---|---|
+| `replay_sessions` | `owner_kind`, `assessment_run_id` | `manual` 不得绑定 run；`assessment` 必须绑定同项目 run，且 owner/run 不能事后改写 |
+| `findings` | `producer` | `ai / passive_rule / safe_verifier`；保留 `source = ai / rule` 兼容核心 Finding 逻辑 |
+| `finding_evidence` | `acceptance_kind`, `verification_id` | `human` 不绑定 verification；`safe_verifier` 必须绑定同 Finding、同 check 的合格 confirmed verification/Replay Evidence |
+
+## 其它核心表
+
+| 领域 | 主要表 | 关键语义 |
+|---|---|---|
+| 项目/设置 | `projects`, `settings` | 项目是隔离和级联根；settings 禁止秘密 |
+| Traffic | `traffic` | 保存 wire/captured size、truncated、decode status；正文有界 |
+| AI | `prompt_versions`, `analysis_runs`, `analyses` | 每次 valid/invalid 调用可审计；缓存只引用 valid run |
+| 规则 | `rule_evaluations`, `finding_rule_hits`, `finding_traffic` | 包/规则版本固定，稳定 fingerprint 去重 |
+| Finding | `findings`, `finding_events` | 新建 pending；状态、严重度、备注必须有先行 append-only event |
+| Evidence | `evidence`, `finding_evidence` | 脱敏 snapshot 与 content hash 不可变；接受判断在关系表 |
+| Replay | `replay_sessions`, `replay_attempts`, `replay_runs` | 网络前 attempt，结果 run 不可变；启动恢复孤立 attempt |
+| 旧计划 | `task_plan_*`, `test_plans`, `task_nodes`, `task_*` | proposal/revision/事件与软归档仍保留，只作隐藏兼容 |
+
+报告不作为业务表持久化。`report.rs` 从当前 Finding/Evidence 与可选 Assessment run 构建 Evidence Report Schema v3，再从同一个 document 渲染 Markdown 和 JSON。
 
 ## 核心不变量
 
-### 项目隔离
+### 项目隔离与生命周期
 
-- Traffic、AnalysisRun、Finding、Evidence、Replay 和测试计划实体均带 `project_id` 或可沿外键唯一归属项目。
-- 数据库 trigger 拒绝跨项目的 replay source、Finding source、Finding-Traffic、Finding-Evidence、Task-Finding、Task-Evidence、parent 和 prerequisite。
-- 应用层仍在服务入口检查项目；数据库约束作为绕过 service 时的 defense in depth。
+- Traffic、AnalysisRun、Finding、Evidence、Replay、Assessment 与旧 task entities 均带 `project_id` 或沿外键唯一归属项目。
+- trigger 拒绝跨项目的 profile source、run identities、round、endpoint、check、assessment replay、verification link、gap/event 以及既有 Finding/Evidence/Replay/task 关系。
+- 项目删除会级联项目内业务数据；存在活动 Assessment 时 service 在删除前拒绝。用户必须先取消并等待终态。
+- profile 删除先清系统凭据再删 metadata；项目删除收集所有 credential ID 并执行补偿清理，避免明文或孤儿凭据。
 
-### 有界 Traffic 不是完整报文声明
+### 运行契约与状态审计
 
-- `*_wire_size` 是流中实际观察的总字节数。
-- `*_captured_size` 是最终入库的、可能解压后的有界表示大小。
-- `*_truncated` 同时表达线缆上限、解压上限、错误或未完整结束。
-- `*_decode_status` 决定正文能否作为文本、二进制或异常内容使用。下游 AI、规则、Evidence 和报告必须携带该状态，不能把前缀冒充完整正文。
+- contract hash 固定 Scope、精确 origin、排除路径、TLS、预算、身份 ID/revision、归属声明、AI provider/model、脱敏策略和模板 registry。
+- `assessment_runs_one_active` 在数据库层保证全局最多一个 queued/discovering/planning/executing/verifying run。
+- run 状态不能在缺少先行 `assessment_events` 的情况下直接更新；event 和 verification 都不可变。
+- 启动时遗留活动 run 变为 `interrupted`，开放 check 终结；不会自动恢复网络动作。
 
-### Repeater 副作用可审计
+### 秘密不进入 SQLite 与审计
 
-- Scope 拒绝发生在网络前，直接产生无 attempt 的 `scope_rejected` run。
-- 通过 Scope 且准备好请求后，先提交 `replay_attempts`，再产生网络副作用。
-- 正常完成或失败后追加对应 `replay_runs`；重启时无结果 attempt 转为 `APP_INTERRUPTED` run。
-- attempt/run 不可变。只有会话或项目生命周期删除可以通过内部 guard 级联；存在 in-flight attempt 时父级删除被拒绝。
+- `assessment_auth_profiles` 只有 Header 名、label、来源和 `secret_revision`。系统凭据库 key 由 project/profile 身份派生。
+- Assessment live Header 与 audit Header 在内存结构中分离；持久化请求使用 `[AUTH_PROFILE:<id>]`。
+- Assessment request hash 基于脱敏 Header、profile ID 与 revision，不包含值；响应 snapshot 会再次遮盖已知秘密及其常见编码。
 
-### Finding 是假设，Evidence 是观察
+### Replay 副作用可审计
 
-- `findings.source` 只有 `ai` 或 `rule`，新建状态必须是 `pending`。
-- AI Finding 必须引用同项目且 `validation_status = valid` 的 AnalysisRun。
-- 规则 Finding 使用全局唯一 SHA-256 fingerprint；fingerprint 已包含项目身份。
-- `finding_events` 的最新匹配事件是修改 status/severity/notes 的先决条件。
-- confirmed 需要至少一个 `finding_evidence.accepted = 1` 且对应 `evidence.qualifies_for_confirmation = 1` 的关系；最后一个合格接受项不能撤销。
-- AnalysisRun Evidence 永不具备确认资格。Traffic 必须实际有响应；ReplayRun 必须有响应状态且 outcome 为 completed/response_incomplete。
+- Scope/AssessmentPolicy 拒绝发生在 socket 前；被允许的请求先写 `replay_attempts`，再执行网络动作。
+- 正常、失败、不完整或取消结果追加为不可变 `replay_runs`；崩溃留下的 attempt 由启动恢复逻辑终结。
+- 手动 API 无法枚举、读取或发送 Assessment session。`assessment_check_replays` 只接受同 run session 的 ReplayRun。
 
-### Evidence 保留来源事实，不保留无界原文
+### Finding、Verification 与 Evidence
 
-- 创建 Evidence 时立即生成脱敏、有界 JSON 和 `content_hash`，之后不可修改。
-- `observation` 和 `created_by` 是创建时输入并一同冻结。
-- 接受说明、actor 和时间属于 `finding_evidence` 关系，必须作为一次审计转换原子更新。
-- 删除原始 Traffic 不会修改 Evidence；`source_available` 是读取期状态，不写回不可变行。
+- AI 与被动规则只创建 pending Finding；安全验证器使用既有规则 fingerprint 创建/复用 `source = rule, producer = safe_verifier` Finding。
+- `commit_verification_outcome` 在一个事务中写 verification、Finding/link、Replay Evidence、Evidence 接受、Finding events 与状态。
+- `confirmed` verification 才能产生 `acceptance_kind = safe_verifier, accepted = 1`；suspected/inconclusive Evidence 保持未接受。
+- 数据库验证 safe-verifier Evidence 的 verification verdict、Finding link、check 与 ReplayRun 关系。人工 rejected 只建立 `human_conflict`，不改变状态。
+- AnalysisRun Evidence 永远不具备确认资格；截断/不完整 Assessment 响应不能支撑自动确认。
 
-### 测试计划只通过 service 合并
+### 旧测试计划隔离
 
-- proposal 状态为 `pending / applied / rejected / superseded`；AI 输出不直接写 `task_nodes`。
-- apply 时复核 project、base revision、Finding 状态和保护字段，在一个 immediate transaction 中写 revision、节点/关系、事件和 proposal 状态。
-- stable key 用于跨 revision 对齐；人工节点、非 todo 进度、字段锁和 Evidence 关系受保护。
-- status 变化必须有同项目、同节点、当前 revision 的最新 `status_changed` 事件。
-- 节点删除在产品层是软归档；项目生命周期删除才真正级联。
+- proposal 仍只能由旧 tree service 合并，保留 revision、人工锁、状态事件与软归档约束。
+- Assessment 不创建/更新 task node；报告只能把旧计划作为 `legacy_plan_summary` 附录，不能当作执行结果。
 
 ## 稳定身份与 hash
 
 | 身份 | 组成 | 用途 |
 |---|---|---|
-| 规则 hit fingerprint | `rule_id + method + normalized host + path without query + field_path` 的长度前缀 SHA-256 | 同一规则/端点/字段稳定命中；规则版本不参与 |
-| Finding fingerprint | `project_id + hit fingerprint` 的长度前缀 SHA-256 | 项目内规则 Finding 去重 |
-| Analysis input hash | system/user/retry、provider、model、prompt version、policy、Schema 等有序内容 | 预览与真正发送绑定 |
-| Evidence content hash | 持久化脱敏 snapshot 字节 | 读取和报告时校验快照未漂移 |
-| Replay request/response hash | 规范化请求与完整 wire 流（可得时） | 历史身份和 diff；截断时避免虚假相等 |
-| 知识包 content hash | entries 的确定性 serde JSON | 启动时验证固定标准包内容 |
+| Assessment contract hash | 规范化契约 + identity revision + registry version/hash | 预览与启动/执行时数据绑定 |
+| Endpoint key/opaque ID | run 内规范化 method/origin/path/query 参数身份的 SHA-256 派生 | 模型引用端点，不暴露可编辑 URL |
+| Verification content hash | verifier/version/verdict/结构化观察的确定性 JSON | 阻止事实结论漂移 |
+| Finding fingerprint | 项目 + 规则/安全验证器稳定身份 | 项目内去重，保留人工状态 |
+| Evidence content hash | 持久化脱敏 snapshot 字节 | 读取与报告时校验 |
+| Replay request hash | 脱敏请求 + profile ID/revision | 比较请求且不混入 secret value |
+| Replay response hash | 完整原始响应（可得时）的 hash | A/B 等价判断；snapshot 仍脱敏 |
 
 ## 枚举摘要
 
 | 对象 | 当前值 |
 |---|---|
-| Traffic decode status | `not_received / empty / identity_text / identity_binary / decoded_text / decoded_binary / decode_failed / unsupported_encoding / encoded_truncated / decode_truncated / stream_error / stream_incomplete` |
-| Replay TLS | `strict / ignore_invalid` |
-| Replay outcome | `completed / scope_rejected / request_failed / response_incomplete` |
+| Assessment status | `queued / discovering / planning / executing / verifying / completed / stopped / cancelled / failed / interrupted` |
+| Assessment verdict | `confirmed / suspected / not_observed / inconclusive / skipped` |
+| Identity mode | `anonymous / a / b / a_vs_b` |
+| Replay owner | `manual / assessment` |
 | Finding status | `pending / confirmed / rejected` |
 | Finding source | `ai / rule` |
-| Evidence source | `traffic / analysis_run / replay_run` |
-| Proposal operation | `generate / expand / alternative` |
-| Proposal status | `pending / applied / rejected / superseded` |
-| Task node type | `hypothesis / test / decision / manual_note` |
-| Task source | `ai / rule / manual` |
-| Task status | `todo / in_progress / done / blocked / skipped / not_applicable` |
-
-## 删除语义
-
-- 删除项目是明确的生命周期操作，会级联项目内流量、Finding、Evidence、Replay 和测试计划；in-flight replay 会阻止删除。
-- 删除 Traffic 会清除依赖它的 analysis cache、rule evaluation 和关系行，并把 session/Finding/AnalysisRun 的可空主引用设为 NULL；独立 Evidence 快照保留到项目删除。
-- Finding 删除会级联事件、Evidence 关系、规则命中和任务关系；Evidence 实体仍可被其它关系引用。
-- 产品不暴露单独更新/删除 Evidence、Replay run、Finding event 或 TaskPlan event 的命令。
+| Finding producer | `ai / passive_rule / safe_verifier` |
+| Evidence acceptance | `human / safe_verifier` |
+| Replay outcome | `completed / scope_rejected / request_failed / response_incomplete` |
 
 ## 修改模型时的同步清单
 
 任何字段或关系变更必须在一个任务中同步：
 
-1. `v1.sql` DDL、CHECK、index、trigger 与结构验证。
-2. Rust row mapping、领域模型和 service 事务。
-3. Tauri command 与 `src/api/tauri.ts` 类型。
-4. Vue store/view 的所有调用方。
-5. 空库、重复打开、完整性、跨项目、级联和失败回滚测试。
-6. 本文、[security-boundaries.md](security-boundaries.md) 及受影响 Phase 说明。
-
-预发布期间不要为旧开发库增加临时兼容字段；首次公开发布后则不能继续沿用“重建即可”的策略，必须另行设计真实迁移与备份。
+1. 新迁移 SQL、`LATEST_SCHEMA_VERSION` 与完整结构/FK/trigger validation。
+2. Rust row mapping、领域模型、service 事务与启动恢复。
+3. Tauri commands、事件与 `src/api/tauri.ts` 类型。
+4. Vue store/view 的项目与 run ownership。
+5. 空库、逐版本升级、重复打开、失败回滚、跨项目、不可变、级联和秘密泄漏测试。
+6. 本文、[security-boundaries.md](security-boundaries.md)、[AUTHORIZATION.md](../AUTHORIZATION.md) 与受影响 Phase 说明。

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { Top } from "@element-plus/icons-vue";
 import { useAppUpdater } from "../services/appUpdater";
 import AppUpdateDialog from "./AppUpdateDialog.vue";
 
@@ -56,7 +55,6 @@ async function installAvailableUpdate() {
     v-if="updater.showUpdateButton.value"
     type="button"
     class="app-update-button"
-    :class="{ busy: updater.busy.value }"
     :title="buttonTitle"
     :aria-label="buttonTitle"
     :disabled="buttonBusy"
@@ -72,7 +70,23 @@ async function installAvailableUpdate() {
     >
       {{ updater.progressPercent.value }}
     </span>
-    <el-icon v-else :size="16"><Top /></el-icon>
+    <svg
+      v-else
+      class="update-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" />
+      <path
+        class="update-arrow"
+        d="M12 16V8M8 12l4-4 4 4"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
   </button>
 
   <AppUpdateDialog
@@ -94,24 +108,17 @@ async function installAvailableUpdate() {
   justify-content: center;
   flex-shrink: 0;
   padding: 0;
-  border: 1px solid
-    color-mix(in srgb, var(--rf-accent) 46%, var(--rf-border));
+  border: none;
   border-radius: 50%;
-  background: var(--rf-accent-muted);
+  background: transparent;
   color: var(--rf-accent);
   font: inherit;
   cursor: pointer;
-  transition:
-    background var(--rf-duration) var(--rf-ease),
-    border-color var(--rf-duration) var(--rf-ease),
-    transform var(--rf-duration) var(--rf-ease);
+  transition: color var(--rf-duration) var(--rf-ease);
 }
 
 .app-update-button:hover:not(:disabled) {
-  border-color: var(--rf-accent);
-  background: var(--rf-accent);
-  color: var(--rf-accent-on);
-  transform: translateY(-1px);
+  color: var(--rf-accent-hover);
 }
 
 .app-update-button:focus-visible {
@@ -123,28 +130,45 @@ async function installAvailableUpdate() {
   cursor: progress;
 }
 
-.app-update-button.busy {
-  animation: update-pulse 1.2s ease-in-out infinite;
+.update-icon {
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+}
+
+.update-arrow {
+  transform-origin: center;
+}
+
+.app-update-button:hover:not(:disabled) .update-arrow {
+  animation: update-arrow-rise 520ms var(--rf-ease) infinite alternate;
 }
 
 .update-progress {
-  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  box-sizing: border-box;
+  font-size: 8px;
   font-weight: 750;
   letter-spacing: -0.03em;
 }
 
-@keyframes update-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
+@keyframes update-arrow-rise {
+  from {
+    transform: translateY(1px);
   }
-  50% {
-    opacity: 1;
+  to {
+    transform: translateY(-1px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-update-button.busy {
+  .app-update-button:hover:not(:disabled) .update-arrow {
     animation: none;
   }
 }

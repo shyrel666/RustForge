@@ -136,10 +136,19 @@ async function addEvidence() {
 
 async function toggleAccepted(item: Evidence) {
   const next = !item.accepted;
+  const verifierEvidence = item.acceptance_kind === "safe_verifier";
   try {
     const { value } = await ElMessageBox.prompt(
-      next ? "说明为什么接受这条证据" : "说明为什么撤销这条证据",
-      next ? "人工接受 Evidence" : "撤销 Evidence",
+      next
+        ? "说明为什么重新接受这条证据"
+        : verifierEvidence
+          ? "安全验证器证据只能在 Finding 重置为待验证后撤销。请记录人工复核原因。"
+          : "说明为什么撤销这条证据",
+      next
+        ? verifierEvidence
+          ? "重新接受验证器 Evidence"
+          : "人工接受 Evidence"
+        : "撤销 Evidence",
       {
         confirmButtonText: next ? "接受" : "撤销",
         cancelButtonText: "取消",
@@ -155,7 +164,7 @@ async function toggleAccepted(item: Evidence) {
       value
     );
     await loadPanel();
-    ElMessage.success(next ? "Evidence 已被人工接受" : "Evidence 已撤销接受");
+    ElMessage.success(next ? "Evidence 已接受" : "Evidence 已撤销接受");
   } catch (error) {
     if (!isDismissed(error)) ElMessage.error(String(error));
   }
@@ -206,6 +215,15 @@ function sourceLabel(item: Evidence) {
     replay_run: "重放运行",
   };
   return `${labels[item.source_type]} #${item.source_id}`;
+}
+
+function producerLabel(finding: Finding) {
+  const labels: Record<Finding["producer"], string> = {
+    ai: "AI 分析",
+    passive_rule: "被动规则",
+    safe_verifier: "版本化安全验证器",
+  };
+  return labels[finding.producer];
 }
 
 function eventLabel(event: FindingEvent) {
@@ -282,12 +300,21 @@ watch(
           <div class="region-kicker">01 · Hypothesis</div>
           <h4>假设来源</h4>
         </div>
-        <el-tag type="warning" effect="plain">尚需人工验证</el-tag>
+        <el-tag
+          :type="finding.producer === 'safe_verifier' && finding.status === 'confirmed' ? 'success' : 'warning'"
+          effect="plain"
+        >
+          {{
+            finding.producer === "safe_verifier" && finding.status === "confirmed"
+              ? "安全验证器已自动确认"
+              : "尚需人工验证"
+          }}
+        </el-tag>
       </div>
       <div class="fact-grid">
         <div>
           <span>生成器</span>
-          <strong>{{ finding.source === "ai" ? "AI 分析" : "被动规则" }}</strong>
+          <strong>{{ producerLabel(finding) }}</strong>
         </div>
         <div>
           <span>模型置信度</span>
@@ -396,8 +423,20 @@ watch(
                 :type="item.accepted ? 'success' : 'info'"
                 effect="dark"
               >
-                {{ item.accepted ? "人工已接受" : "未接受" }}
+                {{
+                  item.accepted
+                    ? item.acceptance_kind === "safe_verifier"
+                      ? "安全验证器已接受"
+                      : "人工已接受"
+                    : "未接受"
+                }}
               </el-tag>
+              <el-tag
+                v-if="item.verification_id"
+                size="small"
+                type="success"
+                effect="plain"
+              >验证 #{{ item.verification_id }}</el-tag>
               <el-tag
                 v-if="!item.qualifies_for_confirmation"
                 size="small"

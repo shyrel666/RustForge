@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 import {
   Monitor,
   Share,
@@ -8,21 +9,29 @@ import {
   Setting,
   Promotion,
   Plus,
+  Sunny,
+  Moon,
 } from "@element-plus/icons-vue";
 import AppUpdateButton from "../AppUpdateButton.vue";
 import ProjectCreateDialog from "../ProjectCreateDialog.vue";
 import { useProjectStore } from "../../stores/project";
+import { useSettingsStore } from "../../stores/settings";
 import { useTrafficStore } from "../../stores/traffic";
+import { resolveDark, watchSystemTheme } from "../../utils/theme";
 
 const route = useRoute();
 const router = useRouter();
 const project = useProjectStore();
+const settings = useSettingsStore();
 const traffic = useTrafficStore();
+const darkThemeActive = ref(resolveDark(settings.theme));
+const themeSwitching = ref(false);
+let stopSystemThemeWatch: (() => void) | undefined;
 
 const items = [
   { path: "/traffic", label: "流量", icon: Monitor },
   { path: "/repeater", label: "重放", icon: Promotion },
-  { path: "/tasks", label: "测试计划", icon: Share },
+  { path: "/tasks", label: "AI 评估", icon: Share },
   { path: "/findings", label: "发现", icon: Aim },
   { path: "/settings", label: "设置", icon: Setting },
 ];
@@ -30,9 +39,20 @@ const items = [
 const proxyLabel = computed(() =>
   traffic.proxyRunning ? `代理 · ${traffic.proxyPort}` : "代理未运行"
 );
+const themeToggleTitle = computed(() =>
+  darkThemeActive.value ? "切换到浅色主题" : "切换到深色主题"
+);
 
 onMounted(() => {
   void traffic.syncProxyStatus();
+  darkThemeActive.value = resolveDark(settings.theme);
+  stopSystemThemeWatch = watchSystemTheme(() => {
+    darkThemeActive.value = resolveDark(settings.theme);
+  });
+});
+
+onUnmounted(() => {
+  stopSystemThemeWatch?.();
 });
 
 function go(path: string) {
@@ -41,6 +61,70 @@ function go(path: string) {
 
 function goHome() {
   go("/");
+}
+
+function goTokenUsage() {
+  void router.push({ path: "/settings", hash: "#token-usage" });
+}
+
+async function toggleTheme(event: MouseEvent) {
+  if (themeSwitching.value) return;
+  themeSwitching.value = true;
+  const nextTheme = darkThemeActive.value ? "light" : "dark";
+  const nextDark = nextTheme === "dark";
+  const button = event.currentTarget as HTMLElement;
+  const rect = button.getBoundingClientRect();
+  const originX = rect.left + rect.width / 2;
+  const originY = rect.top + rect.height / 2;
+  let persistTheme: Promise<void> = Promise.resolve();
+
+  const applyNextTheme = async () => {
+    darkThemeActive.value = nextDark;
+    persistTheme = settings.setTheme(nextTheme);
+    void persistTheme.catch(() => undefined);
+    await nextTick();
+  };
+
+  try {
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)"
+    ).matches;
+    if (typeof document.startViewTransition !== "function" || reduceMotion) {
+      await applyNextTheme();
+    } else {
+      const transition = document.startViewTransition(applyNextTheme);
+      try {
+        await transition.ready;
+        const endRadius = Math.hypot(
+          Math.max(originX, window.innerWidth - originX),
+          Math.max(originY, window.innerHeight - originY)
+        );
+        const reveal = document.documentElement.animate(
+          {
+            clipPath: [
+              `circle(0px at ${originX}px ${originY}px)`,
+              `circle(${endRadius}px at ${originX}px ${originY}px)`,
+            ],
+          },
+          {
+            duration: 520,
+            easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+            pseudoElement: "::view-transition-new(root)",
+          }
+        );
+        await reveal.finished;
+      } catch {
+        // 过渡属于渐进增强；捕获失败时仍保留已完成的主题切换。
+      }
+      await transition.updateCallbackDone;
+    }
+    await persistTheme;
+  } catch (e) {
+    darkThemeActive.value = resolveDark(settings.theme);
+    ElMessage.error(`切换主题失败：${String(e)}`);
+  } finally {
+    themeSwitching.value = false;
+  }
 }
 
 function goTraffic() {
@@ -61,6 +145,33 @@ const dialogVisible = ref(false);
         <div class="brand" @click="goHome">
           <span class="brand-text">RustForge</span>
         </div>
+        <button
+          type="button"
+          class="shortcut-button token-usage-button"
+          title="Token 统计"
+          aria-label="打开 Token 统计"
+          @click="goTokenUsage"
+        >
+          <span class="token-chart-icon" aria-hidden="true">
+            <span class="token-chart-bar token-chart-bar--short" />
+            <span class="token-chart-bar token-chart-bar--tall" />
+            <span class="token-chart-bar token-chart-bar--medium" />
+          </span>
+        </button>
+        <button
+          type="button"
+          class="shortcut-button theme-toggle-button"
+          :title="themeToggleTitle"
+          :aria-label="themeToggleTitle"
+          :aria-pressed="darkThemeActive"
+          :disabled="themeSwitching"
+          @click="toggleTheme"
+        >
+          <el-icon class="theme-toggle-icon" :size="18">
+            <Sunny v-if="darkThemeActive" />
+            <Moon v-else />
+          </el-icon>
+        </button>
         <AppUpdateButton />
       </div>
     </div>
@@ -180,6 +291,111 @@ const dialogVisible = ref(false);
   font-weight: 700;
   color: var(--rf-accent);
   letter-spacing: -0.02em;
+}
+
+.shortcut-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--rf-text-secondary);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--rf-duration) var(--rf-ease);
+}
+
+.shortcut-button:hover:not(:disabled) {
+  color: var(--rf-accent);
+}
+
+.shortcut-button:focus-visible {
+  outline: 2px solid var(--rf-accent);
+  outline-offset: 2px;
+}
+
+.shortcut-button:disabled {
+  cursor: progress;
+}
+
+.theme-toggle-icon {
+  transform-origin: center;
+}
+
+.theme-toggle-button:hover:not(:disabled) .theme-toggle-icon {
+  animation: theme-icon-sway 520ms var(--rf-ease) infinite alternate;
+}
+
+.token-chart-icon {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  width: 18px;
+  height: 18px;
+  padding: 2px 1px;
+  box-sizing: border-box;
+}
+
+.token-chart-bar {
+  width: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  transform-origin: center bottom;
+}
+
+.token-chart-bar--short {
+  height: 7px;
+}
+
+.token-chart-bar--tall {
+  height: 14px;
+}
+
+.token-chart-bar--medium {
+  height: 10px;
+}
+
+.token-usage-button:hover .token-chart-bar {
+  animation: token-chart-wave 560ms ease-in-out infinite alternate;
+}
+
+.token-usage-button:hover .token-chart-bar--tall {
+  animation-delay: 110ms;
+}
+
+.token-usage-button:hover .token-chart-bar--medium {
+  animation-delay: 220ms;
+}
+
+@keyframes token-chart-wave {
+  from {
+    transform: scaleY(0.55);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes theme-icon-sway {
+  from {
+    transform: rotate(-8deg) scale(0.94);
+  }
+  to {
+    transform: rotate(8deg) scale(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle-button:hover:not(:disabled) .theme-toggle-icon,
+  .token-usage-button:hover .token-chart-bar {
+    animation: none;
+  }
 }
 
 .nav-pill {

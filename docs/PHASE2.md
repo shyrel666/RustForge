@@ -7,7 +7,7 @@
 - SQLite 只保存 provider ID、名称、Base URL、模型和能力等非敏感元数据。
 - API Key 通过 `SecretStore` 写入 Windows Credential Manager、macOS Keychain 或 Linux Secret Service；`get_all_settings` 只返回 `has_api_key` 状态。
 - 通用设置接口拒绝敏感 key 和嵌套秘密字段。应用启动会运行 `validate_no_plaintext_settings`，检测到旧式明文秘密时直接失败，不回退为前端明文。
-- 获取模型列表和模型调用都由 Rust 后端读取秘密；前端编辑框不会回显已保存 Key。
+- 已保存 provider 的模型列表和模型调用都由 Rust 后端从 `SecretStore` 读取秘密；新增 provider 可通过专用 IPC 用表单 Key 预览 `/models`，该 Key 仅用于当次请求且不落库。前端编辑框不会回显已保存 Key。
 - 错误输出先经过秘密过滤，避免 Authorization、API Key、私钥 PEM 或已知 secret 出现在日志。
 
 ## AI 上下文防火墙
@@ -82,7 +82,7 @@ pnpm check
 
 ## 手工验收
 
-1. 添加 provider 与 Key，保存后确认 UI 只显示“系统凭据库：已配置”，不回显 Key。
+1. 添加 provider 与 Key，保存前确认可获取模型和测试连接；取消后确认 Key 未配置，再保存并确认 UI 只显示“系统凭据库：已配置”，不回显 Key。
 2. 抓取一条包含查询参数、Cookie 和 JSON 密码字段的授权流量，打开 AI 预览，确认这些值已遮盖。
 3. 尝试包含截断正文或提高默认上限，确认 UI 要求 relaxed policy 二次确认。
 4. 发送后查看 AnalysisRun 的 provider、提示词版本、input hash、manifest 和 validation 状态。

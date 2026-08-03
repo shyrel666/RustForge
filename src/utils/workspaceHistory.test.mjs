@@ -74,8 +74,8 @@ test("recordWorkspaceVisit persists valid workspace routes only", () => {
   );
 });
 
-test("getResumePath falls back to traffic", () => {
-  assert.equal(getResumePath(9, {}), "/traffic");
+test("getResumePath falls back to AI assessment", () => {
+  assert.equal(getResumePath(9, {}), "/tasks");
   assert.equal(
     getResumePath(2, { 2: { path: "/findings", openedAt: 100 } }),
     "/findings",

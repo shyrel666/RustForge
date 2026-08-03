@@ -52,6 +52,10 @@ export const deleteProviderApiKey = (providerId: string) =>
 export const fetchModels = (providerId: string) =>
   invoke<string[]>("fetch_models", { providerId });
 
+/** 使用未保存的表单值获取模型；Key 仅用于本次请求，不会写入凭据库。 */
+export const fetchModelsForDraft = (baseUrl: string, apiKey: string) =>
+  invoke<string[]>("fetch_models_for_draft", { baseUrl, apiKey });
+
 /** 系统浏览器打开外链 */
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 
@@ -251,6 +255,22 @@ export interface AnalysisResult {
   analysis_run_id: number | null;
 }
 
+export type AnalysisProgressStage =
+  | "preparing"
+  | "generating"
+  | "validating"
+  | "saving"
+  | "completed"
+  | "failed";
+
+export interface AnalysisProgress {
+  request_id: string;
+  traffic_id: number;
+  stage: AnalysisProgressStage;
+  percentage: number;
+  message: string;
+}
+
 export interface RedactionRecord {
   location: string;
   kind: string;
@@ -309,12 +329,14 @@ export const previewAiContext = (
 export const analyzeTraffic = (
   trafficId: number,
   policy: AiDataPolicy,
-  expectedInputHash: string
+  expectedInputHash: string,
+  requestId: string
 ) =>
   invoke<AnalysisResult>("analyze_traffic", {
     trafficId,
     policy,
     expectedInputHash,
+    requestId,
   });
 
 /** 读缓存的分析结果（没有则 null） */
@@ -364,6 +386,7 @@ export interface Finding {
   traffic_id: number | null;
   analysis_run_id: number | null;
   source: "ai" | "rule";
+  producer: "ai" | "passive_rule" | "safe_verifier";
   title: string;
   vuln_type: string;
   standard_references: StandardReference[];
@@ -427,6 +450,8 @@ export interface Evidence {
   acceptance_note: string;
   accepted_by: string | null;
   accepted_at: string | null;
+  acceptance_kind: "human" | "safe_verifier";
+  verification_id: number | null;
 }
 
 export interface FindingEvent {
@@ -759,6 +784,24 @@ export interface TaskAiExecution {
   proposal: TaskPlanProposal;
 }
 
+export type TaskAiProgressStage =
+  | "preparing"
+  | "generating"
+  | "validating"
+  | "saving"
+  | "proposal"
+  | "completed"
+  | "failed";
+
+export interface TaskAiProgress {
+  request_id: string;
+  project_id: number;
+  operation: TaskAiOperation;
+  stage: TaskAiProgressStage;
+  percentage: number;
+  message: string;
+}
+
 export const getTestPlan = (projectId: number) =>
   invoke<TestPlan>("get_test_plan", { projectId });
 
@@ -777,10 +820,15 @@ export const previewTaskAi = (
   });
 
 /** AI 只生成 proposal/diff，不直接修改当前测试计划。 */
-export const generateTaskTree = (projectId: number, expectedInputHash: string) =>
+export const generateTaskTree = (
+  projectId: number,
+  expectedInputHash: string,
+  requestId: string
+) =>
   invoke<TaskAiExecution>("generate_task_tree", {
     projectId,
     expectedInputHash,
+    requestId,
   });
 
 export const expandTaskNode = (nodeId: number, expectedInputHash: string) =>
@@ -1100,11 +1148,294 @@ export const replayRequest = (
     },
   });
 
+// ---------- AI 非破坏式安全评估 ----------
+
+export type AssessmentStatus =
+  | "queued"
+  | "discovering"
+  | "planning"
+  | "executing"
+  | "verifying"
+  | "completed"
+  | "stopped"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
+
+export type AssessmentVerdict =
+  | "confirmed"
+  | "suspected"
+  | "not_observed"
+  | "inconclusive"
+  | "skipped";
+
+export interface AssessmentAuthProfile {
+  id: number;
+  projectId: number;
+  label: string;
+  sourceTrafficId: number | null;
+  headerName: "Authorization" | "Cookie" | "X-API-Key" | "X-Auth-Token";
+  secretRevision: number;
+  hasSecret: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Traffic 中可提取指定鉴权 Header 的候选请求；只含元数据，不含 Header 值。 */
+export interface AssessmentAuthCandidate {
+  trafficId: number;
+  method: string;
+  url: string;
+  status: number | null;
+  createdAt: string;
+}
+
+export interface ResourceOwnershipClaim {
+  path: string;
+  ownerProfileId: number;
+}
+
+export interface AssessmentContractInput {
+  projectId: number;
+  startUrl: string;
+  excludedPaths: string[];
+  tlsPolicy: TlsPolicy;
+  requestBudget: number;
+  requestsPerSecond: number;
+  identityAProfileId: number | null;
+  identityBProfileId: number | null;
+  resourceOwnership: ResourceOwnershipClaim[];
+  includeRecentTraffic: boolean;
+  /** 留空时由后端绑定当前活动 provider/model。 */
+  providerId: string;
+  model: string;
+  maxRounds: number;
+  writtenAuthorizationConfirmed: boolean;
+}
+
+export interface AssessmentContractPreview {
+  projectId: number;
+  normalizedStartUrl: string;
+  exactOrigin: string;
+  normalizedScope: string[];
+  excludedPaths: string[];
+  builtinExcludedSegments: string[];
+  tlsPolicy: TlsPolicy;
+  requestBudget: number;
+  discoveryBudget: number;
+  requestsPerSecond: number;
+  identityAProfileId: number | null;
+  identityALabel: string | null;
+  identityASecretRevision: number | null;
+  identityBProfileId: number | null;
+  identityBLabel: string | null;
+  identityBSecretRevision: number | null;
+  resourceOwnership: ResourceOwnershipClaim[];
+  includeRecentTraffic: boolean;
+  providerId: string;
+  model: string;
+  maxRounds: number;
+  dataDisclosure: string[];
+  templateRegistryVersion: string;
+  templateRegistryHash: string;
+  contractHash: string;
+  writtenAuthorizationConfirmed: boolean;
+  residualRiskNotice: string;
+}
+
+export interface AssessmentRun {
+  id: number;
+  projectId: number;
+  status: AssessmentStatus;
+  startUrl: string;
+  exactOrigin: string;
+  contractHash: string;
+  templateRegistryHash: string;
+  providerId: string;
+  model: string;
+  tlsPolicy: TlsPolicy;
+  requestBudget: number;
+  requestCount: number;
+  discoveryBudget: number;
+  requestsPerSecond: number;
+  responseByteBudget: number;
+  responseBytesRead: number;
+  maxRounds: number;
+  completedRounds: number;
+  stopReason: string;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface AssessmentRound {
+  id: number;
+  runId: number;
+  roundNumber: number;
+  status: string;
+  analysisRunId: number | null;
+  inputHash: string;
+  outputHash: string | null;
+  selectedChecks: number;
+  rejectionJson: unknown;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface AssessmentEndpoint {
+  id: number;
+  runId: number;
+  endpointId: string;
+  method: "GET" | "HEAD";
+  url: string;
+  path: string;
+  queryParameterNames: string[];
+  sourceKind: "start_url" | "crawl" | "redirect" | "traffic";
+  status: number | null;
+  contentType: string;
+  hasAuthentication: boolean;
+  passiveTags: string[];
+  responseComplete: boolean;
+  resourceOwnerProfileId: number | null;
+}
+
+export interface AssessmentCheck {
+  id: number;
+  runId: number;
+  roundId: number | null;
+  endpointId: number | null;
+  requestedEndpointId: string;
+  templateId: string;
+  templateVersion: string;
+  parameterName: string | null;
+  identityMode: "anonymous" | "a" | "b" | "a_vs_b";
+  rationale: string;
+  policyResult: "allowed" | "rejected" | "skipped";
+  policyReason: string;
+  status: string;
+  requestCost: number;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface AssessmentVerification {
+  id: number;
+  checkId: number;
+  verifierId: string;
+  verifierVersion: string;
+  verdict: AssessmentVerdict;
+  observations: unknown;
+  contentHash: string;
+  findingId: number | null;
+  findingRelation: "supports" | "human_conflict" | null;
+  createdAt: string;
+}
+
+export interface AssessmentCoverageGap {
+  id: number;
+  runId: number;
+  checkId: number | null;
+  category: string;
+  reasonCode: string;
+  detail: string;
+  createdAt: string;
+}
+
+export interface AssessmentEvent {
+  id: number;
+  runId: number;
+  checkId: number | null;
+  eventType: string;
+  oldValue: string | null;
+  newValue: string | null;
+  details: unknown;
+  createdAt: string;
+}
+
+export interface AssessmentDetail {
+  run: AssessmentRun;
+  rounds: AssessmentRound[];
+  endpoints: AssessmentEndpoint[];
+  checks: AssessmentCheck[];
+  verifications: AssessmentVerification[];
+  coverageGaps: AssessmentCoverageGap[];
+  events: AssessmentEvent[];
+}
+
+export interface AssessmentProgress {
+  projectId: number;
+  runId: number;
+  status: AssessmentStatus;
+  phase: string;
+  message: string;
+  requestCount: number;
+  requestBudget: number;
+  completedChecks: number;
+  totalChecks: number;
+  occurredAt: string;
+}
+
+export const listAssessmentAuthProfiles = (projectId: number) =>
+  invoke<AssessmentAuthProfile[]>("list_assessment_auth_profiles", { projectId });
+
+export const createAssessmentAuthProfile = (input: {
+  projectId: number;
+  label: string;
+  headerName: AssessmentAuthProfile["headerName"];
+  secret: string;
+  sourceTrafficId: number | null;
+}) => invoke<AssessmentAuthProfile>("create_assessment_auth_profile", { input });
+
+export const setAssessmentAuthProfile = (input: {
+  projectId: number;
+  profileId: number;
+  headerName: AssessmentAuthProfile["headerName"];
+  secret: string;
+}) => invoke<AssessmentAuthProfile>("set_assessment_auth_profile", { input });
+
+export const importAssessmentAuthProfile = (input: {
+  projectId: number;
+  trafficId: number;
+  label: string;
+  headerName: AssessmentAuthProfile["headerName"];
+}) => invoke<AssessmentAuthProfile>("import_assessment_auth_profile", { input });
+
+export const listAssessmentAuthCandidates = (
+  projectId: number,
+  headerName: AssessmentAuthProfile["headerName"]
+) =>
+  invoke<AssessmentAuthCandidate[]>("list_assessment_auth_candidates", {
+    projectId,
+    headerName,
+  });
+
+export const deleteAssessmentAuthProfile = (projectId: number, profileId: number) =>
+  invoke<void>("delete_assessment_auth_profile", { projectId, profileId });
+
+export const previewAssessmentContract = (input: AssessmentContractInput) =>
+  invoke<AssessmentContractPreview>("preview_assessment_contract", { input });
+
+export const startAssessment = (
+  contract: AssessmentContractInput,
+  contractHash: string
+) => invoke<AssessmentRun>("start_assessment", { input: { contract, contractHash } });
+
+export const cancelAssessment = (projectId: number, runId: number) =>
+  invoke<void>("cancel_assessment", { projectId, runId });
+
+export const listAssessmentRuns = (projectId: number) =>
+  invoke<AssessmentRun[]>("list_assessment_runs", { projectId });
+
+export const getAssessmentDetail = (projectId: number, runId: number) =>
+  invoke<AssessmentDetail>("get_assessment_detail", { projectId, runId });
+
 // ---------- 证据化报告 ----------
 
 /** 生成 Markdown 报告文本（预览用） */
-export const buildReport = (projectId: number) =>
-  invoke<string>("build_report", { projectId });
+export const buildReport = (
+  projectId: number,
+  assessmentRunId: number | null = null
+) => invoke<string>("build_report", { projectId, assessmentRunId });
 
 export interface ReportExportResult {
   markdown_path: string;
@@ -1115,11 +1446,13 @@ export interface ReportExportResult {
 /** 同时导出 Markdown 主报告与 JSON 机器可读备份。 */
 export const exportReport = (
   projectId: number,
-  includeSensitiveEvidence = false
+  includeSensitiveEvidence = false,
+  assessmentRunId: number | null = null
 ) =>
   invoke<ReportExportResult>("export_report", {
     projectId,
     includeSensitiveEvidence,
+    assessmentRunId,
   });
 
 // ---------- 用量统计 & 计数（Phase 5） ----------

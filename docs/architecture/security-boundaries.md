@@ -1,8 +1,8 @@
 # RustForge 安全边界与失败策略
 
-> 实现核查日期：2026-07-29；适用范围：当前 Tauri/Vue 桌面应用与 SQLite v1 基线。
+> 实现核查日期：2026-08-01；适用范围：当前 Tauri/Vue 桌面应用与 SQLite v3 基线。
 
-RustForge 的核心边界不是“模型足够谨慎”，而是后端授权、大小上限、结构校验、事务约束和人工确认共同形成的可测试系统。本文记录当前代码强制的边界、跨边界数据和失败方式。
+RustForge 的核心边界不是“模型足够谨慎”，而是后端运行契约、双策略授权、固定模板、大小/速率预算、结构校验、确定性验证器和事务约束共同形成的可测试系统。本文记录当前代码强制的边界、跨边界数据和失败方式。
 
 ## 信任分区
 
@@ -11,7 +11,7 @@ flowchart LR
     User["用户\n书面授权与人工决策"]
     Renderer["Vue renderer\n不可信 IPC 调用方"]
     Backend["Rust 后端\n授权/校验/事务边界"]
-    DB["SQLite v1\n约束与审计"]
+    DB["SQLite v3\n约束与审计"]
     Target["目标 HTTP 数据\n完全不可信"]
     Provider["外部 AI provider\n不可信输出/数据接收方"]
     OSSecrets["系统凭据库"]
@@ -27,7 +27,7 @@ flowchart LR
 
 信任假设：
 
-- 用户负责合法授权、测试时间窗和每次主动操作的意图。
+- 用户负责合法授权、测试时间窗、运行契约和资源归属声明的真实性。
 - renderer 可被错误状态、延迟 Promise 或恶意 HTTP/Markdown 内容影响，因此不能持有最终授权权力或秘密。
 - 目标的 URL、Header、正文、证书和响应都不可信。
 - 模型输入中的 HTTP 内容可能包含提示注入；模型输出可能格式错误、伪造引用或声称执行了动作。
@@ -38,23 +38,24 @@ flowchart LR
 
 ### 强制点
 
-- `authorization::ScopePolicy` 是代理和 Repeater 共用的 host 规范化/匹配实现。
+- `authorization::ScopePolicy` 是代理、Repeater 和 Assessment 共用的 host 规范化/匹配实现；Assessment 还叠加更严格的 `AssessmentPolicy`。
 - 代理从 `current_project_id` 加载项目；Repeater 必须携带显式项目和项目内 session。
 - 无项目、空/坏 Scope 或未命中时 fail closed。私网、loopback、link-local 没有隐式豁免。
 - 完整 URL 主动请求只接受 HTTP(S)，拒绝 userinfo、缺失 authority/host、反斜杠歧义、控制字符和非法端口。
 
-### 代理与 Repeater 的不同语义
+### 三类目标路径的不同语义
 
 | 路径 | Scope 外行为 | 是否可能向目标发送 |
 |---|---|---|
 | 浏览器经代理 | HTTPS 盲隧道、HTTP 透传；不解密、不记录、不跑规则 | 可能，由浏览器原始请求决定；Scope 不是防火墙 |
 | Repeater | 保存 `scope_rejected` run 后返回 | 不会；校验发生在客户端/socket 创建前 |
+| Assessment | check 记为 policy rejected 并形成 coverage gap | 不会；契约、精确 origin、方法、路径、Header、正文与预算均在 socket 前复核 |
 
 Repeater 不跟随重定向，避免一次授权后跳到另一个 host。未来若支持重定向，每一跳都必须重新过 Scope。
 
 ### 当前表达能力限制
 
-Scope 只表达 host。端口、路径、账号、动作类型、请求频率和时间窗不进入策略；更窄的书面授权必须依赖额外网络/流程控制。详细用户责任见 [../AUTHORIZATION.md](../AUTHORIZATION.md)。
+Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路径排除、账号 profile、动作类型、请求频率和预算；授权时间窗仍需额外网络/流程控制。详细用户责任见 [../AUTHORIZATION.md](../AUTHORIZATION.md)。
 
 ## 边界二：网络副作用
 
@@ -64,16 +65,29 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 |---|---|---|
 | 代理转发 | 用户在外部浏览器发起 | Scope 只控制 MITM/记录；正文流式转发 |
 | Repeater | 用户每次明确点击发送 | 后端 Scope、持久化 attempt、30 秒超时、无自动重定向 |
-| AI `/models` | 用户在 provider 设置中测试/刷新 | Key 后端读取，Base URL 必须是无 userinfo/query/fragment 的 HTTP(S) URL |
+| Assessment | 用户确认一次契约后由后台 runner 执行 | `AssessmentPolicy + ScopePolicy`、固定模板、单并发、attempt 先落库、预算/速率/取消、无自动重定向 |
+| AI `/models` | 用户在 provider 设置中测试/刷新 | 已保存 Key 由后端从凭据库读取；未保存 Key 只经专用 IPC 用于当次请求且不落库；Base URL 必须是无 userinfo/query/fragment 的 HTTP(S) URL |
 | AI chat | 用户确认最终上下文后触发分析/计划 | preview hash 重建比对、脱敏、硬上限、输出校验 |
 | updater check | 应用一次静默检查或用户手动检查 | 固定 HTTPS endpoint、签名验证；它不是目标测试请求 |
 | 外部链接 | 用户点击 | 只允许 HTTP(S)，拒绝空白/控制字符/引号，直接调用系统 opener 而不经过 shell |
 
-规则、Finding、Evidence 到达和测试计划状态变化都不能触发目标网络请求。AI planner 只生成 proposal；只有用户进入 Repeater 并发送才产生验证请求。
+规则、Finding、Evidence 到达和旧测试计划状态变化都不能触发目标网络请求。Assessment 只有在用户确认契约并调用 `start_assessment` 后启动；AI 选择模板不能绕过后端策略，也不能直接调用 Repeater API。
+
+### Assessment 请求安全不变量
+
+- preview hash 绑定项目与规范化 Scope、起始 URL 和精确 origin、TLS、排除路径、预算/速率、身份 profile 与秘密修订、资源归属、AI provider/model、脱敏策略、三轮上限以及模板 registry 版本/content hash；启动和每次请求前都会重建关键漂移项。
+- 全局最多一个活动评估，请求并发固定为 1。默认 1 请求/秒、120 次；硬上限 2 请求/秒、300 次。发现最多使用 `min(40, request_budget / 3)`，为验证保留预算。
+- 只允许无正文的 `GET / HEAD / OPTIONS`，禁止 Host/长度/连接/升级/代理鉴权/方法覆盖 Header；危险路径段和 `_method`、破坏性 `action/do` 参数会重复 URL 解码后检查。
+- 只访问精确 origin。3xx 不跟随；同源 Location 作为新候选重新校验，跨源只形成 coverage gap。
+- 429 立即停止；连续三个 5xx/超时停止；Scope、身份、AI 或 registry 漂移以及用户取消都会停止，目标请求不自动重试。
+- 每响应最多读取 1 MiB、每轮最多 20 MiB；超限停止读取并标记不完整，不完整响应没有自动确认资格。
+- 启动时活动 run 转为 `interrupted`，所有开放 check 写明失败/中断；绝不自动恢复可能产生网络副作用的动作。
+
+“非破坏”描述的是客户端不提供状态变更方法、正文、攻击脚本、任意 payload、浏览器执行或暴力能力；目标若错误地让 GET 改变状态仍是残余风险，不能由客户端证明为零。
 
 ## 边界三：HTTP 内存与证据完整性
 
-- 代理/Repeater 每个方向最多保留 1 MiB wire bytes；完整 body 仍继续转发/读取。
+- 代理/Repeater 每个方向最多保留 1 MiB wire bytes；Assessment 在 1 MiB 时主动停止读取并把响应标为不完整。
 - gzip/deflate/br 的每层解码最多输出 1 MiB；压缩前后均受限。
 - `wire_size` 来自实际 frame/chunk，不能用 `Content-Length` 冒充。
 - stream error、下游取消、线缆/解压上限、未知编码和二进制均有稳定状态。
@@ -91,6 +105,13 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 - 通用 settings 读写拒绝敏感 key、嵌套 secret、bearer/JWT/私钥形态。
 - 应用启动检测明文秘密，发现后停止，而不是兼容旧明文格式。
 - 日志和错误通过 `redact_sensitive` 过滤；已知秘密也作为额外匹配值遮盖。
+
+### Assessment 身份
+
+- profile 元数据、Header 名称与秘密修订保存在 SQLite；值只存 `SecretStore`，renderer 只能读取 `has_secret`。
+- 仅允许 `Authorization / Cookie / X-API-Key / X-Auth-Token`，总大小不超过 16 KiB。A/B 必须是不同 profile，运行前以内存常量数据比较拒绝完全相同的秘密。
+- live 请求使用真实 Header；审计请求、request hash、ReplayRun、事件、错误、AI prompt 和报告只使用 `[AUTH_PROFILE:<id>]` 与修订号。响应中出现的已知 secret、裸 bearer/cookie 值及常见编码形式也会遮盖。
+- 不提交登录表单、不保存用户名/密码、不自动更新 Cookie。profile/项目删除对 SQLite 与系统凭据库执行补偿式清理，凭据写入失败则回滚元数据。
 
 ### MITM CA
 
@@ -130,6 +151,14 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 
 失败策略：上下文 hash 漂移、Schema/引用无效或校验失败时停止建 Finding，不降低脱敏或伪装为成功。
 
+### Assessment 规划 DSL
+
+- 最多三轮、每轮最多 12 个 check；模型输出只有 `template_id / endpoint_id / parameter_name / identity_mode / rationale`。
+- endpoint 是后端生成的不透明 ID；parameter 必须来自端点清单。模型看不到 query 值、凭据、正文或原始响应，只看到路径、参数名、状态、Content-Type、鉴权存在性和被动标签。
+- 模型不能输出 URL、HTTP 方法、Header、正文、payload、shell、SQL、JavaScript、状态或漏洞结论。未知字段、伪造 endpoint/template、重复 check、参数不匹配或超预算都会成为 policy-rejected 记录且不建 socket。
+- HTTP 派生数据位于转义后的 `UNTRUSTED_HTTP_DATA`；供应商支持时使用 JSON Schema，失败后只固定重试一次。每轮输入、脱敏 manifest、usage 和输出 hash 写入 `analysis_runs`。
+- 轮间只返回验证器结论码与剩余覆盖；最终报告由本地结构化数据生成，模型不能改写事实结论。
+
 ## 边界六：声明式规则
 
 - schema 没有 action/script/file/process/network 原语；求值只读已捕获 Traffic。
@@ -142,18 +171,20 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 
 详细格式见 [rule-pack-v1.md](rule-pack-v1.md)。
 
-## 边界七：Finding、Evidence 与人工确认
+## 边界七：Finding、Evidence 与确定性确认
 
 - AI/规则结果是 Finding 假设；Evidence 是来源独立的不可变脱敏观察。
 - AnalysisRun 永远不具备 confirmation 资格；没有真实响应的 Traffic、没有响应 status 的 ReplayRun 也不具备资格。
-- Evidence 初始关联为 unaccepted。接受/撤销必须由用户提供 actor/说明并写入 Finding append-only 事件。
-- confirmed 状态需要至少一条人工接受的合格 Evidence；数据库 trigger 阻止绕过 service，也阻止撤销最后一条合格证据。
+- Evidence 默认关联为 unaccepted。人工接受/撤销需要 actor/说明；安全验证器只能通过 `commit_verification_outcome` 原子提交同 check 的完整合格 Replay Evidence。
+- confirmed 状态需要至少一条 `human` 或 `safe_verifier` 接受的合格 Evidence；验证器接受项绑定不可变 verification ID、模板/验证器版本，数据库 trigger 检查 Finding、verification 与 ReplayRun 归属同一 check。
+- `suspected/inconclusive` 只关联未接受 Evidence。模型分析 Evidence 永不自动确认；人工 rejected 不被自动复活，已有 confirmed 在后续 not observed 时不降级。
 - rejected 需要原因。status、severity 和 analyst notes 的每次变化都有不可变事件。
 
 失败策略：跨项目关系、来源不存在、hash 损坏、资格不足或事件不匹配时事务整体回滚。
 
 ## 边界八：测试计划
 
+- 本节描述兼容保留的旧模块。`/tasks` 已切换为 AI Assessment，`TaskTreeView` 不再进入主导航，Assessment 不写入 task 表。
 - 模型只输出 `PlannedTree` 允许字段，不能设置 status、actual observation、Evidence 或数据库 ID。
 - 生成/展开/换思路统一创建持久化 proposal 和四类 diff，不直接写当前节点。
 - apply 在 immediate transaction 中复核 base revision、项目、Finding 状态、字段锁、人工进度、Evidence 和 prerequisite。
@@ -164,8 +195,9 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 
 ## 边界九：报告与文件输出
 
-- 默认报告只读取不可变脱敏 Evidence 并重算 hash；confirmed 缺少合格 Evidence 时拒绝整份报告。
-- pending 只进附录、rejected 默认省略；建议步骤和实际观察分栏。
+- Evidence Report Schema v3 默认只读取不可变脱敏 Evidence 并重算 hash；confirmed 缺少合格 Evidence 时拒绝整份报告。
+- 报告分 `confirmed_findings / suspected_findings / not_observed_checks / coverage_gaps`，并包含 run 契约、registry、AI rounds、预算、身份标签、停止原因和时间线。
+- 可指定 `assessment_run_id` 生成单次报告；未指定时汇总项目 Finding 并附最近终态评估覆盖。旧 task node 只作为 `legacy_plan_summary`，不表示已执行。
 - 同一结构化 document 生成 Markdown 与 JSON，避免两个格式语义漂移。
 - 用户文本、行首 Markdown、动态代码围栏、URL 和文件组件均转义/规范化。
 - 使用 `create_new` 和冲突后缀，不覆盖旧文件；任一写入失败会清理本次文件对。
@@ -176,7 +208,7 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 ## 边界十：renderer 与桌面运行时
 
 - 生产 CSP 的 `connect-src` 只允许 Tauri IPC；开发模式只额外允许本机 Vite/HMR。
-- 项目切换使旧 Promise/代际 ownership 失效；Findings、计划、报告、规则诊断和 Repeater 不接纳旧项目延迟结果。
+- 项目切换使旧 Promise/代际 ownership 失效；Findings、Assessment、报告、规则诊断和 Repeater 不接纳旧项目延迟结果。Assessment 事件还同时校验 `project_id + selected run_id` 并去重，遗漏事件从持久化 detail 恢复。
 - Repeater 在第一次 `await` 前同步取得唯一发送令牌，快速双击/Enter 不产生两个网络副作用。
 - 前端所有确认仅是交互层；后端仍执行 Scope、项目、hash、关系和状态检查。
 
@@ -188,6 +220,10 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 | Capture | chunked、错误长度、压缩炸弹、流取消、重复 Header、峰值内存 |
 | Secrets/CA | 凭据不回前端、日志过滤、ACL/权限、原子写、只导出证书 |
 | AI | 结构化脱敏、提示注入语料、preview hash TOCTOU、invalid run 不建 Finding |
+| Assessment policy | 伪造模板/endpoint、POST/body、危险路径、跨 origin、Scope 外、预算超限均无 socket |
+| Assessment network | 无重定向、速率、429/三次 5xx 停止、字节上限、取消、启动中断恢复 |
+| Assessment secrets | SQLite/Replay/AI/事件/错误/报告无 A/B 值，凭据库失败补偿 |
+| Verifiers | 六模板正反例、截断、动态响应与误报边界 |
 | Rules | 恶意 regex/深度/候选、超时、队列满、截断置信度、shadow 评测 |
 | Evidence | 跨项目、来源资格、事件、最后合格证据、不可变 snapshot/hash |
 | Plan | proposal 幂等、人工锁、并发 revision、依赖环、阻塞祖先 |
@@ -195,10 +231,11 @@ Scope 只表达 host。端口、路径、账号、动作类型、请求频率和
 
 ## 当前明确不覆盖
 
-- 无人值守扫描、自动利用、自动 PoC、自动修复或模型驱动 shell。
+- 任意无人值守扫描、自动利用、自动 PoC、自动修复或模型驱动 shell；Assessment 仅执行内置只读模板。
+- SQL/命令注入、目录穿越、SSRF、上传、爆破、DoS、POST/form 业务逻辑和浏览器脚本验证。
 - WebSocket 消息历史、SSE、gRPC、GraphQL 和完整 HTTP/2 语义。
 - 第三方规则/插件市场、任意脚本和在线自动更新规则。
 - 源码调用链分析；Vulnhuntr 类思路只属于未来独立源码辅助模式。
-- 首次公开发布后的数据库升级/备份策略。
+- 数据库 v3 具备 v2→v3 真实迁移；面向公开发布的长期备份/降级策略仍需独立设计。
 
 新增任何网络、文件、进程或插件能力前，必须先在本文登记信任区、授权点、审计实体、预算、失败策略和测试，再进入实现。

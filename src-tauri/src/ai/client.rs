@@ -1,5 +1,7 @@
 //! OpenAI 兼容 LLM 客户端：POST {base_url}/chat/completions。
-//! 工程控制：120s 超时；仅对传输错误/5xx 重试一次（4xx 立即失败，不浪费额度）。
+//! 工程控制：默认 120s 超时（长计划可由调用方显式延长）；仅对明确的建连
+//! 错误/5xx 重试一次。请求超时或读取响应失败时服务端可能已经生成并计费，
+//! 因此不自动重试，避免重复消耗额度。
 //! 抽 trait 是为了分析器可用 mock 客户端做无网络测试。
 
 use crate::secrets::{redact_sensitive, SecretString};
@@ -100,8 +102,17 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn new(base_url: &str, api_key: SecretString, model: &str) -> Result<Self, String> {
+        Self::new_with_timeout(base_url, api_key, model, Duration::from_secs(120))
+    }
+
+    pub fn new_with_timeout(
+        base_url: &str,
+        api_key: SecretString,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
         Ok(Self {
@@ -154,16 +165,28 @@ impl OpenAiClient {
             .send()
             .await
             .map_err(|error| {
-                CallError::Retryable(redact_sensitive(
-                    &format!("请求 LLM 失败: {error}"),
+                let suffix = if error.is_timeout() {
+                    "；请求可能已被服务端处理，为避免重复计费未自动重试"
+                } else {
+                    ""
+                };
+                let message = redact_sensitive(
+                    &format!("请求 LLM 失败: {error}{suffix}"),
                     &[self.api_key.expose()],
-                ))
+                );
+                if error.is_connect() {
+                    CallError::Retryable(message)
+                } else {
+                    CallError::Fatal(message)
+                }
             })?;
 
         let status = resp.status();
         let text = Zeroizing::new(resp.text().await.map_err(|error| {
-            CallError::Retryable(redact_sensitive(
-                &error.to_string(),
+            CallError::Fatal(redact_sensitive(
+                &format!(
+                    "读取 LLM 响应失败: {error}；服务端可能已经生成并计费，为避免重复计费未自动重试"
+                ),
                 &[self.api_key.expose()],
             ))
         })?);

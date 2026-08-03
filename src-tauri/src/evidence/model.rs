@@ -52,6 +52,8 @@ pub struct Evidence {
     pub acceptance_note: String,
     pub accepted_by: Option<String>,
     pub accepted_at: Option<String>,
+    pub acceptance_kind: String,
+    pub verification_id: Option<i64>,
 }
 
 /// Finding 状态、人工判断和备注的不可变事件。

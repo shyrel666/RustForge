@@ -1,10 +1,10 @@
 # 证据化安全测试报告：&lt;script&gt;alert(1)&lt;/script&gt; 演示/项目
 
-- 报告格式：Evidence Report Schema v2
+- 报告格式：Evidence Report Schema v3
 - 报告生成时间：`2026-07-28T12:00:00+08:00`
 - 内容分级：默认脱敏
 
-> **授权与复核声明**：本报告仅适用于项目中明确记录的授权范围。AI 与被动规则只产生待验证假设；confirmed 结论来自人工接受的真实 Evidence，但仍需专业人员复核。禁止将本报告用于未授权目标。
+> **授权与复核声明**：本报告仅适用于项目中明确记录的授权范围。AI 只能选择版本化安全模板，不能构造请求或改写事实结论；confirmed 结论来自人工接受或版本化安全验证器接受且哈希有效的 Evidence。禁止将本报告用于未授权目标。
 
 ## 1. 授权范围、排除范围和测试限制
 
@@ -15,12 +15,12 @@
   - demo.test
   - api.demo.test
 - 排除范围：
-  - 当前项目模型未单独记录排除项；所有未列入授权范围的目标均视为排除范围。
+  - 所有未列入授权范围的目标均视为排除范围。
 - 测试限制：
   - 1 条流量存在请求或响应截断；相关正文不能视为完整内容。
-  - 1 条 Finding 尚未人工确认，仅列入待验证附录，不作为报告结论。
-  - 1 个测试计划节点尚未完成。
-  - 1 个测试计划节点受阻；阻塞原因见测试计划章节。
+  - 1 条 Finding 的非破坏式证据尚未达到确认阈值，仅作为疑似结果。
+  - 旧版任务树中有 1 个未终结文字节点；这些节点不代表已执行网络测试。
+  - 旧版任务树中有 1 个受阻文字节点；仅在 legacy\_plan\_summary 中保留。
 
 ## 2. 时间线、方法与工具版本
 
@@ -40,22 +40,24 @@
 - **有界流量采集**（`bounded_traffic_capture`）：在授权 Scope 内保存带捕获、截断和解码状态的 HTTP 流量。
 - **AI 辅助假设**（`ai_hypothesis`）：模型输出经过结构校验并保留模型、提示词版本和输入哈希；不自动确认漏洞。
 - **人工 Evidence 复核**（`human_evidence_review`）：只有已接受且具备确认资格的 Evidence 才能支撑 confirmed 结论。
-- **证据驱动测试计划**（`evidence_driven_test_plan`）：计划节点、未完成项和阻塞项按当前持久化 revision 汇总。
+- **旧版任务树迁移摘要**（`legacy_plan_summary`）：文字 proposal 节点仅作为历史附录保留，明确不代表已执行测试。
 
 ### 工具版本
 
 - RustForge：`0.1.2`
 - SQLite：`3.46.0`
-- Evidence Report Schema：`2`
+- Evidence Report Schema：`3`
 
 ## 3. 执行摘要与风险分布
 
 - 已记录流量：1 条
 - 已确认 Finding：1 条
-- 待验证附录：1 条
+- 疑似 Finding：0 条
+- 未观察到检查：0 项
+- 覆盖缺口：0 项
 - 默认省略 rejected Finding：1 条
 - 已接受且可支撑确认的 Evidence：1 项
-- 测试计划覆盖：1/3 个节点已终结
+- AssessmentRun：未附加
 - confirmed 风险分布：critical 0，high 1，medium 0，low 0，info 0
 
 ## 4. 已确认 Findings
@@ -69,7 +71,7 @@
 - 状态：已确认
 - 类型：SQL 注入
 - 风险：`high`　置信度：87　累计出现：1
-- 来源：AI 分析（需人工复核）
+- 来源：AI 分析 / `ai`（需要人工复核）
 - 标准引用：A03:2021、CWE-89 (v4.20)
 - 受影响目标：
   - `POST` `https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D`
@@ -88,7 +90,8 @@ AI 假设：参数 username 可能触发报错，不是已执行结果。
 ##### Evidence `1` · `traffic` `11`
 
 - 实际观察：人工观察到 500 与 SQL 错误片段；Authorization: \[REDACTED:sensitive\_field\]
-- 人工接受：是　可用于确认：是　来源仍可用：是
+- 已接受：是　接受来源：`human`　可用于确认：是　来源仍可用：是
+- Verification：—　Check：—　Template：—　Verifier：—
 - 快照 SHA-256：`403b7b32136b42136fe9e753f03caa618e89ebb29cf17b0ecfe69a2700a33680`（校验通过）
 - 创建者：`test:analyst`　创建时间：`2026-07-24 09:18:00.000`
 - 接受说明：响应差异可重复
@@ -164,14 +167,50 @@ AI 假设：参数 username 可能触发报错，不是已执行结果。
 #### 修复建议与复测状态
 
 - 修复建议：（A03:2021）优先使用参数化接口和安全 API，对输入做语义白名单校验，并按最终解释上下文编码输出。 （CWE-89 (v4.20)）使用参数化查询；动态标识符采用严格映射；数据库账号遵循最小权限。
-- 复测状态：`not_recorded`（当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。）
+- 复测状态：`not_recorded`（当前数据模型未记录独立的修复后复测结论；评估中未观察到也不等同于复测通过。）
 - 人工备注：由分析员复核。
 
 #### 来源审计
 
+- producer `ai` · 结论需要人工复核
 - AI：AnalysisRun `21` · provider `test-provider` · model `model-v2` · prompt `traffic_analysis` v3 · validation `valid`
 
-## 5. 测试计划覆盖、未完成项与阻塞项
+## 5. 疑似 Findings
+
+> 暂无疑似 Finding。
+
+## 6. 未观察到的检查
+
+> 本次未记录“已执行但未观察到”的完整检查。
+
+## 7. 覆盖缺口
+
+> 未记录额外覆盖缺口；这不代表授权范围外或破坏式类别已被测试。
+
+## 8. AssessmentRun 与运行契约审计
+
+> 项目尚无终态 AssessmentRun；本报告仅汇总累计 Finding。
+
+## 9. 来源版本与复核说明
+
+> AI 与被动规则只产生待验证假设。confirmed 状态只能来自人工接受或版本化安全验证器接受的完整 Evidence；安全验证器结论仍可由人工重置、撤销或判定冲突。
+
+### 标准版本
+
+- cwe `4.20` · MITRE CWE 4.20（RustForge 精选知识卡） · 发布 `2026-04-30` · [标准来源](<https://cwe.mitre.org/data/index.html>)
+- owasp-top10 `2021` · OWASP Top 10:2021 · 发布 `2021` · [标准来源](<https://owasp.org/Top10/2021/>)
+
+### AI 模型与提示词版本
+
+- AnalysisRun `21` · provider `test-provider` · model `model-v2` · prompt `traffic_analysis` v3 · input hash `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+
+### 规则版本
+
+> 本报告没有规则来源 Finding。
+
+## 附录 A. 旧版测试计划摘要（不代表已执行）
+
+> 以下节点来自旧版文字 proposal / 任务树，仅保留迁移审计；节点状态不能证明网络测试已经执行。
 
 - 当前 revision：1
 - 待更新：是（新 Evidence 到达）
@@ -190,56 +229,3 @@ AI 假设：参数 username 可能触发报错，不是已执行结果。
 
 > 暂无已跳过或不适用项。
 
-## 6. 来源版本与人工复核说明
-
-> AI 与被动规则只产生待验证假设。报告中的 confirmed 状态来自人工接受 Evidence 后的显式状态变更；仍需由具备授权和专业能力的人员复核。
-
-### 标准版本
-
-- cwe `4.20` · MITRE CWE 4.20（RustForge 精选知识卡） · 发布 `2026-04-30` · [标准来源](<https://cwe.mitre.org/data/index.html>)
-- owasp-top10 `2021` · OWASP Top 10:2021 · 发布 `2021` · [标准来源](<https://owasp.org/Top10/2021/>)
-
-### AI 模型与提示词版本
-
-- AnalysisRun `21` · provider `test-provider` · model `model-v2` · prompt `traffic_analysis` v3 · input hash `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
-
-### 规则版本
-
-> 本报告没有规则来源 Finding。
-
-## 附录 A. 待验证 Findings（不作为已确认结论）
-
-### 1. [medium] 待确认的会话问题
-
-#### 身份、目标与风险
-
-- Finding ID：`32`
-- 稳定身份：`finding:32`
-- 状态：待验证
-- 类型：会话管理
-- 风险：`medium`　置信度：55　累计出现：1
-- 来源：AI 分析（需人工复核）
-- 标准引用：—
-- 受影响目标：
-  - `POST` `https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D`
-
-#### 假设依据（不等同于实际复现）
-
-仅为待验证假设。
-
-#### 建议验证步骤（计划性内容）
-
-检查会话轮换。
-
-#### 已执行复现与实际 Evidence
-
-> 尚未关联实际 Evidence；该条目只能保留为待验证假设。
-
-#### 修复建议与复测状态
-
-- 修复建议：—
-- 复测状态：`not_recorded`（当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。）
-
-#### 来源审计
-
-- AI：AnalysisRun `21` · provider `test-provider` · model `model-v2` · prompt `traffic_analysis` v3 · validation `valid`

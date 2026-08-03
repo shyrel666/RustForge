@@ -6,8 +6,8 @@ import { ArrowRight, Plus } from "@element-plus/icons-vue";
 import { useProjectStore } from "../stores/project";
 import {
   countTraffic,
-  getTaskTree,
-  listFindings,
+  getAssessmentDetail,
+  listAssessmentRuns,
   type Project,
 } from "../api/tauri";
 import {
@@ -61,15 +61,28 @@ const trafficMetric = computed(() =>
   formatMetric(summary.value.trafficTotal),
 );
 
-const taskMetric = computed(() => {
-  const { tasksDone, tasksTotal } = summary.value;
-  if (tasksDone === null || tasksTotal === null) return "—";
-  return `${numberFormatter.format(tasksDone)} / ${numberFormatter.format(tasksTotal)}`;
+const assessmentStatusMetric = computed(() => {
+  const labels: Record<string, string> = {
+    queued: "排队中",
+    discovering: "发现中",
+    planning: "规划中",
+    executing: "执行中",
+    verifying: "验证中",
+    completed: "已完成",
+    stopped: "安全停止",
+    cancelled: "已取消",
+    failed: "失败",
+    interrupted: "已中断",
+  };
+  const status = summary.value.latestAssessmentStatus;
+  return status ? labels[status] ?? status : "尚未评估";
 });
 
-const findingsMetric = computed(() =>
-  formatMetric(summary.value.pendingFindings),
-);
+const findingsMetric = computed(() => {
+  const { confirmedFindings, suspectedFindings } = summary.value;
+  if (confirmedFindings === null || suspectedFindings === null) return "—";
+  return `${numberFormatter.format(confirmedFindings)} / ${numberFormatter.format(suspectedFindings)}`;
+});
 
 watch(
   () => project.current?.id ?? null,
@@ -104,9 +117,8 @@ async function refreshSummary(projectId: number | null) {
   try {
     const next = await loadHomeSummary(projectId, {
       countTraffic: (id) => countTraffic(id, {}),
-      getTaskTree,
-      listPendingFindings: (id) =>
-        listFindings(id, { status: "pending" }),
+      listAssessmentRuns,
+      getAssessmentDetail,
     });
     if (request === summaryRequest && project.current?.id === projectId) {
       summary.value = next;
@@ -191,13 +203,13 @@ async function resumeProject(item: Project) {
             </div>
             <div class="metric-item">
               <span v-if="summaryLoading" class="metric-skeleton" />
-              <strong v-else>{{ taskMetric }}</strong>
-              <span>任务完成</span>
+              <strong v-else>{{ assessmentStatusMetric }}</strong>
+              <span>最近评估</span>
             </div>
             <div class="metric-item">
               <span v-if="summaryLoading" class="metric-skeleton" />
               <strong v-else>{{ findingsMetric }}</strong>
-              <span>待确认发现</span>
+              <span>已确认 / 疑似</span>
             </div>
           </div>
         </article>

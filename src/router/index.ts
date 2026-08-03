@@ -24,8 +24,8 @@ const router = createRouter({
     {
       path: "/tasks",
       name: "tasks",
-      component: () => import("../views/TaskTreeView.vue"),
-      meta: { title: "测试计划", immersive: true },
+      component: () => import("../views/AssessmentView.vue"),
+      meta: { title: "AI 评估", immersive: true },
     },
     {
       path: "/findings",

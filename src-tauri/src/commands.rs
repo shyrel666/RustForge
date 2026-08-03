@@ -5,6 +5,12 @@ use crate::ai::context::{self, AiContextPreview, AiDataPolicy};
 use crate::ai::redaction::{redact_fallback_text, RedactionManifest};
 use crate::ai::validation::ValidationReport;
 use crate::ai::{analyzer, digest, planner, prompts};
+use crate::assessment::model::{
+    AssessmentAuthCandidate, AssessmentAuthProfile, AssessmentContractInput,
+    AssessmentContractPreview, AssessmentDetail, AssessmentRun, CreateAssessmentAuthProfileInput,
+    ImportAssessmentAuthProfileInput, SetAssessmentAuthProfileInput, StartAssessmentInput,
+};
+use crate::assessment::planner::PlannerProviderContext;
 use crate::authorization::{
     load_project_policy, normalize_scope_entries, AuthorizationError, ScopeDecision,
 };
@@ -40,6 +46,7 @@ use zeroize::Zeroizing;
 
 type CmdResult<T> = Result<T, String>;
 const AI_DATA_POLICY_SETTING: &str = "ai_data_policy";
+const ANALYSIS_AI_TIMEOUT_SECS: u64 = 300;
 
 /// 模块内读取单个设置（get_setting 命令的内部复用版）
 fn read_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
@@ -197,6 +204,17 @@ struct AiProviderView {
 pub struct ApiKeyStatus {
     provider_id: String,
     has_api_key: bool,
+}
+
+fn validate_provider_api_key(api_key: &str) -> CmdResult<&str> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("API Key 不能为空".into());
+    }
+    if api_key.len() > 16 * 1024 {
+        return Err("API Key 长度超出限制".into());
+    }
+    Ok(api_key)
 }
 
 fn parse_stored_providers(value: Option<String>) -> CmdResult<Vec<AiProviderMetadata>> {
@@ -646,13 +664,7 @@ pub fn set_provider_api_key(
 ) -> CmdResult<ApiKeyStatus> {
     let provider_id = provider_id.trim().to_string();
     let api_key = Zeroizing::new(api_key);
-    let api_key = api_key.trim();
-    if api_key.is_empty() {
-        return Err("API Key 不能为空".into());
-    }
-    if api_key.len() > 16 * 1024 {
-        return Err("API Key 长度超出限制".into());
-    }
+    let api_key = validate_provider_api_key(api_key.as_str())?;
     let secret_id = provider_api_key_id(&provider_id).map_err(|error| error.to_string())?;
     {
         let db = state.db.get().map_err(|error| error.to_string())?;
@@ -685,7 +697,50 @@ pub fn delete_provider_api_key(
     })
 }
 
-/// 从供应商的 OpenAI 兼容 /models 端点拉取可用模型列表。
+async fn fetch_models_from_endpoint(base: &str, api_key: &str) -> CmdResult<Vec<String>> {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = http
+        .get(format!("{base}/models"))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| redact_sensitive(&format!("请求失败: {error}"), &[api_key]))?;
+    let status = resp.status();
+    let text = Zeroizing::new(
+        resp.text()
+            .await
+            .map_err(|error| redact_sensitive(&error.to_string(), &[api_key]))?,
+    );
+    if !status.is_success() {
+        let snippet: String = text.chars().take(300).collect();
+        return Err(redact_sensitive(
+            &format!("获取模型失败 {status}: {snippet}"),
+            &[api_key],
+        ));
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("响应非 JSON: {error}"))?;
+    // OpenAI 兼容：{ "data": [ { "id": "..." }, ... ] }
+    let mut ids: Vec<String> = json["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err("该端点未返回模型列表（可能不支持 /models）".into());
+    }
+    Ok(ids)
+}
+
+/// 从已保存供应商的 OpenAI 兼容 /models 端点拉取可用模型列表。
 /// Key 仅由后端根据 provider_id 从系统凭据库读取。
 #[tauri::command]
 pub async fn fetch_models(
@@ -707,49 +762,19 @@ pub async fn fetch_models(
         .get(&secret_id)
         .map_err(|error| error.to_string())?
         .ok_or("当前 AI 供应商未配置 API Key，请先保存 Key")?;
-    if api_key.expose().trim().is_empty() {
-        return Err("当前 AI 供应商未配置 API Key，请先保存 Key".into());
-    }
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = http
-        .get(format!("{base}/models"))
-        .bearer_auth(api_key.expose())
-        .send()
-        .await
-        .map_err(|error| redact_sensitive(&format!("请求失败: {error}"), &[api_key.expose()]))?;
-    let status = resp.status();
-    let text = Zeroizing::new(
-        resp.text()
-            .await
-            .map_err(|error| redact_sensitive(&error.to_string(), &[api_key.expose()]))?,
-    );
-    if !status.is_success() {
-        let snippet: String = text.chars().take(300).collect();
-        return Err(redact_sensitive(
-            &format!("获取模型失败 {status}: {snippet}"),
-            &[api_key.expose()],
-        ));
-    }
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| format!("响应非 JSON: {error}"))?;
-    // OpenAI 兼容：{ "data": [ { "id": "..." }, ... ] }
-    let mut ids: Vec<String> = json["data"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    ids.sort();
-    ids.dedup();
-    if ids.is_empty() {
-        return Err("该端点未返回模型列表（可能不支持 /models）".into());
-    }
-    Ok(ids)
+    let api_key = validate_provider_api_key(api_key.expose())
+        .map_err(|_| "当前 AI 供应商未配置 API Key，请先保存 Key".to_string())?;
+    fetch_models_from_endpoint(&base, api_key).await
+}
+
+/// 使用尚未保存的表单配置预览 /models。API Key 只在本次 IPC 和请求期间
+/// 存在，不写入 SQLite 或系统凭据库。
+#[tauri::command]
+pub async fn fetch_models_for_draft(base_url: String, api_key: String) -> CmdResult<Vec<String>> {
+    let base = normalize_provider_base_url(&base_url)?;
+    let api_key = Zeroizing::new(api_key);
+    let api_key = validate_provider_api_key(api_key.as_str())?;
+    fetch_models_from_endpoint(&base, api_key).await
 }
 
 #[cfg(test)]
@@ -831,6 +856,16 @@ mod settings_security_tests {
                 "{base_url} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn provider_api_keys_are_trimmed_and_bounded_for_saved_and_draft_requests() {
+        assert_eq!(
+            validate_provider_api_key("  sk-draft  ").unwrap(),
+            "sk-draft"
+        );
+        assert!(validate_provider_api_key(" \n\t ").is_err());
+        assert!(validate_provider_api_key(&"x".repeat(16 * 1024 + 1)).is_err());
     }
 
     #[test]
@@ -998,10 +1033,40 @@ pub fn create_project(
 
 #[tauri::command]
 pub fn delete_project(state: State<AppState>, id: i64) -> CmdResult<()> {
-    let db = state.db.get().map_err(|e| e.to_string())?;
+    if state.assessments.active_run_for_project(id).is_some() {
+        return Err("[ASSESSMENT_ACTIVE] 项目存在活动评估，请先停止评估".into());
+    }
+    let mut db = state.db.get().map_err(|e| e.to_string())?;
     replay::service::recover_interrupted_attempts(&db)?;
-    db.execute("DELETE FROM projects WHERE id = ?1", [id])
-        .map_err(|e| e.to_string())?;
+    crate::assessment::service::delete_project_with_auth_cleanup(
+        &mut db,
+        state.secrets.as_ref(),
+        id,
+    )
+}
+
+/// Rechecked immediately before every Assessment target request. A settings
+/// change must stop the run instead of silently continuing under a contract the
+/// user did not confirm.
+pub(crate) fn ensure_assessment_ai_contract_current(
+    conn: &rusqlite::Connection,
+    expected_provider_id: &str,
+    expected_model: &str,
+) -> CmdResult<()> {
+    if read_setting(conn, "ai_enabled").as_deref() == Some("false") {
+        return Err("[CONTRACT_DRIFT] AI 功能已在设置中禁用".into());
+    }
+    let Some((provider_id, _, model, _)) = active_ai(conn)? else {
+        return Err("[CONTRACT_DRIFT] 当前 AI provider 已不存在".into());
+    };
+    let model = if model.trim().is_empty() {
+        "deepseek-chat".to_string()
+    } else {
+        model
+    };
+    if provider_id != expected_provider_id || model != expected_model {
+        return Err("[CONTRACT_DRIFT] 当前 AI provider/model 与运行契约不一致".into());
+    }
     Ok(())
 }
 
@@ -1428,6 +1493,35 @@ pub struct AnalysisRunView {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AnalysisProgress {
+    pub request_id: String,
+    pub traffic_id: i64,
+    pub stage: String,
+    pub percentage: u8,
+    pub message: String,
+}
+
+fn emit_analysis_progress(
+    app: &AppHandle,
+    request_id: &str,
+    traffic_id: i64,
+    stage: &str,
+    percentage: u8,
+    message: &str,
+) {
+    let _ = app.emit(
+        "traffic-analysis:progress",
+        AnalysisProgress {
+            request_id: request_id.to_string(),
+            traffic_id,
+            stage: stage.to_string(),
+            percentage: percentage.min(100),
+            message: message.to_string(),
+        },
+    );
+}
+
 /// 生成最终发送内容。此命令不读取 API Key，也不调用网络。
 #[tauri::command]
 pub fn preview_ai_context(
@@ -1641,7 +1735,17 @@ pub async fn analyze_traffic(
     traffic_id: i64,
     policy: AiDataPolicy,
     expected_input_hash: String,
+    request_id: String,
 ) -> CmdResult<AnalysisResult> {
+    validate_ai_request_id(&request_id)?;
+    emit_analysis_progress(
+        &app,
+        &request_id,
+        traffic_id,
+        "preparing",
+        8,
+        "正在核对流量上下文、脱敏策略与 AI 配置",
+    );
     let (preview, resolved, project_id) = {
         let db = state.db.get().map_err(|e| e.to_string())?;
         if read_setting(&db, "ai_enabled").as_deref() == Some("false") {
@@ -1668,8 +1772,29 @@ pub async fn analyze_traffic(
         (preview, resolved, project_id)
     };
 
-    let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
+    emit_analysis_progress(
+        &app,
+        &request_id,
+        traffic_id,
+        "generating",
+        22,
+        "上下文已准备，AI 正在分析请求与响应",
+    );
+    let client = OpenAiClient::new_with_timeout(
+        &resolved.base_url,
+        resolved.api_key,
+        &resolved.model,
+        std::time::Duration::from_secs(ANALYSIS_AI_TIMEOUT_SECS),
+    )?;
     let attempt = analyzer::analyze(&client, &preview).await?;
+    emit_analysis_progress(
+        &app,
+        &request_id,
+        traffic_id,
+        "validating",
+        82,
+        "模型响应已完成，正在整理本地校验结果",
+    );
 
     let mut new_findings: Vec<Finding> = Vec::new();
     let mut result = attempt.result;
@@ -1678,6 +1803,18 @@ pub async fn analyze_traffic(
     let manifest_json = serde_json::to_string(&preview.manifest).map_err(|e| e.to_string())?;
     let validation_json = serde_json::to_string(&attempt.validation).map_err(|e| e.to_string())?;
     let run_id;
+    emit_analysis_progress(
+        &app,
+        &request_id,
+        traffic_id,
+        "saving",
+        90,
+        if result.is_some() {
+            "校验已通过，正在保存分析和待验证 Finding"
+        } else {
+            "模型响应未通过校验，正在保存审计记录"
+        },
+    );
     {
         let db = state.db.get().map_err(|e| e.to_string())?;
         let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1756,10 +1893,10 @@ pub async fn analyze_traffic(
                 let standard_references_json =
                     knowledge::references_to_json(&hypothesis.standard_references)?;
                 tx.execute(
-                    "INSERT INTO findings(project_id, traffic_id, analysis_run_id, source,
+                    "INSERT INTO findings(project_id, traffic_id, analysis_run_id, source, producer,
                                           title, vuln_type, standard_references, severity, confidence,
                                           reasoning, verify_steps)
-                     VALUES(?1,?2,?3,'ai',?4,?5,?6,?7,?8,?9,?10)",
+                     VALUES(?1,?2,?3,'ai','ai',?4,?5,?6,?7,?8,?9,?10)",
                     rusqlite::params![
                         project_id,
                         traffic_id,
@@ -1788,6 +1925,14 @@ pub async fn analyze_traffic(
     }
 
     let Some(result) = result else {
+        emit_analysis_progress(
+            &app,
+            &request_id,
+            traffic_id,
+            "failed",
+            94,
+            "模型响应未通过本地结构校验",
+        );
         return Err(format!(
             "AI 输出未通过后端结构化校验，未创建 Finding。审计运行 #{run_id}：{validation_error}"
         ));
@@ -1795,6 +1940,14 @@ pub async fn analyze_traffic(
     for f in &new_findings {
         let _ = app.emit("finding:new", f);
     }
+    emit_analysis_progress(
+        &app,
+        &request_id,
+        traffic_id,
+        "completed",
+        100,
+        "AI 分析与待验证 Finding 已创建",
+    );
     Ok(result)
 }
 
@@ -2247,6 +2400,7 @@ pub fn list_task_plan_events(
 const MAX_TASK_AI_INPUT_BYTES: usize = 32 * 1024;
 const MAX_TASK_AI_FIELD_BYTES: usize = 4 * 1024;
 const MAX_TASK_AI_DIGEST_BYTES: usize = 16 * 1024;
+const TASK_AI_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskAiOperation {
@@ -2294,6 +2448,50 @@ struct PreparedTaskAi {
 pub struct TaskAiExecution {
     pub analysis_run_id: i64,
     pub proposal: TaskPlanProposal,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskAiProgress {
+    pub request_id: String,
+    pub project_id: i64,
+    pub operation: String,
+    pub stage: String,
+    pub percentage: u8,
+    pub message: String,
+}
+
+fn emit_task_ai_progress(
+    app: &AppHandle,
+    request_id: &str,
+    project_id: i64,
+    operation: TaskAiOperation,
+    stage: &str,
+    percentage: u8,
+    message: &str,
+) {
+    let _ = app.emit(
+        "task-ai:progress",
+        TaskAiProgress {
+            request_id: request_id.to_string(),
+            project_id,
+            operation: operation.as_str().to_string(),
+            stage: stage.to_string(),
+            percentage: percentage.min(100),
+            message: message.to_string(),
+        },
+    );
+}
+
+fn validate_ai_request_id(request_id: &str) -> CmdResult<()> {
+    if request_id.is_empty()
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("AI 请求标识无效".to_string());
+    }
+    Ok(())
 }
 
 fn truncate_task_ai_value(
@@ -2575,10 +2773,22 @@ pub fn preview_task_ai(
 /// AI 生成测试计划 proposal。该命令只持久化 proposal 与 diff，不直接修改节点。
 #[tauri::command]
 pub async fn generate_task_tree(
+    app: AppHandle,
     state: State<'_, AppState>,
     project_id: i64,
     expected_input_hash: String,
+    request_id: String,
 ) -> CmdResult<TaskAiExecution> {
+    validate_ai_request_id(&request_id)?;
+    emit_task_ai_progress(
+        &app,
+        &request_id,
+        project_id,
+        TaskAiOperation::Generate,
+        "preparing",
+        8,
+        "正在核对项目、流量摘要与 AI 配置",
+    );
     let (prepared, resolved) = {
         let db = state.db.get().map_err(|error| error.to_string())?;
         let resolved = resolved_ai(&db, state.secrets.as_ref())?;
@@ -2596,34 +2806,112 @@ pub async fn generate_task_tree(
         }
         (prepared, resolved)
     };
+    emit_task_ai_progress(
+        &app,
+        &request_id,
+        project_id,
+        TaskAiOperation::Generate,
+        "generating",
+        22,
+        "上下文已准备，AI 正在生成测试计划",
+    );
     let provider_id = resolved.provider_id.clone();
     let provider_base_url = resolved.base_url.clone();
     let model = resolved.model.clone();
-    let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
+    let client = OpenAiClient::new_with_timeout(
+        &resolved.base_url,
+        resolved.api_key,
+        &resolved.model,
+        std::time::Duration::from_secs(TASK_AI_TIMEOUT_SECS),
+    )?;
     let valid_ids = prepared.valid_finding_ids.clone();
-    let attempt = chat_json(
+    let mut attempt = chat_json(
         &client,
         &prepared.preview.system_prompt,
         &prepared.preview.user_prompt,
-        |raw| planner::parse_plan(raw, &valid_ids),
+        |raw| planner::parse_plan_with_warnings(raw, &valid_ids),
     )
     .await?;
+    emit_task_ai_progress(
+        &app,
+        &request_id,
+        project_id,
+        TaskAiOperation::Generate,
+        "validating",
+        82,
+        "模型响应已完成，正在校验并整理计划",
+    );
+    if let Some(parsed) = attempt.result.as_ref() {
+        attempt
+            .audit
+            .validation
+            .warnings
+            .extend(parsed.warnings.iter().cloned());
+    }
 
     let mut db = state.db.get().map_err(|error| error.to_string())?;
+    if attempt.result.is_some() {
+        emit_task_ai_progress(
+            &app,
+            &request_id,
+            project_id,
+            TaskAiOperation::Generate,
+            "saving",
+            90,
+            "计划校验通过，正在保存审计记录",
+        );
+    } else {
+        emit_task_ai_progress(
+            &app,
+            &request_id,
+            project_id,
+            TaskAiOperation::Generate,
+            "validating",
+            86,
+            "模型响应未通过校验，正在保存审计记录",
+        );
+    }
     let run_id = persist_task_ai_run(&db, &prepared, &attempt.audit)?;
-    let Some(tree) = attempt.result else {
+    let Some(parsed) = attempt.result else {
+        emit_task_ai_progress(
+            &app,
+            &request_id,
+            project_id,
+            TaskAiOperation::Generate,
+            "failed",
+            90,
+            "模型响应未通过本地结构校验",
+        );
         return Err(task_ai_validation_error(run_id, &attempt.audit.validation));
     };
+    emit_task_ai_progress(
+        &app,
+        &request_id,
+        project_id,
+        TaskAiOperation::Generate,
+        "proposal",
+        96,
+        "正在计算与当前 revision 的差异",
+    );
     let proposal = create_task_ai_proposal(
         &mut db,
         &prepared,
         TaskAiOperation::Generate,
-        tree,
+        parsed.value,
         run_id,
         &provider_id,
         &provider_base_url,
         &model,
     )?;
+    emit_task_ai_progress(
+        &app,
+        &request_id,
+        project_id,
+        TaskAiOperation::Generate,
+        "completed",
+        100,
+        "测试计划提案已生成",
+    );
     Ok(TaskAiExecution {
         analysis_run_id: run_id,
         proposal,
@@ -2657,23 +2945,35 @@ pub async fn expand_task_node(
     let provider_id = resolved.provider_id.clone();
     let provider_base_url = resolved.base_url.clone();
     let model = resolved.model.clone();
-    let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
+    let client = OpenAiClient::new_with_timeout(
+        &resolved.base_url,
+        resolved.api_key,
+        &resolved.model,
+        std::time::Duration::from_secs(TASK_AI_TIMEOUT_SECS),
+    )?;
     let valid_ids = prepared.valid_finding_ids.clone();
-    let attempt = chat_json(
+    let mut attempt = chat_json(
         &client,
         &prepared.preview.system_prompt,
         &prepared.preview.user_prompt,
-        |raw| planner::parse_expand(raw, &valid_ids),
+        |raw| planner::parse_expand_with_warnings(raw, &valid_ids),
     )
     .await?;
+    if let Some(parsed) = attempt.result.as_ref() {
+        attempt
+            .audit
+            .validation
+            .warnings
+            .extend(parsed.warnings.iter().cloned());
+    }
 
     let mut db = state.db.get().map_err(|error| error.to_string())?;
     let run_id = persist_task_ai_run(&db, &prepared, &attempt.audit)?;
-    let Some(children) = attempt.result else {
+    let Some(parsed) = attempt.result else {
         return Err(task_ai_validation_error(run_id, &attempt.audit.validation));
     };
     let target_id = prepared.node_id.unwrap_or(node_id);
-    let proposed = tree_service::plan_with_expansion(&db, target_id, children)?;
+    let proposed = tree_service::plan_with_expansion(&db, target_id, parsed.value)?;
     let proposal = create_task_ai_proposal(
         &mut db,
         &prepared,
@@ -2717,7 +3017,12 @@ pub async fn alternative_task_node(
     let provider_id = resolved.provider_id.clone();
     let provider_base_url = resolved.base_url.clone();
     let model = resolved.model.clone();
-    let client = OpenAiClient::new(&resolved.base_url, resolved.api_key, &resolved.model)?;
+    let client = OpenAiClient::new_with_timeout(
+        &resolved.base_url,
+        resolved.api_key,
+        &resolved.model,
+        std::time::Duration::from_secs(TASK_AI_TIMEOUT_SECS),
+    )?;
     let attempt = chat_json(
         &client,
         &prepared.preview.system_prompt,
@@ -3071,13 +3376,246 @@ pub async fn replay_request(
     replay::service::execute_request(state.db.clone(), project_id, session_id, request).await
 }
 
+// ---------- AI 非破坏式安全评估 ----------
+
+#[tauri::command]
+pub fn list_assessment_auth_profiles(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<Vec<AssessmentAuthProfile>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::list_auth_profiles(&db, state.secrets.as_ref(), project_id)
+}
+
+#[tauri::command]
+pub fn create_assessment_auth_profile(
+    state: State<AppState>,
+    input: CreateAssessmentAuthProfileInput,
+) -> CmdResult<AssessmentAuthProfile> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::create_auth_profile(&mut db, state.secrets.as_ref(), &input)
+}
+
+#[tauri::command]
+pub fn set_assessment_auth_profile(
+    state: State<AppState>,
+    input: SetAssessmentAuthProfileInput,
+) -> CmdResult<AssessmentAuthProfile> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::set_auth_profile_secret(&mut db, state.secrets.as_ref(), &input)
+}
+
+#[tauri::command]
+pub fn list_assessment_auth_candidates(
+    state: State<AppState>,
+    project_id: i64,
+    header_name: String,
+) -> CmdResult<Vec<AssessmentAuthCandidate>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::list_auth_candidates(&db, project_id, &header_name)
+}
+
+#[tauri::command]
+pub fn import_assessment_auth_profile(
+    state: State<AppState>,
+    input: ImportAssessmentAuthProfileInput,
+) -> CmdResult<AssessmentAuthProfile> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::import_auth_profile_from_traffic(
+        &mut db,
+        state.secrets.as_ref(),
+        &input,
+    )
+}
+
+#[tauri::command]
+pub fn delete_assessment_auth_profile(
+    state: State<AppState>,
+    project_id: i64,
+    profile_id: i64,
+) -> CmdResult<()> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::delete_auth_profile(
+        &mut db,
+        state.secrets.as_ref(),
+        project_id,
+        profile_id,
+    )
+}
+
+fn bind_assessment_provider(
+    conn: &rusqlite::Connection,
+    input: &mut AssessmentContractInput,
+) -> CmdResult<(String, String, String, bool)> {
+    if read_setting(conn, "ai_enabled").as_deref() == Some("false") {
+        return Err("AI 功能已在设置中全局禁用（隐私开关）".into());
+    }
+    let (provider_id, base_url, mut model, supports_json_schema) =
+        active_ai(conn)?.ok_or("请先在设置页添加并选择一个 AI 供应商")?;
+    if model.trim().is_empty() {
+        model = "deepseek-chat".into();
+    }
+    if !input.provider_id.trim().is_empty() && input.provider_id != provider_id {
+        return Err("[CONTRACT_DRIFT] 当前 AI provider 与契约输入不一致".into());
+    }
+    if !input.model.trim().is_empty() && input.model != model {
+        return Err("[CONTRACT_DRIFT] 当前 AI model 与契约输入不一致".into());
+    }
+    input.provider_id = provider_id.clone();
+    input.model = model.clone();
+    Ok((provider_id, base_url, model, supports_json_schema))
+}
+
+#[tauri::command]
+pub fn preview_assessment_contract(
+    state: State<AppState>,
+    mut input: AssessmentContractInput,
+) -> CmdResult<AssessmentContractPreview> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    bind_assessment_provider(&db, &mut input)?;
+    crate::assessment::service::preview_contract(&db, state.secrets.as_ref(), &input)
+}
+
+#[tauri::command]
+pub async fn start_assessment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut input: StartAssessmentInput,
+) -> CmdResult<AssessmentRun> {
+    let (client, provider, preview, run) = {
+        let mut db = state.db.get().map_err(|error| error.to_string())?;
+        let resolved = resolved_ai(&db, state.secrets.as_ref())?;
+        if !input.contract.provider_id.trim().is_empty()
+            && input.contract.provider_id != resolved.provider_id
+        {
+            return Err("[CONTRACT_DRIFT] AI provider 已变化，请重新确认运行契约".into());
+        }
+        if !input.contract.model.trim().is_empty() && input.contract.model != resolved.model {
+            return Err("[CONTRACT_DRIFT] AI model 已变化，请重新确认运行契约".into());
+        }
+        input.contract.provider_id = resolved.provider_id.clone();
+        input.contract.model = resolved.model.clone();
+        let preview = crate::assessment::service::preview_contract(
+            &db,
+            state.secrets.as_ref(),
+            &input.contract,
+        )?;
+        if input.contract_hash.len() != 64 || input.contract_hash != preview.contract_hash {
+            return Err("[CONTRACT_DRIFT] 运行契约已变化，请重新预览并确认".into());
+        }
+        // Construct every fallible, non-persistent dependency before inserting
+        // the active run. Otherwise a client-construction failure could leave a
+        // queued run holding the global admission lock in SQLite.
+        let client = OpenAiClient::new_with_timeout(
+            &resolved.base_url,
+            resolved.api_key,
+            &resolved.model,
+            std::time::Duration::from_secs(300),
+        )?;
+        let provider = PlannerProviderContext {
+            provider_id: resolved.provider_id,
+            provider_base_url: resolved.base_url,
+            model: resolved.model,
+            supports_json_schema: resolved.supports_json_schema,
+        };
+        let run = crate::assessment::service::create_run(&mut db, &preview)?;
+        (client, provider, preview, run)
+    };
+
+    let cancel = match state.assessments.claim(preview.project_id, run.id) {
+        Ok(cancel) => cancel,
+        Err(error) => {
+            if let Ok(mut db) = state.db.get() {
+                let _ = crate::assessment::service::transition_run(
+                    &mut db,
+                    preview.project_id,
+                    run.id,
+                    crate::assessment::model::AssessmentStatus::Failed,
+                    Some(&error),
+                );
+            }
+            return Err(error);
+        }
+    };
+    let pool = state.db.clone();
+    let secrets = state.secrets.clone();
+    let manager = state.assessments.clone();
+    let background_app = app.clone();
+    let finalize_secrets = secrets.clone();
+    let project_id = preview.project_id;
+    let run_id = run.id;
+    // guard 在任务闭包中持有：正常结束或 panic unwind 都会释放全局 admission。
+    let guard = crate::assessment::AssessmentRunGuard::new(manager, run_id);
+    tauri::async_runtime::spawn(async move {
+        let result =
+            crate::assessment::runner::run(crate::assessment::runner::AssessmentRunContext {
+                pool: pool.clone(),
+                secrets,
+                app: background_app.clone(),
+                project_id,
+                run_id,
+                client,
+                provider,
+                cancel,
+            })
+            .await;
+        if let Err(error) = result {
+            crate::assessment::runner::finalize_error(
+                &background_app,
+                &pool,
+                &finalize_secrets,
+                project_id,
+                run_id,
+                &error,
+            );
+        }
+        drop(guard);
+    });
+    Ok(run)
+}
+
+#[tauri::command]
+pub fn cancel_assessment(state: State<AppState>, project_id: i64, run_id: i64) -> CmdResult<()> {
+    {
+        let db = state.db.get().map_err(|error| error.to_string())?;
+        let run = crate::assessment::service::get_run(&db, project_id, run_id)?;
+        if !run.status.is_active() {
+            return Err("[ASSESSMENT_NOT_ACTIVE] 指定评估已经结束".into());
+        }
+    }
+    state.assessments.cancel(project_id, run_id)
+}
+
+#[tauri::command]
+pub fn list_assessment_runs(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<Vec<AssessmentRun>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::list_runs(&db, project_id)
+}
+
+#[tauri::command]
+pub fn get_assessment_detail(
+    state: State<AppState>,
+    project_id: i64,
+    run_id: i64,
+) -> CmdResult<AssessmentDetail> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::service::get_detail(&db, project_id, run_id)
+}
+
 // ---------- 证据化报告 ----------
 
 /// 生成默认脱敏的 Markdown 报告文本（供前端预览）。
 #[tauri::command]
-pub fn build_report(state: State<AppState>, project_id: i64) -> CmdResult<String> {
+pub fn build_report(
+    state: State<AppState>,
+    project_id: i64,
+    assessment_run_id: Option<i64>,
+) -> CmdResult<String> {
     let db = state.db.get().map_err(|e| e.to_string())?;
-    report::build_markdown(&db, project_id)
+    report::build_markdown_for_assessment(&db, project_id, assessment_run_id)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3098,6 +3636,7 @@ pub async fn export_report(
     state: State<'_, AppState>,
     project_id: i64,
     include_sensitive_evidence: bool,
+    assessment_run_id: Option<i64>,
 ) -> CmdResult<ReportExportResult> {
     let options = if include_sensitive_evidence {
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -3127,7 +3666,7 @@ pub async fn export_report(
     };
     let bundle = {
         let db = state.db.get().map_err(|e| e.to_string())?;
-        report::build_bundle(&db, project_id, options)?
+        report::build_bundle_for_assessment(&db, project_id, options, assessment_run_id)?
     };
     let dest_dir = app
         .path()

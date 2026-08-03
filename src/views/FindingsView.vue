@@ -137,7 +137,7 @@ async function loadFindingDetails(row: Finding, showError = true) {
   try {
     const [traffic, ruleHits] = await Promise.all([
       listFindingTraffic(row.id),
-      row.source === "rule"
+      row.producer === "passive_rule"
         ? listFindingRuleHits(row.id)
         : Promise.resolve<FindingRuleHit[]>([]),
     ]);
@@ -306,7 +306,7 @@ const ruleIssueSummary = computed(() => {
   <div class="findings-page rf-page rf-page--inset">
     <PageHeader
       title="发现"
-      description="复核 AI / 规则命中，标记确认或误报，并导出可追溯的证据化报告。"
+      description="复核 AI、被动规则与安全验证器结果，并导出可追溯的证据化报告。"
     />
     <div class="rf-toolbar">
       <div v-if="pendingCount" class="rf-toolbar-group">
@@ -378,7 +378,7 @@ const ruleIssueSummary = computed(() => {
 
     <template v-else>
       <el-alert type="info" :closable="false" class="hint" show-icon>
-        所有 Finding 默认「待验证」。请按验证步骤人工复核后标记「已确认」或「误报」。
+        AI 与被动规则结果默认待验证；只有版本化安全验证器满足完整证据阈值时才会自动确认，人工结论始终可覆盖。
       </el-alert>
 
       <div v-loading="ruleDiagnosticsLoading" class="rule-health">
@@ -514,7 +514,7 @@ const ruleIssueSummary = computed(() => {
         v-if="!findings.loading && findings.items.length === 0"
         centered
         title="暂无发现"
-        description="抓包后被动规则会自动打标；在流量页选中请求做 AI 分析，也会生成待验证发现。"
+        description="可从 AI 评估直接扫描已授权 URL，也可抓包后由被动规则打标或在流量页做 AI 分析。"
       >
         <template #icon><el-icon :size="20"><Document /></el-icon></template>
       </EmptyState>
@@ -547,7 +547,7 @@ const ruleIssueSummary = computed(() => {
               <div class="label">稳定指纹</div>
               <code class="fingerprint">{{ row.fingerprint }}</code>
             </div>
-            <div v-if="row.source === 'rule'" class="block">
+            <div v-if="row.producer === 'passive_rule'" class="block">
               <div class="label">关联流量（累计 {{ row.occurrences }}）</div>
               <div v-if="findingTrafficLoading[row.id]" class="cell-sub">
                 正在读取关联流量…
@@ -566,7 +566,7 @@ const ruleIssueSummary = computed(() => {
               </el-table>
               <span v-else class="cell-sub">暂无可读取的关联流量。</span>
             </div>
-            <div v-if="row.source === 'rule'" class="block">
+            <div v-if="row.producer === 'passive_rule'" class="block">
               <div class="label">
                 规则命中审计（最近 {{ findingRuleHits[row.id]?.length ?? 0 }} 条）
               </div>
@@ -619,11 +619,27 @@ const ruleIssueSummary = computed(() => {
         <template #default="{ row }">
           <div class="cell-title">{{ row.title }}</div>
           <div class="cell-sub">
-            <el-tag size="small" :type="row.source === 'ai' ? 'primary' : 'success'" effect="plain">
-              {{ row.source === "ai" ? "AI" : "规则" }}
+            <el-tag
+              size="small"
+              :type="row.producer === 'safe_verifier' ? 'success' : row.producer === 'ai' ? 'primary' : 'info'"
+              effect="plain"
+            >
+              {{
+                row.producer === "safe_verifier"
+                  ? "安全验证器"
+                  : row.producer === "ai"
+                    ? "AI"
+                    : "被动规则"
+              }}
             </el-tag>
+            <el-tag
+              v-if="row.producer === 'safe_verifier' && row.status === 'confirmed'"
+              size="small"
+              type="success"
+              effect="dark"
+            >自动确认</el-tag>
             <span v-if="row.traffic_id" class="tid">流量 #{{ row.traffic_id }}</span>
-            <span v-if="row.source === 'rule'" class="tid">
+            <span v-if="row.producer === 'passive_rule'" class="tid">
               累计 {{ row.occurrences }} 条关联流量
             </span>
           </div>

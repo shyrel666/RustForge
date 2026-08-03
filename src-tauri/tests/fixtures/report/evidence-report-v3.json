@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-07-28T12:00:00+08:00",
   "classification": {
     "sensitivity": "默认脱敏",
@@ -15,13 +15,13 @@
       "api.demo.test"
     ],
     "excluded_scope": [
-      "当前项目模型未单独记录排除项；所有未列入授权范围的目标均视为排除范围。"
+      "所有未列入授权范围的目标均视为排除范围。"
     ],
     "testing_limitations": [
       "1 条流量存在请求或响应截断；相关正文不能视为完整内容。",
-      "1 条 Finding 尚未人工确认，仅列入待验证附录，不作为报告结论。",
-      "1 个测试计划节点尚未完成。",
-      "1 个测试计划节点受阻；阻塞原因见测试计划章节。"
+      "1 条 Finding 的非破坏式证据尚未达到确认阈值，仅作为疑似结果。",
+      "旧版任务树中有 1 个未终结文字节点；这些节点不代表已执行网络测试。",
+      "旧版任务树中有 1 个受阻文字节点；仅在 legacy_plan_summary 中保留。"
     ],
     "created_at": "2026-07-24 09:00:00"
   },
@@ -43,9 +43,9 @@
         "description": "只有已接受且具备确认资格的 Evidence 才能支撑 confirmed 结论。"
       },
       {
-        "id": "evidence_driven_test_plan",
-        "label": "证据驱动测试计划",
-        "description": "计划节点、未完成项和阻塞项按当前持久化 revision 汇总。"
+        "id": "legacy_plan_summary",
+        "label": "旧版任务树迁移摘要",
+        "description": "文字 proposal 节点仅作为历史附录保留，明确不代表已执行测试。"
       }
     ],
     "tools": [
@@ -59,14 +59,13 @@
       },
       {
         "tool": "Evidence Report Schema",
-        "version": "2"
+        "version": "3"
       }
     ]
   },
   "summary": {
     "traffic_count": 1,
     "confirmed_findings": 1,
-    "pending_findings_in_appendix": 1,
     "rejected_findings_omitted": 1,
     "confirmed_risk_distribution": [
       {
@@ -91,8 +90,10 @@
       }
     ],
     "accepted_supporting_evidence": 1,
-    "test_plan_terminal": 1,
-    "test_plan_total": 3
+    "suspected_findings": 0,
+    "not_observed_checks": 0,
+    "coverage_gaps": 0,
+    "assessment_run_id": null
   },
   "timeline": [
     {
@@ -198,6 +199,13 @@
           "acceptance_note": "响应差异可重复",
           "accepted_by": "test:analyst",
           "accepted_at": "2026-07-24 09:19:00.000",
+          "acceptance_kind": "human",
+          "verification_id": null,
+          "check_id": null,
+          "template_id": null,
+          "template_version": null,
+          "verifier_id": null,
+          "verifier_version": null,
           "content_hash": "403b7b32136b42136fe9e753f03caa618e89ebb29cf17b0ecfe69a2700a33680",
           "snapshot_hash_verified": true,
           "created_by": "test:analyst",
@@ -268,11 +276,12 @@
       "remediation": "（A03:2021）优先使用参数化接口和安全 API，对输入做语义白名单校验，并按最终解释上下文编码输出。 （CWE-89 (v4.20)）使用参数化查询；动态标识符采用严格映射；数据库账号遵循最小权限。",
       "retest": {
         "status": "not_recorded",
-        "statement": "当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。"
+        "statement": "当前数据模型未记录独立的修复后复测结论；评估中未观察到也不等同于复测通过。"
       },
       "analyst_notes": "由分析员复核。",
       "source": {
         "source_type": "ai",
+        "producer": "ai",
         "requires_human_review": true,
         "ai_run": {
           "analysis_run_id": 21,
@@ -290,56 +299,11 @@
       "updated_at": "2026-07-24 09:20:00"
     }
   ],
-  "pending_appendix": [
-    {
-      "id": 32,
-      "identity": "finding:32",
-      "fingerprint": null,
-      "title": "待确认的会话问题",
-      "vulnerability_type": "会话管理",
-      "status": "pending",
-      "severity": "medium",
-      "confidence": 55,
-      "occurrences": 1,
-      "affected_targets": [
-        {
-          "traffic_id": 11,
-          "method": "POST",
-          "url": "https://demo.test/login?api_key=%5BREDACTED%3Aquery_value%5D",
-          "observed_at": "2026-07-24 09:10:00"
-        }
-      ],
-      "standard_references": [],
-      "hypothesis_reasoning": "仅为待验证假设。",
-      "suggested_validation_steps": "检查会话轮换。",
-      "executed_reproduction": [],
-      "evidence": [],
-      "remediation": "",
-      "retest": {
-        "status": "not_recorded",
-        "statement": "当前数据模型未记录独立的修复后复测结论；测试计划完成状态不等同于复测通过。"
-      },
-      "analyst_notes": "",
-      "source": {
-        "source_type": "ai",
-        "requires_human_review": true,
-        "ai_run": {
-          "analysis_run_id": 21,
-          "provider_id": "test-provider",
-          "model": "model-v2",
-          "prompt_id": "traffic_analysis",
-          "prompt_version": 3,
-          "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "validation_status": "valid",
-          "created_at": "2026-07-24 09:12:00"
-        },
-        "rule_hits": []
-      },
-      "created_at": "2026-07-24 09:14:00",
-      "updated_at": "2026-07-24 09:14:00"
-    }
-  ],
-  "test_plan": {
+  "suspected_findings": [],
+  "not_observed_checks": [],
+  "coverage_gaps": [],
+  "assessment_run": null,
+  "legacy_plan_summary": {
     "revision": 1,
     "needs_update": true,
     "update_reason": "新 Evidence 到达",
@@ -430,6 +394,6 @@
       }
     ],
     "rule_versions": [],
-    "review_notice": "AI 与被动规则只产生待验证假设。报告中的 confirmed 状态来自人工接受 Evidence 后的显式状态变更；仍需由具备授权和专业能力的人员复核。"
+    "review_notice": "AI 与被动规则只产生待验证假设。confirmed 状态只能来自人工接受或版本化安全验证器接受的完整 Evidence；安全验证器结论仍可由人工重置、撤销或判定冲突。"
   }
 }

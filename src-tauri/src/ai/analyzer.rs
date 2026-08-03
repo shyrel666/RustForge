@@ -159,6 +159,7 @@ mod tests {
         calls: AtomicUsize,
         always_invalid: bool,
         fail_retry: bool,
+        fixed_response: Option<&'static str>,
     }
 
     impl LlmClient for FlakyMock {
@@ -172,7 +173,9 @@ mod tests {
             if self.fail_retry && call == 1 {
                 return Err("retry transport failed".to_string());
             }
-            let content = if self.always_invalid || call == 0 {
+            let content = if let Some(response) = self.fixed_response {
+                response.to_string()
+            } else if self.always_invalid || call == 0 {
                 r#"{"purpose":"","suspicious_params":[],"hypotheses":[],"summary":""}"#.to_string()
             } else {
                 GOOD_JSON.to_string()
@@ -193,6 +196,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             always_invalid: false,
             fail_retry: false,
+            fixed_response: None,
         };
         let attempt = analyze(&mock, &preview(true)).await.unwrap();
         assert!(attempt.result.is_some());
@@ -207,6 +211,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             always_invalid: true,
             fail_retry: false,
+            fixed_response: None,
         };
         let attempt = analyze(&mock, &preview(false)).await.unwrap();
         assert!(attempt.result.is_none());
@@ -220,6 +225,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             always_invalid: true,
             fail_retry: true,
+            fixed_response: None,
         };
         let attempt = analyze(&mock, &preview(false)).await.unwrap();
         assert!(attempt.result.is_none());
@@ -230,5 +236,41 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("重试调用失败")));
         assert_eq!(attempt.raw_output_hash.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn unverifiable_optional_references_do_not_trigger_a_paid_retry() {
+        const RESPONSE: &str = r#"{
+            "purpose":"登录接口",
+            "suspicious_params":["username"],
+            "hypotheses":[{
+                "vuln_type":"认证流程风险",
+                "param":"username",
+                "standard_references":[
+                    {"framework":"owasp-api-top10","version":"2023","id":"A02"},
+                    {"framework":"cwe","version":"4.20","id":"CWE-620"}
+                ],
+                "severity":"medium",
+                "confidence":65,
+                "reasoning":"响应状态值得复核",
+                "verify_steps":"人工重放并比较响应",
+                "evidence_refs":["response.status"]
+            }],
+            "summary":"需要人工复核"
+        }"#;
+        let mock = FlakyMock {
+            calls: AtomicUsize::new(0),
+            always_invalid: false,
+            fail_retry: false,
+            fixed_response: Some(RESPONSE),
+        };
+
+        let attempt = analyze(&mock, &preview(false)).await.unwrap();
+
+        assert!(attempt.result.is_some());
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(attempt.validation.attempts, 1);
+        assert_eq!(attempt.validation.warnings.len(), 2);
+        assert_eq!(attempt.usage.total_tokens, 5);
     }
 }

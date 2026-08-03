@@ -177,15 +177,35 @@ pub fn parse_and_validate(
             errors.push(format!("{prefix}.confidence 必须在 0..=100"));
         }
         if hypothesis.standard_references.len() > MAX_STANDARD_REFERENCES {
-            errors.push(format!(
-                "{prefix}.standard_references 最多 {MAX_STANDARD_REFERENCES} 项"
+            warnings.push(format!(
+                "{prefix}.standard_references 超过 {MAX_STANDARD_REFERENCES} 项，已只保留前 {MAX_STANDARD_REFERENCES} 项"
             ));
+            hypothesis
+                .standard_references
+                .truncate(MAX_STANDARD_REFERENCES);
         }
-        match knowledge::validate_references(&hypothesis.standard_references) {
-            Ok(references) => hypothesis.standard_references = references,
-            Err(error) => errors.push(format!(
-                "{prefix}.standard_references 包含不可核验引用: {error}"
-            )),
+        // 标准引用只是 Finding 的可选知识卡元数据。模型可能写出格式近似、
+        // 官方存在但当前精选包未收录的编号；这些引用不能入库，但也不应让
+        // 已计费且证据充分的整条分析失效。能解析的引用继续严格规范化，
+        // 其余逐条丢弃并同时写入假设备注与 analysis_run 审计警告。
+        match knowledge::resolve(&hypothesis.standard_references) {
+            Ok(lookup) => {
+                for unresolved in lookup.unresolved {
+                    let note = format!(
+                        "标准引用 `{}` 已忽略：{}",
+                        unresolved.reference.identity(),
+                        unresolved.reason
+                    );
+                    hypothesis.validation_notes.push(note.clone());
+                    warnings.push(format!("{prefix}: {note}"));
+                }
+                hypothesis.standard_references = lookup
+                    .cards
+                    .into_iter()
+                    .map(|card| card.reference)
+                    .collect();
+            }
+            Err(error) => errors.push(format!("{prefix}.standard_references 解析失败: {error}")),
         }
 
         if hypothesis.evidence_refs.len() > MAX_EVIDENCE_REFS {
@@ -339,17 +359,38 @@ mod tests {
     }
 
     #[test]
-    fn invalid_severity_and_forged_references_fail_validation() {
+    fn invalid_severity_fails_validation() {
         let mut raw: Value = serde_json::from_str(&result_json()).unwrap();
         raw["hypotheses"][0]["severity"] = json!("urgent");
-        raw["hypotheses"][0]["standard_references"][0]["version"] = json!("2024");
-        raw["hypotheses"][0]["standard_references"][1]["id"] = json!("CWE-9999");
         let report = parse_and_validate(&raw.to_string(), &refs()).unwrap_err();
         assert!(report.errors.iter().any(|error| error.contains("severity")));
+    }
+
+    #[test]
+    fn unverifiable_optional_references_are_dropped_without_losing_analysis() {
+        let mut raw: Value = serde_json::from_str(&result_json()).unwrap();
+        raw["hypotheses"][0]["standard_references"] = json!([
+            {"framework":"owasp-api-top10","version":"2023","id":"A02"},
+            {"framework":"owasp-api-top10","version":"2023","id":"API2"},
+            {"framework":"cwe","version":"4.20","id":"CWE-620"}
+        ]);
+
+        let (result, report) = parse_and_validate(&raw.to_string(), &refs()).unwrap();
+        let hypothesis = &result.hypotheses[0];
+        assert_eq!(
+            hypothesis.standard_references,
+            vec![StandardReference::new("owasp-api-top10", "2023", "API2")]
+        );
+        assert_eq!(hypothesis.validation_notes.len(), 2);
+        assert_eq!(report.warnings.len(), 2);
         assert!(report
-            .errors
+            .warnings
             .iter()
-            .any(|error| error.contains("standard_references")));
+            .any(|warning| warning.contains("A02")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("CWE-620")));
     }
 
     #[test]

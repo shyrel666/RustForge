@@ -19,6 +19,8 @@ pub enum SecretStoreError {
     Unavailable,
     #[error("系统凭据库操作失败")]
     OperationFailed,
+    #[error("评估身份凭据标识无效")]
+    InvalidAssessmentProfileId,
 }
 
 /// 会在释放时清零底层字符串，且 Debug 永远不显示秘密。
@@ -106,6 +108,20 @@ pub fn provider_api_key_id(provider_id: &str) -> Result<String, SecretStoreError
         return Err(SecretStoreError::InvalidProviderId);
     }
     Ok(format!("provider.{provider_id}.api-key"))
+}
+
+/// Assessment 身份凭据的稳定系统凭据标识。项目 ID 同时进入标识，避免错误的
+/// 跨项目 profile 引用落到同一条系统凭据。
+pub fn assessment_auth_profile_secret_id(
+    project_id: i64,
+    profile_id: i64,
+) -> Result<String, SecretStoreError> {
+    if project_id <= 0 || profile_id <= 0 {
+        return Err(SecretStoreError::InvalidAssessmentProfileId);
+    }
+    Ok(format!(
+        "assessment.project.{project_id}.auth-profile.{profile_id}.header"
+    ))
 }
 
 /// 通用设置 API 必须拒绝这些键，避免绕过专用秘密命令。

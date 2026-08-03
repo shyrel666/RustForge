@@ -26,7 +26,7 @@ export const WORKSPACE_HISTORY_KEY = "rustforge.workspace-history.v1";
 const WORKSPACE_LABELS: Record<WorkspacePath, string> = {
   "/traffic": "流量分析",
   "/repeater": "请求重放",
-  "/tasks": "测试计划",
+  "/tasks": "AI 安全评估",
   "/findings": "发现",
 };
 
@@ -109,7 +109,7 @@ export function getResumePath(
   projectId: number,
   history: WorkspaceHistory,
 ): WorkspacePath {
-  return history[String(projectId)]?.path ?? "/traffic";
+  return history[String(projectId)]?.path ?? "/tasks";
 }
 
 export function getWorkspaceLabel(path: WorkspacePath): string {

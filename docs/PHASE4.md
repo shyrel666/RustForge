@@ -1,6 +1,6 @@
 # Phase 4 · Repeater、Evidence、人工复核与证据化报告 — 当前说明
 
-> 实现核查日期：2026-07-29。本阶段的闭环是“人工执行 + 可追溯证据”，不是把建议步骤包装成已执行结果。
+> 实现核查日期：2026-08-01。本阶段的手动 Repeater 与人工 Evidence 闭环继续保留；Phase 6 另增隔离的 Assessment replay 和版本化安全验证器，不能把模型建议包装成已执行结果。
 
 ## Repeater 工作区
 
@@ -42,11 +42,11 @@ Evidence 可从三类来源创建：
 
 - Evidence 正文最多 8 KiB、Header 4 KiB、URL 4 KiB；观察文字和 actor 也有长度上限。
 - 创建时生成不可变脱敏 JSON 快照和 SHA-256；原始来源删除后，Evidence 的来源 ID、快照和 hash 仍保留，读取时单独计算 `source_available`。
-- Evidence 本身不可更新；“接受”是 Finding 与 Evidence 关系上的人工判断，同一 Evidence 可被不同 Finding 独立接受。
+- Evidence 本身不可更新；“接受”是 Finding 与 Evidence 关系上的判断，同一 Evidence 可被不同 Finding 独立接受。来源为 `human` 时沿用本节交互；来源为 `safe_verifier` 时必须绑定 Phase 6 的 immutable verification 与同 check ReplayRun。
 
 ### 确认约束与事件
 
-- 新 Finding 必须从 `pending` 开始；`confirmed` 需要至少一条人工接受且 `qualifies_for_confirmation = true` 的 Evidence。
+- 新 Finding 必须从 `pending` 开始；`confirmed` 需要至少一条人工或版本化安全验证器接受且 `qualifies_for_confirmation = true` 的 Evidence。
 - 接受/撤销 Evidence、状态、严重度和 analyst notes 的变化必须先写入匹配的 append-only `finding_events`，再在同一事务更新当前状态。
 - rejected 必须提供原因；confirmed 的最后一条合格 Evidence 不能被撤销。
 - AI/规则来源、分析 run、关联 traffic、规则 evaluation/hit、Evidence 和人工事件分别保存，报告不从当前 `updated_at` 反推历史。
@@ -58,7 +58,7 @@ Evidence 可从三类来源创建：
 - `StandardReference` 的 framework/version/id 必须精确命中包；卡片标题、原理、影响、成因、修复建议、来源、发布日期和许可由固定版本派生。
 - Findings 页面显示标准卡片；报告的修复建议也复用同一 registry。
 
-## Evidence Report Schema v2
+## Evidence Report Schema v3
 
 `src-tauri/src/report.rs` 先构建一个确定性的结构化 `ReportDocument`，再从同一对象渲染 Markdown 与 JSON：
 
@@ -68,17 +68,18 @@ Evidence 可从三类来源创建：
 4. Finding 身份、目标、版本化标准、风险、置信度和来源。
 5. 建议验证步骤、实际 Evidence 观察和脱敏快照分栏。
 6. 修复建议和明确的复测状态。
-7. 测试计划 revision、覆盖、未完成、blocked/skipped/not-applicable。
-8. AI provider/model/prompt/input hash 或规则 pack/rule/field/fingerprint provenance，并固定提示“需人工复核”。
+7. 指定 Assessment run 的 confirmed/suspected/not-observed/coverage-gap，或项目累计 Finding 与最近终态覆盖。
+8. 契约/registry hash、AI round、请求预算、身份标签、停止原因，以及人工/验证器 acceptance provenance。
+9. 旧测试计划只作为 `legacy_plan_summary`，不声明为已执行。
 
 报告约束：
 
-- 主报告只包含 confirmed；pending 进入明确声明“不作为已确认结论”的附录；rejected 只计省略数量，不泄露内容。
+- 报告明确分 confirmed、suspected、not observed 与 coverage gaps；rejected 只计省略数量，不泄露内容。
 - 任一 confirmed 缺少合格、已接受且快照 hash 校验通过的 Evidence 时，整份报告拒绝生成。
 - 默认预览与导出只读取不可变脱敏 Evidence，查询值和 Markdown 用户输入会再次转义。
 - 每次导出同时创建 `.md` 与 `.json`；使用安全文件组件、`create_new` 和冲突后缀，失败时清理本次半成品，不覆盖已有报告。
 - “包含原始敏感 Evidence”只能由该次后端命令弹出的原生模态确认授权；前端不能签发或复用 token，选择不会保存为设置，文件名和正文都会标记 `SENSITIVE`。
-- 当前模型没有独立的“修复后复测”实体，因此报告明确输出 `not_recorded`，不会把计划 done 当作复测通过。
+- 当前模型没有独立的“修复后复测”实体，因此报告明确输出 `not_recorded`，不会把旧计划 done 或 not observed 当作复测通过。
 
 ## 前端交互
 
@@ -104,12 +105,12 @@ pnpm check
 2. 对两次 run 做比较，确认变更字段和截断/未知比较状态正确。
 3. 从 AnalysisRun 创建 Evidence 并接受，确认仍不能把 Finding 改为 confirmed。
 4. 从有真实响应的 Traffic 或 ReplayRun 创建 Evidence，填写观察并人工接受，再把 Finding 改为 confirmed。
-5. 生成报告，确认建议步骤与实际观察分栏，pending/rejected 不进入主结论，并同时导出 `.md`/`.json`。
+5. 生成报告，确认 confirmed、suspected、not observed、coverage gap 分组清晰，rejected 不进入事实结论，并同时导出 `.md`/`.json`。
 6. 请求敏感导出，确认出现后端原生警告，取消后不生成文件。
 
 ## 已知限制
 
-- Repeater 只执行用户触发的单次 HTTP 请求；没有 WebSocket、请求序列、自动会话跟随、爆破或自动验证。
+- 手动 Repeater 只执行用户触发的单次 HTTP 请求；Phase 6 Assessment 使用独立、不可由手动 API 访问的 session 执行内置只读模板。两者都没有 WebSocket、自动会话跟随或爆破。
 - TLS `ignore_invalid` 只适合明确授权的测试环境，不能证明对端身份。
 - Evidence 快照是有界脱敏证据，不等于完整取证镜像。
 - 报告首要格式为 Markdown + JSON；当前不导出 PDF/HTML，也没有独立复测工作流。

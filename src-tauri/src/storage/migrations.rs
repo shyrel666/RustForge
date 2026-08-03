@@ -8,9 +8,321 @@ use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 pub(crate) const SCHEMA_V1: &str = include_str!("migrations/v1.sql");
 pub(crate) const SCHEMA_V2: &str = include_str!("migrations/v2.sql");
+pub(crate) const SCHEMA_V3: &str = include_str!("migrations/v3.sql");
+
+const V3_TABLES: &[(&str, &[&str])] = &[
+    (
+        "assessment_auth_profiles",
+        &[
+            "id",
+            "project_id",
+            "label",
+            "source_traffic_id",
+            "header_name",
+            "secret_revision",
+        ],
+    ),
+    (
+        "assessment_runs",
+        &[
+            "id",
+            "project_id",
+            "status",
+            "start_url",
+            "exact_origin",
+            "contract_json",
+            "contract_hash",
+            "template_registry_hash",
+            "request_budget",
+            "request_count",
+            "response_bytes_read",
+            "stop_reason",
+        ],
+    ),
+    (
+        "assessment_rounds",
+        &["id", "run_id", "round_number", "analysis_run_id", "status"],
+    ),
+    (
+        "assessment_endpoints",
+        &[
+            "id",
+            "run_id",
+            "endpoint_key",
+            "method",
+            "url",
+            "path",
+            "query_parameter_names",
+            "resource_owner_profile_id",
+        ],
+    ),
+    (
+        "assessment_checks",
+        &[
+            "id",
+            "run_id",
+            "round_id",
+            "endpoint_id",
+            "requested_endpoint_id",
+            "template_id",
+            "template_version",
+            "identity_mode",
+            "policy_result",
+            "status",
+        ],
+    ),
+    (
+        "assessment_check_replays",
+        &["check_id", "replay_run_id", "role"],
+    ),
+    (
+        "assessment_verifications",
+        &[
+            "id",
+            "check_id",
+            "verifier_id",
+            "verifier_version",
+            "verdict",
+            "observations_json",
+            "content_hash",
+        ],
+    ),
+    (
+        "assessment_finding_links",
+        &["verification_id", "finding_id", "relation"],
+    ),
+    (
+        "assessment_coverage_gaps",
+        &[
+            "id",
+            "run_id",
+            "check_id",
+            "category",
+            "reason_code",
+            "detail",
+        ],
+    ),
+    (
+        "assessment_events",
+        &["id", "run_id", "check_id", "event_type", "details_json"],
+    ),
+];
+
+const V3_EXTENDED_COLUMNS: &[(&str, &[&str])] = &[
+    ("replay_sessions", &["owner_kind", "assessment_run_id"]),
+    ("findings", &["producer"]),
+    ("finding_evidence", &["acceptance_kind", "verification_id"]),
+];
+
+const V3_INDEXES: &[&str] = &[
+    "idx_assessment_auth_profiles_project",
+    "idx_assessment_runs_project",
+    "idx_assessment_runs_one_active",
+    "idx_assessment_rounds_run",
+    "idx_assessment_endpoints_run",
+    "idx_assessment_checks_run",
+    "idx_replay_sessions_assessment",
+    "idx_assessment_check_replays_run",
+    "idx_assessment_verifications_verdict",
+    "idx_assessment_finding_links_finding",
+    "idx_assessment_coverage_gaps_run",
+    "idx_assessment_events_run",
+    "idx_finding_evidence_verification",
+];
+
+const V3_TRIGGERS: &[&str] = &[
+    "trg_assessment_auth_source_project_insert",
+    "trg_assessment_auth_source_project_update",
+    "trg_assessment_run_profiles_same_project_insert",
+    "trg_assessment_run_profiles_same_project_update",
+    "trg_assessment_round_same_project_insert",
+    "trg_assessment_endpoint_same_project_insert",
+    "trg_assessment_check_context_insert",
+    "trg_assessment_replay_session_context_insert",
+    "trg_assessment_replay_session_context_update",
+    "trg_assessment_check_replay_context_insert",
+    "trg_assessment_finding_link_context_insert",
+    "trg_assessment_gap_context_insert",
+    "trg_assessment_event_context_insert",
+    "trg_assessment_run_status_requires_event",
+    "trg_assessment_events_immutable_update",
+    "trg_assessment_events_immutable_delete",
+    "trg_assessment_verifications_immutable_update",
+    "trg_assessment_verifications_immutable_delete",
+    "trg_assessment_finding_links_immutable_update",
+    "trg_assessment_finding_links_immutable_delete",
+    "trg_finding_evidence_verifier_authority_insert",
+    "trg_finding_evidence_verifier_authority_update",
+];
+
+/// (table, from column, referenced table, referenced column, ON DELETE)
+const V3_FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "assessment_auth_profiles",
+        "project_id",
+        "projects",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_auth_profiles",
+        "source_traffic_id",
+        "traffic",
+        "id",
+        "SET NULL",
+    ),
+    ("assessment_runs", "project_id", "projects", "id", "CASCADE"),
+    (
+        "assessment_runs",
+        "identity_a_profile_id",
+        "assessment_auth_profiles",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_runs",
+        "identity_b_profile_id",
+        "assessment_auth_profiles",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_rounds",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_rounds",
+        "analysis_run_id",
+        "analysis_runs",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_endpoints",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_endpoints",
+        "source_traffic_id",
+        "traffic",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_endpoints",
+        "resource_owner_profile_id",
+        "assessment_auth_profiles",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_checks",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_checks",
+        "round_id",
+        "assessment_rounds",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_checks",
+        "endpoint_id",
+        "assessment_endpoints",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "replay_sessions",
+        "assessment_run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_check_replays",
+        "check_id",
+        "assessment_checks",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_check_replays",
+        "replay_run_id",
+        "replay_runs",
+        "id",
+        "RESTRICT",
+    ),
+    (
+        "assessment_verifications",
+        "check_id",
+        "assessment_checks",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_finding_links",
+        "verification_id",
+        "assessment_verifications",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_finding_links",
+        "finding_id",
+        "findings",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_coverage_gaps",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_coverage_gaps",
+        "check_id",
+        "assessment_checks",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_events",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_events",
+        "check_id",
+        "assessment_checks",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "finding_evidence",
+        "verification_id",
+        "assessment_verifications",
+        "id",
+        "RESTRICT",
+    ),
+];
 
 const V1_TABLES: &[(&str, &[&str])] = &[
     ("settings", &["key", "value"]),
@@ -501,6 +813,7 @@ pub fn migrate(conn: &mut Connection) -> Result<MigrationReport, MigrationError>
         match current {
             0 => apply_step(conn, 1, SCHEMA_V1)?,
             1 => apply_step(conn, 2, SCHEMA_V2)?,
+            2 => apply_step(conn, 3, SCHEMA_V3)?,
             from => return Err(MigrationError::MissingStep { from }),
         }
         current = schema_version(conn)?;
@@ -530,6 +843,7 @@ fn validate_version(conn: &Connection, version: u32) -> Result<(), MigrationErro
     match version {
         1 => validate_v1(conn),
         2 => validate_v2(conn),
+        3 => validate_v3(conn),
         from => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -602,14 +916,121 @@ fn validate_v2(conn: &Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
+fn validate_v3(conn: &Connection) -> Result<(), MigrationError> {
+    validate_v2(conn)?;
+
+    for (table, required_columns) in V3_TABLES.iter().chain(V3_EXTENDED_COLUMNS.iter()) {
+        let columns = table_columns(conn, table)?;
+        if columns.is_empty() {
+            return Err(invalid_v3(format!("缺少表 `{table}`")));
+        }
+        for column in *required_columns {
+            if !columns.contains(*column) {
+                return Err(invalid_v3(format!("表 `{table}` 缺少字段 `{column}`")));
+            }
+        }
+    }
+
+    for index in V3_INDEXES {
+        if !schema_object_exists(conn, "index", index)? {
+            return Err(invalid_v3(format!("缺少索引 `{index}`")));
+        }
+    }
+
+    for trigger in V3_TRIGGERS {
+        if !schema_object_exists(conn, "trigger", trigger)? {
+            return Err(invalid_v3(format!("缺少触发器 `{trigger}`")));
+        }
+    }
+
+    for (table, from_column, referenced_table, referenced_column, on_delete) in V3_FOREIGN_KEYS {
+        if !foreign_key_exists(
+            conn,
+            table,
+            from_column,
+            referenced_table,
+            referenced_column,
+            on_delete,
+        )? {
+            return Err(invalid_v3(format!(
+                "表 `{table}` 缺少外键 `{from_column}` -> `{referenced_table}.{referenced_column}` ON DELETE {on_delete}"
+            )));
+        }
+    }
+
+    let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(invalid_v3(format!("SQLite quick_check: {integrity}")));
+    }
+
+    let mut foreign_keys = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut violations = foreign_keys.query([])?;
+    if let Some(row) = violations.next()? {
+        let table: String = row.get(0)?;
+        let row_id: Option<i64> = row.get(1)?;
+        return Err(invalid_v3(format!(
+            "外键完整性失败: table={table}, rowid={row_id:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn schema_object_exists(
+    conn: &Connection,
+    object_type: &str,
+    name: &str,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2
+         )",
+        (object_type, name),
+        |row| row.get(0),
+    )
+}
+
 fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>, rusqlite::Error> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     rows.collect()
 }
 
+fn foreign_key_exists(
+    conn: &Connection,
+    table: &str,
+    from_column: &str,
+    referenced_table: &str,
+    referenced_column: &str,
+    on_delete: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut statement = conn.prepare(&format!("PRAGMA foreign_key_list(\"{table}\")"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (target_table, source_column, target_column, delete_action) = row?;
+        if source_column == from_column
+            && target_table == referenced_table
+            && target_column == referenced_column
+            && delete_action.eq_ignore_ascii_case(on_delete)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn invalid_v1(reason: String) -> MigrationError {
     MigrationError::InvalidSchema { version: 1, reason }
+}
+
+fn invalid_v3(reason: String) -> MigrationError {
+    MigrationError::InvalidSchema { version: 3, reason }
 }
 
 #[cfg(test)]
@@ -636,11 +1057,11 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 0,
-                to_version: 2,
+                to_version: 3,
             }
         );
-        assert_eq!(schema_version(&conn).unwrap(), 2);
-        validate_v2(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 3);
+        validate_v3(&conn).unwrap();
     }
 
     #[test]
@@ -660,7 +1081,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 0);
-        assert_eq!(report.to_version, 2);
+        assert_eq!(report.to_version, 3);
         let project_name: String = conn
             .query_row(
                 "SELECT name FROM projects WHERE id = ?1",
@@ -690,8 +1111,8 @@ mod tests {
         assert_eq!(
             report,
             MigrationReport {
-                from_version: 2,
-                to_version: 2,
+                from_version: 3,
+                to_version: 3,
             }
         );
         let marker: String = conn
@@ -730,7 +1151,7 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 1,
-                to_version: 2,
+                to_version: 3,
             }
         );
         let usage: (i64, i64, i64) = conn
@@ -749,7 +1170,249 @@ mod tests {
             .is_err(),
             "缓存命中必须保持为输入 Token 的子集"
         );
-        validate_v2(&conn).unwrap();
+        validate_v3(&conn).unwrap();
+    }
+
+    #[test]
+    fn v2_migrates_assessment_schema_without_losing_legacy_task_tree() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute("INSERT INTO projects(id, name) VALUES(1, 'existing')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO test_plans(project_id, revision) VALUES(1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_nodes(id, project_id, title) VALUES(7, 1, 'legacy node')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO analysis_runs(
+                 id, project_id, provider_id, provider_base_url, model, prompt_id,
+                 prompt_version, input_hash, policy_json, manifest_json,
+                 validation_status, validation_json, raw_output_hash
+             ) VALUES(
+                 8, 1, 'legacy', 'https://provider.test/v1', 'model', 'prompt',
+                 1, ?1, '{}', '{}', 'valid', '{}', ?1
+             )",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO findings(id, project_id, analysis_run_id, source, title)
+             VALUES(9, 1, 8, 'ai', 'legacy ai')",
+            [],
+        )
+        .unwrap();
+
+        let report = migrate(&mut conn).unwrap();
+
+        assert_eq!(report.from_version, 2);
+        assert_eq!(report.to_version, 3);
+        let legacy_title: String = conn
+            .query_row("SELECT title FROM task_nodes WHERE id = 7", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let producer: String = conn
+            .query_row("SELECT producer FROM findings WHERE id = 9", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_title, "legacy node");
+        assert_eq!(producer, "ai");
+        validate_v3(&conn).unwrap();
+    }
+
+    #[test]
+    fn v3_enforces_global_admission_audit_immutability_and_lifecycle_cascade() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(id, name, scope) VALUES
+                 (1, 'assessment-a', '[\"a.test\"]'),
+                 (2, 'assessment-b', '[\"b.test\"]');
+             INSERT INTO assessment_auth_profiles(
+                 id, project_id, label, header_name
+             ) VALUES(9, 2, 'foreign identity', 'Authorization');",
+        )
+        .unwrap();
+        let run_sql = "INSERT INTO assessment_runs(
+                 id, project_id, status, start_url, exact_origin, contract_json,
+                 contract_hash, template_registry_hash, provider_id, model,
+                 request_budget, discovery_budget, requests_per_second
+             ) VALUES(?1, ?2, ?3, ?4, ?5, '{}', ?6, ?6, 'provider', 'model',
+                      120, 40, 1.0)";
+        conn.execute(
+            run_sql,
+            rusqlite::params![
+                10,
+                1,
+                "queued",
+                "https://a.test/",
+                "https://a.test:443",
+                "a".repeat(64),
+            ],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                run_sql,
+                rusqlite::params![
+                    11,
+                    2,
+                    "queued",
+                    "https://b.test/",
+                    "https://b.test:443",
+                    "b".repeat(64),
+                ],
+            )
+            .is_err(),
+            "only one active assessment is allowed globally"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO assessment_runs(
+                     id, project_id, status, start_url, exact_origin, contract_json,
+                     contract_hash, template_registry_hash, identity_a_profile_id,
+                     provider_id, model, request_budget, discovery_budget,
+                     requests_per_second
+                 ) VALUES(
+                     12, 1, 'completed', 'https://a.test/', 'https://a.test:443',
+                     '{}', ?1, ?1, 9, 'provider', 'model', 120, 40, 1.0
+                 )",
+                ["c".repeat(64)],
+            )
+            .is_err(),
+            "identity profiles cannot cross projects"
+        );
+
+        assert!(
+            conn.execute(
+                "UPDATE assessment_runs SET status='discovering' WHERE id=10",
+                [],
+            )
+            .is_err(),
+            "status changes require a preceding event"
+        );
+        conn.execute(
+            "INSERT INTO assessment_events(
+                 run_id, event_type, old_value, new_value, details_json
+             ) VALUES(10, 'status_changed', 'queued', 'discovering', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE assessment_runs SET status='discovering' WHERE id=10",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE assessment_events SET details_json='{\"tampered\":true}'
+                 WHERE run_id=10",
+                [],
+            )
+            .is_err());
+
+        conn.execute(
+            "INSERT INTO assessment_endpoints(
+                 id, run_id, endpoint_key, method, url, path, source_kind
+             ) VALUES(20,10,?1,'GET','https://a.test/','/','start_url')",
+            ["d".repeat(64)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_checks(
+                 id, run_id, endpoint_id, requested_endpoint_id, template_id,
+                 template_version, identity_mode, policy_result, status
+             ) VALUES(
+                 30,10,20,'ep_fixture','security_headers_cookie','1',
+                 'anonymous','allowed','completed'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_verifications(
+                 id, check_id, verifier_id, verifier_version, verdict,
+                 observations_json, content_hash
+             ) VALUES(40,30,'security_headers_cookie','1','not_observed','{}',?1)",
+            ["e".repeat(64)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO findings(
+                 id, project_id, source, producer, title
+             ) VALUES(50,1,'rule','safe_verifier','fixture')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_finding_links(
+                 verification_id, finding_id, relation
+             ) VALUES(40,50,'supports')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE assessment_verifications SET observations_json='{\"x\":1}'
+                 WHERE id=40",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE assessment_finding_links SET relation='human_conflict'
+                 WHERE verification_id=40 AND finding_id=50",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO assessment_coverage_gaps(
+                 run_id, check_id, category, reason_code, detail
+             ) VALUES(10,30,'fixture','not_covered','fixture gap')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_events(
+                 run_id, event_type, old_value, new_value, details_json
+             ) VALUES(10, 'status_changed', 'discovering', 'completed', '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE assessment_runs SET status='completed' WHERE id=10",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM projects WHERE id=1", []).unwrap();
+        for table in [
+            "assessment_runs",
+            "assessment_endpoints",
+            "assessment_checks",
+            "assessment_verifications",
+            "assessment_finding_links",
+            "assessment_coverage_gaps",
+            "assessment_events",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must be removed by project lifecycle");
+        }
+        validate_v3(&conn).unwrap();
     }
 
     #[test]
@@ -759,13 +1422,13 @@ mod tests {
 
         let result = apply_step(
             &mut conn,
-            3,
+            4,
             "CREATE TABLE should_rollback(id INTEGER);
              INSERT INTO table_that_does_not_exist(id) VALUES(1);",
         );
 
         assert!(result.is_err());
-        assert_eq!(schema_version(&conn).unwrap(), 2);
+        assert_eq!(schema_version(&conn).unwrap(), 3);
         assert!(!table_exists(&conn, "should_rollback"));
     }
 
@@ -817,7 +1480,7 @@ mod tests {
             result,
             Err(MigrationError::NewerSchema {
                 found: 99,
-                latest: 2
+                latest: 3
             })
         ));
         assert_eq!(schema_version(&conn).unwrap(), 99);

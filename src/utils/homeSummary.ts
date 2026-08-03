@@ -1,42 +1,57 @@
 export interface HomeSummary {
   trafficTotal: number | null;
-  tasksDone: number | null;
-  tasksTotal: number | null;
-  pendingFindings: number | null;
+  latestAssessmentStatus: string | null;
+  confirmedFindings: number | null;
+  suspectedFindings: number | null;
 }
 
 export interface HomeSummaryApi {
   countTraffic(projectId: number): Promise<number>;
-  getTaskTree(projectId: number): Promise<Array<{ status: string }>>;
-  listPendingFindings(projectId: number): Promise<unknown[]>;
+  listAssessmentRuns(
+    projectId: number,
+  ): Promise<Array<{ id: number; status: string }>>;
+  getAssessmentDetail(
+    projectId: number,
+    runId: number,
+  ): Promise<{ verifications: Array<{ verdict: string }> }>;
 }
 
 export const EMPTY_HOME_SUMMARY: HomeSummary = {
   trafficTotal: null,
-  tasksDone: null,
-  tasksTotal: null,
-  pendingFindings: null,
+  latestAssessmentStatus: null,
+  confirmedFindings: null,
+  suspectedFindings: null,
 };
 
 export async function loadHomeSummary(
   projectId: number,
   api: HomeSummaryApi,
 ): Promise<HomeSummary> {
-  const [traffic, tasks, findings] = await Promise.allSettled([
+  const [traffic, runs] = await Promise.allSettled([
     api.countTraffic(projectId),
-    api.getTaskTree(projectId),
-    api.listPendingFindings(projectId),
+    api.listAssessmentRuns(projectId),
   ]);
 
-  const taskItems = tasks.status === "fulfilled" ? tasks.value : null;
+  const latestRun = runs.status === "fulfilled" ? runs.value[0] : undefined;
+  let verifications: Array<{ verdict: string }> | null = null;
+  if (latestRun) {
+    try {
+      verifications = (
+        await api.getAssessmentDetail(projectId, latestRun.id)
+      ).verifications;
+    } catch {
+      verifications = null;
+    }
+  }
 
   return {
     trafficTotal: traffic.status === "fulfilled" ? traffic.value : null,
-    tasksDone: taskItems
-      ? taskItems.filter((task) => task.status === "done").length
+    latestAssessmentStatus: latestRun?.status ?? null,
+    confirmedFindings: verifications
+      ? verifications.filter((item) => item.verdict === "confirmed").length
       : null,
-    tasksTotal: taskItems?.length ?? null,
-    pendingFindings:
-      findings.status === "fulfilled" ? findings.value.length : null,
+    suspectedFindings: verifications
+      ? verifications.filter((item) => item.verdict === "suspected").length
+      : null,
   };
 }
