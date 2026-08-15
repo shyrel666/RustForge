@@ -8,10 +8,11 @@ use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 pub(crate) const SCHEMA_V1: &str = include_str!("migrations/v1.sql");
 pub(crate) const SCHEMA_V2: &str = include_str!("migrations/v2.sql");
 pub(crate) const SCHEMA_V3: &str = include_str!("migrations/v3.sql");
+pub(crate) const SCHEMA_V4: &str = include_str!("migrations/v4.sql");
 
 const V3_TABLES: &[(&str, &[&str])] = &[
     (
@@ -319,6 +320,339 @@ const V3_FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
         "finding_evidence",
         "verification_id",
         "assessment_verifications",
+        "id",
+        "RESTRICT",
+    ),
+];
+
+const V4_TABLES: &[(&str, &[&str])] = &[
+    (
+        "assessment_missions",
+        &[
+            "id",
+            "project_id",
+            "title",
+            "goal",
+            "start_url",
+            "exact_origin",
+            "status",
+            "autonomy_mode",
+            "budget_profile",
+            "request_budget",
+            "max_planning_cycles",
+            "contract_hash",
+            "tool_registry_hash",
+            "permission_hash",
+            "context_hash",
+            "context_approved_hash",
+            "active_run_id",
+            "legacy_run_id",
+            "legacy",
+            "revision",
+        ],
+    ),
+    (
+        "assessment_messages",
+        &[
+            "id",
+            "mission_id",
+            "role",
+            "message_kind",
+            "content",
+            "content_hash",
+            "old_value",
+            "new_value",
+            "details_json",
+            "revision",
+        ],
+    ),
+    (
+        "assessment_workstreams",
+        &[
+            "id",
+            "mission_id",
+            "parent_id",
+            "stable_key",
+            "title",
+            "objective",
+            "status",
+            "sort_order",
+        ],
+    ),
+    (
+        "assessment_actions",
+        &[
+            "id",
+            "mission_id",
+            "workstream_id",
+            "tool_id",
+            "tool_version",
+            "execution_kind",
+            "risk_level",
+            "surface_id",
+            "identity_mode",
+            "parameter_json",
+            "rationale",
+            "expected_signal",
+            "request_cost",
+            "permission_snapshot",
+            "permission_hash",
+            "approval_status",
+            "approval_source",
+            "status",
+            "redacted_request_json",
+            "redacted_response_json",
+            "result_json",
+            "revision",
+        ],
+    ),
+    (
+        "assessment_mission_resources",
+        &[
+            "id",
+            "mission_id",
+            "resource_type",
+            "source_id",
+            "display_name",
+            "media_type",
+            "summary_json",
+            "content_hash",
+        ],
+    ),
+    (
+        "assessment_tool_permissions",
+        &[
+            "project_id",
+            "tool_id",
+            "decision",
+            "revision",
+            "updated_at",
+        ],
+    ),
+    (
+        "assessment_surfaces",
+        &[
+            "id",
+            "run_id",
+            "surface_id",
+            "surface_kind",
+            "method",
+            "path_shape",
+            "query_parameter_names",
+            "form_fields_json",
+            "content_types_json",
+            "identity_visibility_json",
+            "response_structure_hash",
+            "source_kinds_json",
+            "safe_to_request",
+            "concrete_count",
+        ],
+    ),
+    (
+        "assessment_action_checks",
+        &["action_id", "check_id", "linked_at"],
+    ),
+    (
+        "assessment_mission_runs",
+        &["mission_id", "run_id", "cycle", "linked_at"],
+    ),
+    (
+        "assessment_manual_handoffs",
+        &[
+            "id",
+            "action_id",
+            "recipe_id",
+            "recipe_version",
+            "draft_json",
+            "draft_hash",
+            "replay_session_id",
+            "replay_run_id",
+            "evidence_id",
+            "status",
+        ],
+    ),
+];
+
+const V4_INDEXES: &[&str] = &[
+    "idx_assessment_missions_project",
+    "idx_assessment_missions_status",
+    "idx_assessment_missions_one_network_active",
+    "idx_assessment_messages_mission",
+    "idx_assessment_workstreams_mission",
+    "idx_assessment_actions_mission",
+    "idx_assessment_actions_waiting",
+    "idx_assessment_mission_resources_mission",
+    "idx_assessment_surfaces_run",
+    "idx_assessment_tool_permissions_project",
+    "idx_assessment_action_checks_check",
+    "idx_assessment_mission_runs_mission",
+    "idx_assessment_manual_handoffs_status",
+];
+
+const V4_TRIGGERS: &[&str] = &[
+    "trg_assessment_mission_profiles_same_project_insert",
+    "trg_assessment_mission_profiles_same_project_update",
+    "trg_assessment_workstream_parent_context_insert",
+    "trg_assessment_workstream_parent_context_update",
+    "trg_assessment_action_context_insert",
+    "trg_assessment_action_identity_immutable_update",
+    "trg_assessment_resource_context_insert",
+    "trg_assessment_action_check_context_insert",
+    "trg_assessment_mission_run_context_insert",
+    "trg_assessment_handoff_context_insert",
+    "trg_assessment_handoff_context_update",
+    "trg_assessment_mission_status_requires_message",
+    "trg_assessment_messages_immutable_update",
+    "trg_assessment_messages_immutable_delete",
+    "trg_assessment_resources_immutable_update",
+    "trg_assessment_resources_immutable_delete",
+];
+
+const V4_FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "assessment_missions",
+        "project_id",
+        "projects",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_missions",
+        "identity_a_profile_id",
+        "assessment_auth_profiles",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_missions",
+        "identity_b_profile_id",
+        "assessment_auth_profiles",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_missions",
+        "active_run_id",
+        "assessment_runs",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_missions",
+        "legacy_run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_messages",
+        "mission_id",
+        "assessment_missions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_workstreams",
+        "mission_id",
+        "assessment_missions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_workstreams",
+        "parent_id",
+        "assessment_workstreams",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_actions",
+        "mission_id",
+        "assessment_missions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_actions",
+        "workstream_id",
+        "assessment_workstreams",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_mission_resources",
+        "mission_id",
+        "assessment_missions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_tool_permissions",
+        "project_id",
+        "projects",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_surfaces",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_action_checks",
+        "action_id",
+        "assessment_actions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_action_checks",
+        "check_id",
+        "assessment_checks",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_mission_runs",
+        "mission_id",
+        "assessment_missions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_mission_runs",
+        "run_id",
+        "assessment_runs",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_manual_handoffs",
+        "action_id",
+        "assessment_actions",
+        "id",
+        "CASCADE",
+    ),
+    (
+        "assessment_manual_handoffs",
+        "replay_session_id",
+        "replay_sessions",
+        "id",
+        "SET NULL",
+    ),
+    (
+        "assessment_manual_handoffs",
+        "replay_run_id",
+        "replay_runs",
+        "id",
+        "RESTRICT",
+    ),
+    (
+        "assessment_manual_handoffs",
+        "evidence_id",
+        "evidence",
         "id",
         "RESTRICT",
     ),
@@ -814,6 +1148,7 @@ pub fn migrate(conn: &mut Connection) -> Result<MigrationReport, MigrationError>
             0 => apply_step(conn, 1, SCHEMA_V1)?,
             1 => apply_step(conn, 2, SCHEMA_V2)?,
             2 => apply_step(conn, 3, SCHEMA_V3)?,
+            3 => apply_step(conn, 4, SCHEMA_V4)?,
             from => return Err(MigrationError::MissingStep { from }),
         }
         current = schema_version(conn)?;
@@ -831,12 +1166,35 @@ pub fn schema_version(conn: &Connection) -> Result<u32, rusqlite::Error> {
 }
 
 fn apply_step(conn: &mut Connection, target_version: u32, sql: &str) -> Result<(), MigrationError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute_batch(sql)?;
-    validate_version(&tx, target_version)?;
-    tx.pragma_update(None, "user_version", target_version)?;
-    tx.commit()?;
-    Ok(())
+    // v4 widens two v3 CHECK constraints by transactionally rebuilding the
+    // parent tables. SQLite cannot toggle FK enforcement inside a transaction,
+    // so preserve the connection setting, disable it only for this step, then
+    // run the normal structural + foreign_key_check validation before commit.
+    let foreign_keys_enabled: bool =
+        conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    let rebuilds_v3_parents = target_version == 4;
+    if rebuilds_v3_parents && foreign_keys_enabled {
+        conn.pragma_update(None, "foreign_keys", false)?;
+    }
+    let result = (|| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(sql)?;
+        validate_version(&tx, target_version)?;
+        tx.pragma_update(None, "user_version", target_version)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    let restore = if rebuilds_v3_parents && foreign_keys_enabled {
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(MigrationError::from)
+    } else {
+        Ok(())
+    };
+    match (result, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn validate_version(conn: &Connection, version: u32) -> Result<(), MigrationError> {
@@ -844,6 +1202,7 @@ fn validate_version(conn: &Connection, version: u32) -> Result<(), MigrationErro
         1 => validate_v1(conn),
         2 => validate_v2(conn),
         3 => validate_v3(conn),
+        4 => validate_v4(conn),
         from => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -975,6 +1334,80 @@ fn validate_v3(conn: &Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
+fn validate_v4(conn: &Connection) -> Result<(), MigrationError> {
+    validate_v3(conn)?;
+
+    for (table, required_check) in [
+        ("assessment_runs", "max_rounds BETWEEN 1 AND 6"),
+        ("assessment_rounds", "round_number BETWEEN 1 AND 6"),
+    ] {
+        let sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !sql.contains(required_check) {
+            return Err(invalid_v4(format!(
+                "表 `{table}` 未启用 6 轮 mission 规划约束"
+            )));
+        }
+    }
+
+    for (table, required_columns) in V4_TABLES {
+        let columns = table_columns(conn, table)?;
+        if columns.is_empty() {
+            return Err(invalid_v4(format!("缺少表 `{table}`")));
+        }
+        for column in *required_columns {
+            if !columns.contains(*column) {
+                return Err(invalid_v4(format!("表 `{table}` 缺少字段 `{column}`")));
+            }
+        }
+    }
+
+    for index in V4_INDEXES {
+        if !schema_object_exists(conn, "index", index)? {
+            return Err(invalid_v4(format!("缺少索引 `{index}`")));
+        }
+    }
+
+    for trigger in V4_TRIGGERS {
+        if !schema_object_exists(conn, "trigger", trigger)? {
+            return Err(invalid_v4(format!("缺少触发器 `{trigger}`")));
+        }
+    }
+
+    for (table, from_column, referenced_table, referenced_column, on_delete) in V4_FOREIGN_KEYS {
+        if !foreign_key_exists(
+            conn,
+            table,
+            from_column,
+            referenced_table,
+            referenced_column,
+            on_delete,
+        )? {
+            return Err(invalid_v4(format!(
+                "表 `{table}` 缺少外键 `{from_column}` -> `{referenced_table}.{referenced_column}` ON DELETE {on_delete}"
+            )));
+        }
+    }
+
+    let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(invalid_v4(format!("SQLite quick_check: {integrity}")));
+    }
+    let mut foreign_keys = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut violations = foreign_keys.query([])?;
+    if let Some(row) = violations.next()? {
+        let table: String = row.get(0)?;
+        let row_id: Option<i64> = row.get(1)?;
+        return Err(invalid_v4(format!(
+            "外键完整性失败: table={table}, rowid={row_id:?}"
+        )));
+    }
+    Ok(())
+}
+
 fn schema_object_exists(
     conn: &Connection,
     object_type: &str,
@@ -1033,6 +1466,10 @@ fn invalid_v3(reason: String) -> MigrationError {
     MigrationError::InvalidSchema { version: 3, reason }
 }
 
+fn invalid_v4(reason: String) -> MigrationError {
+    MigrationError::InvalidSchema { version: 4, reason }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,11 +1494,11 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 0,
-                to_version: 3,
+                to_version: 4,
             }
         );
-        assert_eq!(schema_version(&conn).unwrap(), 3);
-        validate_v3(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 4);
+        validate_v4(&conn).unwrap();
     }
 
     #[test]
@@ -1081,7 +1518,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 0);
-        assert_eq!(report.to_version, 3);
+        assert_eq!(report.to_version, 4);
         let project_name: String = conn
             .query_row(
                 "SELECT name FROM projects WHERE id = ?1",
@@ -1111,8 +1548,8 @@ mod tests {
         assert_eq!(
             report,
             MigrationReport {
-                from_version: 3,
-                to_version: 3,
+                from_version: 4,
+                to_version: 4,
             }
         );
         let marker: String = conn
@@ -1151,7 +1588,7 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 1,
-                to_version: 3,
+                to_version: 4,
             }
         );
         let usage: (i64, i64, i64) = conn
@@ -1170,7 +1607,7 @@ mod tests {
             .is_err(),
             "缓存命中必须保持为输入 Token 的子集"
         );
-        validate_v3(&conn).unwrap();
+        validate_v4(&conn).unwrap();
     }
 
     #[test]
@@ -1213,7 +1650,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 2);
-        assert_eq!(report.to_version, 3);
+        assert_eq!(report.to_version, 4);
         let legacy_title: String = conn
             .query_row("SELECT title FROM task_nodes WHERE id = 7", [], |row| {
                 row.get(0)
@@ -1226,7 +1663,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy_title, "legacy node");
         assert_eq!(producer, "ai");
-        validate_v3(&conn).unwrap();
+        validate_v4(&conn).unwrap();
     }
 
     #[test]
@@ -1412,7 +1849,209 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} must be removed by project lifecycle");
         }
-        validate_v3(&conn).unwrap();
+        validate_v4(&conn).unwrap();
+    }
+
+    #[test]
+    fn v3_to_v4_backfills_legacy_runs_without_reactivating_task_nodes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.execute_batch(SCHEMA_V3).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute("INSERT INTO projects(id, name) VALUES(1, 'legacy')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO task_nodes(id, project_id, title) VALUES(7, 1, 'legacy tree')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_runs(
+                 id, project_id, status, start_url, exact_origin, contract_json,
+                 contract_hash, template_registry_hash, provider_id, model,
+                 request_budget, discovery_budget, requests_per_second
+             ) VALUES(
+                 9, 1, 'completed', 'https://legacy.test/',
+                 'https://legacy.test:443', '{}', ?1, ?2, 'fixture', 'model',
+                 120, 20, 1.0
+             )",
+            rusqlite::params!["a".repeat(64), "b".repeat(64)],
+        )
+        .unwrap();
+
+        let report = migrate(&mut conn).unwrap();
+
+        assert_eq!(report.from_version, 3);
+        assert_eq!(report.to_version, 4);
+        let mission: (i64, i64, String, i64) = conn
+            .query_row(
+                "SELECT project_id, legacy_run_id, status, legacy
+                 FROM assessment_missions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(mission, (1, 9, "completed".to_string(), 1));
+        let legacy_tree: String = conn
+            .query_row("SELECT title FROM task_nodes WHERE id=7", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_tree, "legacy tree");
+        let action_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assessment_actions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(action_count, 0);
+        conn.execute("UPDATE assessment_runs SET max_rounds=6 WHERE id=9", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_rounds(
+                 run_id, round_number, status, input_hash, selected_checks
+             ) VALUES(9,6,'valid',?1,0)",
+            ["c".repeat(64)],
+        )
+        .unwrap();
+        let sixth_round: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assessment_rounds
+                 WHERE run_id=9 AND round_number=6",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sixth_round, 1);
+        validate_v4(&conn).unwrap();
+    }
+
+    #[test]
+    fn v4_persists_waiting_missions_and_enforces_audited_transitions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute("INSERT INTO projects(id, name) VALUES(1, 'mission')", [])
+            .unwrap();
+        let mission_sql = "INSERT INTO assessment_missions(
+                id, project_id, title, goal, start_url, exact_origin, status,
+                provider_id, model, contract_hash, tool_registry_hash,
+                permission_hash, context_hash
+            ) VALUES(?1, 1, ?2, ?3, 'https://mission.test/',
+                     'https://mission.test:443', ?4, 'fixture', 'model',
+                     ?5, ?5, ?5, ?5)";
+        conn.execute(
+            mission_sql,
+            rusqlite::params![
+                10,
+                "等待上下文",
+                "验证匿名攻击面",
+                "awaiting_context_approval",
+                "a".repeat(64)
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            mission_sql,
+            rusqlite::params![
+                11,
+                "等待动作",
+                "验证登录攻击面",
+                "awaiting_action_approval",
+                "b".repeat(64)
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM assessment_missions
+                 WHERE status LIKE 'awaiting_%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(conn
+            .execute(
+                "UPDATE assessment_missions
+                 SET status='queued', revision=2 WHERE id=10",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO assessment_messages(
+                 mission_id, role, message_kind, content, content_hash,
+                 old_value, new_value, revision
+             ) VALUES(10, 'system', 'status', '上下文已确认', ?1,
+                      'awaiting_context_approval', 'queued', 2)",
+            ["c".repeat(64)],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE assessment_missions
+             SET status='queued', revision=2 WHERE id=10",
+            [],
+        )
+        .unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 4);
+        migrate(&mut conn).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM assessment_missions WHERE id=11",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "awaiting_action_approval");
+    }
+
+    #[test]
+    fn v4_rejects_cross_project_resources_and_manual_auto_execution() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects(id, name) VALUES(1, 'one'), (2, 'two');
+             INSERT INTO traffic(id, project_id, method, host, url)
+             VALUES(20, 2, 'GET', 'two.test', 'https://two.test/');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_missions(
+                 id, project_id, title, goal, start_url, status, provider_id,
+                 model, contract_hash, tool_registry_hash, permission_hash
+             ) VALUES(
+                 10, 1, 'mission', 'goal', 'https://one.test/', 'draft',
+                 'fixture', 'model', ?1, ?1, ?1
+             )",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO assessment_mission_resources(
+                     mission_id, resource_type, source_id, display_name,
+                     summary_json, content_hash
+                 ) VALUES(10, 'traffic', 20, 'foreign', '{}', ?1)",
+                ["b".repeat(64)],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO assessment_actions(
+                     mission_id, tool_id, tool_version, execution_kind,
+                     risk_level, rationale, expected_signal, permission_snapshot,
+                     permission_hash, approval_status, status
+                 ) VALUES(
+                     10, 'manual_sqli', '1.0.0', 'manual_recipe', 'manual',
+                     '生成差异草稿', '由用户观察响应差异', 'execute', ?1,
+                     'not_required', 'queued'
+                 )",
+                ["c".repeat(64)],
+            )
+            .is_err());
     }
 
     #[test]
@@ -1422,13 +2061,13 @@ mod tests {
 
         let result = apply_step(
             &mut conn,
-            4,
+            5,
             "CREATE TABLE should_rollback(id INTEGER);
              INSERT INTO table_that_does_not_exist(id) VALUES(1);",
         );
 
         assert!(result.is_err());
-        assert_eq!(schema_version(&conn).unwrap(), 3);
+        assert_eq!(schema_version(&conn).unwrap(), 4);
         assert!(!table_exists(&conn, "should_rollback"));
     }
 
@@ -1480,7 +2119,7 @@ mod tests {
             result,
             Err(MigrationError::NewerSchema {
                 found: 99,
-                latest: 3
+                latest: 4
             })
         ));
         assert_eq!(schema_version(&conn).unwrap(), 99);

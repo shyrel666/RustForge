@@ -14,6 +14,9 @@ pub struct ResponseObservation {
     pub body_hash: Option<String>,
     pub body_size: i64,
     pub complete: bool,
+    /// Deterministic codes only; raw body text never enters observations.
+    #[serde(default)]
+    pub passive_indicators: Vec<String>,
 }
 
 impl From<&ReplayRun> for ResponseObservation {
@@ -26,6 +29,7 @@ impl From<&ReplayRun> for ResponseObservation {
             body_hash: run.resp_body_hash.clone(),
             body_size: run.resp_captured_size,
             complete: run.outcome == "completed" && !run.resp_truncated,
+            passive_indicators: passive_indicators(run),
         }
     }
 }
@@ -56,6 +60,8 @@ pub fn verify(
         "open_redirect" => verify_open_redirect(responses),
         "lazy_reflection" => verify_reflection(responses, reflection_marker, reflection_observed),
         "readonly_idor" => verify_idor(endpoint, responses),
+        "options_capabilities" => verify_options_capabilities(responses),
+        "anonymous_authenticated_diff" => verify_identity_visibility(endpoint, responses),
         _ => inconclusive(
             "未知安全模板",
             "unknown_template",
@@ -66,7 +72,7 @@ pub fn verify(
 }
 
 fn verify_security_headers(
-    _endpoint: &AssessmentEndpoint,
+    endpoint: &AssessmentEndpoint,
     responses: &HashMap<String, ResponseObservation>,
 ) -> VerificationOutcome {
     let Some(baseline) = responses.get("baseline") else {
@@ -88,6 +94,7 @@ fn verify_security_headers(
         .and_then(|url| url.host_str().map(str::to_string))
         .is_some_and(|host| host != "localhost" && host.parse::<std::net::IpAddr>().is_err());
     let mut gaps = Vec::<Value>::new();
+    let mut suspected = Vec::<Value>::new();
     if https && host_is_dns && header_values(baseline, "strict-transport-security").is_empty() {
         gaps.push(json!({"kind": "missing_hsts", "applicable": true}));
     }
@@ -118,18 +125,106 @@ fn verify_security_headers(
             gaps.push(json!({"kind": "session_cookie_missing_secure", "cookieName": cookie_name}));
         }
     }
+    let response_content_type =
+        content_type(baseline).unwrap_or_else(|| endpoint.content_type.trim().to_ascii_lowercase());
+    let html = response_content_type.contains("text/html")
+        || baseline
+            .passive_indicators
+            .iter()
+            .any(|indicator| indicator == "html_document");
+    let script_or_markup = html
+        || response_content_type.contains("javascript")
+        || response_content_type.contains("ecmascript")
+        || response_content_type.contains("xml");
+    if script_or_markup
+        && !header_values(baseline, "x-content-type-options")
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case("nosniff"))
+    {
+        gaps.push(json!({"kind": "missing_nosniff", "applicable": true}));
+    }
+    if html {
+        let has_frame_ancestors = header_values(baseline, "content-security-policy")
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains("frame-ancestors"));
+        let has_x_frame_options = !header_values(baseline, "x-frame-options").is_empty();
+        if !has_frame_ancestors && !has_x_frame_options {
+            gaps.push(json!({"kind": "missing_frame_embedding_protection", "applicable": true}));
+        }
+        if header_values(baseline, "content-security-policy").is_empty() {
+            suspected.push(json!({"kind": "content_security_policy_not_observed"}));
+        }
+    }
+    for header_name in ["server", "x-powered-by", "x-aspnet-version"] {
+        for value in header_values(baseline, header_name) {
+            if contains_version_number(value) {
+                gaps.push(json!({
+                    "kind": "detailed_server_version_disclosure",
+                    "header": header_name,
+                }));
+            }
+        }
+    }
+    if endpoint.has_authentication
+        && baseline
+            .status
+            .is_some_and(|status| (200..300).contains(&status))
+    {
+        let cache_control = header_values(baseline, "cache-control")
+            .join(",")
+            .to_ascii_lowercase();
+        let pragma = header_values(baseline, "pragma")
+            .join(",")
+            .to_ascii_lowercase();
+        if !cache_control.contains("no-store")
+            && !cache_control.contains("private")
+            && !pragma.contains("no-cache")
+        {
+            suspected.push(json!({"kind": "authenticated_response_cache_boundary_unproven"}));
+        }
+    }
+    for indicator in &baseline.passive_indicators {
+        match indicator.as_str() {
+            "directory_listing" | "stack_trace" | "database_error_detail" => {
+                gaps.push(json!({"kind": indicator}));
+            }
+            "api_documentation" => suspected.push(json!({"kind": indicator})),
+            _ => {}
+        }
+    }
     if gaps.is_empty() {
-        not_observed(
-            "未观察到事实性安全 Header/Cookie 缺口",
-            "security_misconfiguration",
-            baseline,
-            json!({"facts": []}),
-        )
+        if suspected.is_empty() {
+            not_observed(
+                "未观察到事实性响应安全基线缺口",
+                "security_misconfiguration",
+                baseline,
+                json!({"facts": [], "suspectedFacts": []}),
+            )
+        } else {
+            VerificationOutcome {
+                verdict: AssessmentVerdict::Suspected,
+                observations: json!({
+                    "facts": [],
+                    "suspectedFacts": suspected,
+                    "responseComplete": true,
+                }),
+                title: "响应安全基线需要人工复核".into(),
+                vuln_type: "security_misconfiguration".into(),
+                severity: "info".into(),
+                confidence: 70,
+                reasoning: "观察到策略边界缺失，但缺少业务敏感性或部署意图，不能自动确认。".into(),
+                evidence_replay_run_id: Some(baseline.replay_run_id),
+            }
+        }
     } else {
         VerificationOutcome {
             verdict: AssessmentVerdict::Confirmed,
-            observations: json!({"facts": gaps, "responseComplete": true}),
-            title: "安全 Header/Cookie 配置缺口".into(),
+            observations: json!({
+                "facts": gaps,
+                "suspectedFacts": suspected,
+                "responseComplete": true,
+            }),
+            title: "响应安全基线配置缺口".into(),
             vuln_type: "security_misconfiguration".into(),
             severity: "low".into(),
             confidence: 100,
@@ -137,6 +232,58 @@ fn verify_security_headers(
             evidence_replay_run_id: Some(baseline.replay_run_id),
         }
     }
+}
+
+fn passive_indicators(run: &ReplayRun) -> Vec<String> {
+    if run.outcome != "completed" || run.resp_truncated {
+        return Vec::new();
+    }
+    let body = run
+        .response_body_text
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .take(512 * 1024)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let mut indicators = Vec::new();
+    if body.contains("<html") || body.contains("<!doctype html") {
+        indicators.push("html_document".to_string());
+    }
+    if body.contains("<title>index of /")
+        || body.contains("directory listing for /")
+        || body.contains("parent directory</a>")
+    {
+        indicators.push("directory_listing".to_string());
+    }
+    if body.contains("traceback (most recent call last)")
+        || body.contains("exception in thread")
+        || body.contains("stack trace:")
+        || body.contains(" at org.springframework.")
+        || body.contains(" at java.base/")
+    {
+        indicators.push("stack_trace".to_string());
+    }
+    if body.contains("sqlstate[")
+        || body.contains("you have an error in your sql syntax")
+        || body.contains("syntax error at or near")
+        || body.contains("ora-00933")
+    {
+        indicators.push("database_error_detail".to_string());
+    }
+    if body.contains("\"openapi\"") || body.contains("\"swagger\"") || body.contains("swagger-ui") {
+        indicators.push("api_documentation".to_string());
+    }
+    indicators.sort();
+    indicators.dedup();
+    indicators
+}
+
+fn contains_version_number(value: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(3)
+        .any(|window| window[0].is_ascii_digit() && window[1] == b'.' && window[2].is_ascii_digit())
 }
 
 fn verify_cors(responses: &HashMap<String, ResponseObservation>) -> VerificationOutcome {
@@ -413,6 +560,119 @@ fn verify_idor(
     }
 }
 
+fn verify_options_capabilities(
+    responses: &HashMap<String, ResponseObservation>,
+) -> VerificationOutcome {
+    let Some(preflight) = responses.get("preflight") else {
+        return missing_pair("OPTIONS 能力边界", "options_capabilities");
+    };
+    if !preflight.complete {
+        return incomplete("OPTIONS 能力边界", preflight);
+    }
+    let mut methods = header_values(preflight, "allow")
+        .into_iter()
+        .chain(header_values(preflight, "access-control-allow-methods"))
+        .flat_map(|value| value.split(','))
+        .map(|method| method.trim().to_ascii_uppercase())
+        .filter(|method| !method.is_empty())
+        .collect::<Vec<_>>();
+    methods.sort();
+    methods.dedup();
+    let high_risk = methods
+        .iter()
+        .filter(|method| matches!(method.as_str(), "TRACE" | "CONNECT"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if high_risk.is_empty() {
+        return not_observed(
+            "未观察到高风险 OPTIONS 能力",
+            "options_capabilities",
+            preflight,
+            json!({"advertisedMethods": methods, "highRiskMethods": []}),
+        );
+    }
+    VerificationOutcome {
+        verdict: AssessmentVerdict::Suspected,
+        observations: json!({
+            "advertisedMethods": methods,
+            "highRiskMethods": high_risk,
+            "responseComplete": true,
+        }),
+        title: "OPTIONS 暴露高风险方法，需要人工复核".into(),
+        vuln_type: "options_capabilities".into(),
+        severity: "info".into(),
+        confidence: 70,
+        reasoning:
+            "完整响应声明 TRACE 或 CONNECT，但仅凭能力声明不足以证明可利用性，因此不会自动确认。"
+                .into(),
+        evidence_replay_run_id: Some(preflight.replay_run_id),
+    }
+}
+
+fn verify_identity_visibility(
+    endpoint: &AssessmentEndpoint,
+    responses: &HashMap<String, ResponseObservation>,
+) -> VerificationOutcome {
+    let (Some(anonymous), Some(authenticated)) =
+        (responses.get("anonymous"), responses.get("baseline"))
+    else {
+        return missing_pair("匿名/登录可见性", "identity_visibility");
+    };
+    if !anonymous.complete || !authenticated.complete {
+        return incomplete(
+            "匿名/登录可见性",
+            if !anonymous.complete {
+                anonymous
+            } else {
+                authenticated
+            },
+        );
+    }
+    let authenticated_success = authenticated
+        .status
+        .is_some_and(|status| (200..300).contains(&status));
+    let anonymous_success = anonymous
+        .status
+        .is_some_and(|status| (200..300).contains(&status));
+    let equivalent = authenticated_success
+        && anonymous_success
+        && authenticated.body_hash.is_some()
+        && authenticated.body_hash == anonymous.body_hash
+        && authenticated.body_size == anonymous.body_size
+        && content_type(authenticated) == content_type(anonymous);
+    if !anonymous_success || !authenticated_success || !endpoint.has_authentication {
+        return not_observed(
+            "匿名/登录可见性边界未显示异常",
+            "identity_visibility",
+            anonymous,
+            json!({
+                "anonymousStatus": anonymous.status,
+                "authenticatedStatus": authenticated.status,
+                "responsesEquivalent": equivalent,
+                "authenticatedSurfaceObserved": endpoint.has_authentication,
+            }),
+        );
+    }
+    VerificationOutcome {
+        verdict: AssessmentVerdict::Suspected,
+        observations: json!({
+            "anonymousStatus": anonymous.status,
+            "authenticatedStatus": authenticated.status,
+            "responsesEquivalent": equivalent,
+            "authenticatedSurfaceObserved": true,
+            "responseComplete": true,
+        }),
+        title: "登录可见 surface 同时允许匿名访问，需要语义复核".into(),
+        vuln_type: "identity_visibility".into(),
+        severity: "info".into(),
+        confidence: if equivalent { 80 } else { 60 },
+        reasoning:
+            "匿名与登录请求均成功，但响应语义与资源敏感性不能由结构差异确定，因此仅标记 suspected。"
+                .into(),
+        evidence_replay_run_id: Some(anonymous.replay_run_id),
+    }
+}
+
 fn header_values<'a>(response: &'a ResponseObservation, name: &str) -> Vec<&'a str> {
     response
         .headers
@@ -515,6 +775,7 @@ mod tests {
             body_hash: Some(body.into()),
             body_size: 10,
             complete: true,
+            passive_indicators: Vec::new(),
         }
     }
 
@@ -602,6 +863,7 @@ mod tests {
             &[
                 ("strict-transport-security", "max-age=31536000"),
                 ("set-cookie", "session_id=abc; Secure; HttpOnly; Path=/"),
+                ("cache-control", "private, no-store"),
             ],
         );
         assert_eq!(
@@ -777,6 +1039,52 @@ mod tests {
         assert_eq!(
             verify_idor(&endpoint(Some(7)), &responses).verdict,
             AssessmentVerdict::NotObserved
+        );
+    }
+
+    #[test]
+    fn options_and_identity_visibility_are_never_auto_confirmed() {
+        let options = with_headers(
+            response(10, 204, "empty"),
+            &[("allow", "GET, OPTIONS, TRACE")],
+        );
+        let options_outcome =
+            verify_options_capabilities(&HashMap::from([("preflight".into(), options)]));
+        assert_eq!(options_outcome.verdict, AssessmentVerdict::Suspected);
+
+        let visible = HashMap::from([
+            ("anonymous".into(), response(11, 200, "same")),
+            ("baseline".into(), response(12, 200, "same")),
+        ]);
+        assert_eq!(
+            verify_identity_visibility(&endpoint(None), &visible).verdict,
+            AssessmentVerdict::Suspected
+        );
+        let mut incomplete = visible;
+        incomplete.get_mut("anonymous").unwrap().complete = false;
+        assert_eq!(
+            verify_identity_visibility(&endpoint(None), &incomplete).verdict,
+            AssessmentVerdict::Inconclusive
+        );
+    }
+
+    #[test]
+    fn passive_body_facts_confirm_only_on_complete_responses() {
+        let mut observed = response(20, 200, "body");
+        observed.passive_indicators = vec!["directory_listing".into()];
+        let outcome = verify_security_headers(
+            &endpoint(None),
+            &HashMap::from([("baseline".into(), observed.clone())]),
+        );
+        assert_eq!(outcome.verdict, AssessmentVerdict::Confirmed);
+        observed.complete = false;
+        assert_eq!(
+            verify_security_headers(
+                &endpoint(None),
+                &HashMap::from([("baseline".into(), observed)])
+            )
+            .verdict,
+            AssessmentVerdict::Inconclusive
         );
     }
 }

@@ -10,7 +10,7 @@ use crate::storage::db::Pool;
 use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,17 @@ pub fn materialize_checks(
     plans: Vec<PlannedCheck>,
     endpoints: &[DiscoveredEndpoint],
 ) -> Result<Vec<MaterializedCheck>, String> {
+    materialize_checks_with_allowlist(pool, executor, round_id, plans, endpoints, None)
+}
+
+pub fn materialize_checks_with_allowlist(
+    pool: &Pool,
+    executor: &AssessmentExecutor,
+    round_id: i64,
+    plans: Vec<PlannedCheck>,
+    endpoints: &[DiscoveredEndpoint],
+    allowed_tool_ids: Option<&BTreeSet<String>>,
+) -> Result<Vec<MaterializedCheck>, String> {
     let endpoint_map = endpoints
         .iter()
         .map(|endpoint| (endpoint.endpoint.endpoint_id.as_str(), endpoint))
@@ -67,6 +78,7 @@ pub fn materialize_checks(
             template,
             duplicate_this_batch,
             reserved_cost,
+            allowed_tool_ids,
         )?;
         // 同一轮内的完全重复由 parse_plan 先行拒绝；此处仍是防御边界：重复
         // check 不落库（否则会与 UNIQUE(run_id, round_id, ...) 约束冲突）。
@@ -144,10 +156,14 @@ fn validate_plan(
     template: Option<&'static SafeTemplate>,
     duplicate_this_batch: bool,
     reserved_cost: u32,
+    allowed_tool_ids: Option<&BTreeSet<String>>,
 ) -> Result<(&'static str, String, u8), String> {
     let Some(template) = template else {
         return Ok(("rejected", "unknown_template".into(), 0));
     };
+    if allowed_tool_ids.is_some_and(|allowed| !allowed.contains(template.id)) {
+        return Ok(("rejected", "tool_not_approved_for_mission".into(), 0));
+    }
     let Some(endpoint) = endpoint else {
         return Ok(("rejected", "unknown_endpoint".into(), 0));
     };
@@ -159,7 +175,7 @@ fn validate_plan(
         .query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM assessment_checks
-                 WHERE run_id = ?1 AND round_id <> ?2
+                 WHERE run_id = ?1 AND (round_id IS NULL OR round_id <> ?2)
                    AND template_id = ?3 AND requested_endpoint_id = ?4
                    AND parameter_name IS ?5 AND identity_mode = ?6
                    AND policy_result = 'allowed'
@@ -175,9 +191,29 @@ fn validate_plan(
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
+    let workstream_allowed = if let Some(workstream_key) = &planned.workstream_key {
+        conn.query_row(
+            "SELECT CASE
+                 WHEN EXISTS(SELECT 1 FROM assessment_mission_runs WHERE run_id=?1)
+                 THEN EXISTS(
+                     SELECT 1 FROM assessment_mission_runs mr
+                     JOIN assessment_workstreams w ON w.mission_id=mr.mission_id
+                     WHERE mr.run_id=?1 AND w.stable_key=?2
+                 )
+                 ELSE 1 END",
+            rusqlite::params![executor.run_id(), workstream_key],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        true
+    };
     drop(conn);
     if prior_duplicate {
         return Ok(("rejected", "duplicate_check_from_previous_round".into(), 0));
+    }
+    if !workstream_allowed {
+        return Ok(("rejected", "unknown_mission_workstream".into(), 0));
     }
     if !template
         .allowed_identity_modes
@@ -216,10 +252,23 @@ fn validate_plan(
     }
     if matches!(
         template.id,
-        "credentialed_cors" | "jwt_integrity" | "readonly_idor" | "lazy_reflection"
+        "credentialed_cors"
+            | "jwt_integrity"
+            | "readonly_idor"
+            | "lazy_reflection"
+            | "anonymous_authenticated_diff"
     ) && endpoint.endpoint.method != "GET"
     {
         return Ok(("skipped", "template_requires_get_endpoint".into(), 0));
+    }
+    if template.id == "options_capabilities"
+        && !matches!(endpoint.endpoint.method.as_str(), "GET" | "HEAD")
+    {
+        return Ok((
+            "skipped",
+            "options_requires_safe_inventory_endpoint".into(),
+            0,
+        ));
     }
     if template.id == "security_headers_cookie" && endpoint.discovery_replay_run_id.is_none() {
         return Ok(("skipped", "no_discovery_response_to_reuse".into(), 0));
@@ -266,6 +315,12 @@ fn effective_request_cost(
             2
         } else {
             3
+        }
+    } else if template.id == "anonymous_authenticated_diff" {
+        if endpoint.discovery_replay_run_id.is_some() {
+            1
+        } else {
+            2
         }
     } else {
         template.request_cost
@@ -520,6 +575,68 @@ pub async fn execute_check(
                 .await?;
             }
         }
+        "options_capabilities" => {
+            perform_method(
+                pool,
+                executor,
+                check,
+                "preflight",
+                "OPTIONS",
+                &check.endpoint.endpoint.url,
+                Vec::new(),
+                identity_from_mode(&check.planned.identity_mode)?,
+                None,
+                &mut responses,
+                &mut raw_runs,
+                &mut stop_condition,
+            )
+            .await?;
+        }
+        "anonymous_authenticated_diff" => {
+            if let Some(run_id) = check.endpoint.discovery_replay_run_id {
+                let conn = pool.get().map_err(|error| error.to_string())?;
+                let run = crate::replay::service::load_run(&conn, run_id)?;
+                drop(conn);
+                link_response(
+                    pool,
+                    check.id,
+                    "anonymous",
+                    run,
+                    &mut responses,
+                    &mut raw_runs,
+                )?;
+            }
+            if !responses.contains_key("anonymous") {
+                perform(
+                    pool,
+                    executor,
+                    check,
+                    "anonymous",
+                    Vec::new(),
+                    IdentitySelection::Anonymous,
+                    None,
+                    &mut responses,
+                    &mut raw_runs,
+                    &mut stop_condition,
+                )
+                .await?;
+            }
+            if stop_condition.is_none() {
+                perform(
+                    pool,
+                    executor,
+                    check,
+                    "baseline",
+                    Vec::new(),
+                    identity_from_mode(&check.planned.identity_mode)?,
+                    None,
+                    &mut responses,
+                    &mut raw_runs,
+                    &mut stop_condition,
+                )
+                .await?;
+            }
+        }
         _ => return Err("安全模板注册表与执行器不一致".into()),
     }
 
@@ -610,12 +727,37 @@ async fn perform_url(
     raw_runs: &mut HashMap<String, ReplayRun>,
     stop: &mut Option<StopCondition>,
 ) -> Result<(), String> {
+    perform_method(
+        pool, executor, check, role, "GET", url, headers, identity, auth_probe, responses,
+        raw_runs, stop,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn perform_method(
+    pool: &Pool,
+    executor: &mut AssessmentExecutor,
+    check: &MaterializedCheck,
+    role: &str,
+    method: &str,
+    url: &str,
+    headers: Vec<ReplayHeader>,
+    identity: IdentitySelection,
+    auth_probe: Option<String>,
+    responses: &mut HashMap<String, ResponseObservation>,
+    raw_runs: &mut HashMap<String, ReplayRun>,
+    stop: &mut Option<StopCondition>,
+) -> Result<(), String> {
     let result = match auth_probe {
         Some(value) => {
+            if method != "GET" {
+                return Err("认证变体探针仅允许 GET".into());
+            }
             executor
                 .execute_with_auth_probe(AuthProbeRequest {
                     phase: RequestPhase::Verification,
-                    method: "GET",
+                    method,
                     url,
                     extra_headers: headers,
                     identity,
@@ -628,7 +770,7 @@ async fn perform_url(
             executor
                 .execute(
                     RequestPhase::Verification,
-                    "GET",
+                    method,
                     url,
                     headers,
                     identity,
@@ -941,6 +1083,8 @@ mod tests {
                 parameter_name: None,
                 identity_mode: "anonymous".into(),
                 rationale: "invented".into(),
+                workstream_key: None,
+                expected_signal: String::new(),
             },
             PlannedCheck {
                 template_id: "open_redirect".into(),
@@ -948,6 +1092,8 @@ mod tests {
                 parameter_name: Some("next".into()),
                 identity_mode: "anonymous".into(),
                 rationale: "forged endpoint".into(),
+                workstream_key: None,
+                expected_signal: String::new(),
             },
             PlannedCheck {
                 template_id: "open_redirect".into(),
@@ -955,6 +1101,8 @@ mod tests {
                 parameter_name: Some("not_in_inventory".into()),
                 identity_mode: "anonymous".into(),
                 rationale: "forged parameter".into(),
+                workstream_key: None,
+                expected_signal: String::new(),
             },
         ];
         let executable =

@@ -1,6 +1,6 @@
 use super::discovery::{self, DiscoveredEndpoint};
 use super::executor::{AssessmentExecutor, StopCondition};
-use super::model::{AssessmentProgress, AssessmentStatus};
+use super::model::{AssessmentMissionEvent, AssessmentProgress, AssessmentStatus, MissionStatus};
 use super::planner::{self, EndpointForAi, PlannerProviderContext, PriorVerdictForAi};
 use super::service;
 use super::templates;
@@ -8,6 +8,7 @@ use crate::ai::client::OpenAiClient;
 use crate::replay::model::TlsPolicy;
 use crate::storage::db::Pool;
 use chrono::Local;
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -163,15 +164,28 @@ pub async fn run(context: AssessmentRunContext) -> Result<(), String> {
         // contract before each round begins.
         executor.recheck_contract()?;
         let endpoints_for_ai = endpoints_for_ai(&discovery.endpoints, &executor);
-        let audit = planner::plan_round(
+        let (allowed_tools, mission_context) = {
+            let conn = pool.get().map_err(|error| error.to_string())?;
+            (
+                super::mission::allowed_planner_tools_for_run(&conn, run_id)?,
+                super::mission::planner_steering_for_run(&conn, run_id)?,
+            )
+        };
+        let audit = planner::plan_round_with_context(
             &client,
             &endpoints_for_ai,
             &previous,
             executor.remaining_requests(),
             provider.supports_json_schema,
+            allowed_tools.as_ref(),
+            mission_context.as_ref(),
             executor.cancel_receiver(),
         )
         .await?;
+        {
+            let conn = pool.get().map_err(|error| error.to_string())?;
+            super::mission::clear_steering_for_run(&conn, run_id)?;
+        }
         let (round_id, _analysis_run_id) = {
             let conn = pool.get().map_err(|error| error.to_string())?;
             planner::persist_round(&conn, project_id, run_id, round_number, &provider, &audit)?
@@ -206,9 +220,52 @@ pub async fn run(context: AssessmentRunContext) -> Result<(), String> {
             )?;
             break;
         }
-        let checks =
-            templates::materialize_checks(&pool, &executor, round_id, plans, &discovery.endpoints)?;
+        // Manual recipes share the same bounded DSL, but deliberately bypass
+        // check materialization: a validated selection only advances an
+        // approved action to `manual_ready` and creates zero sockets.
+        let (manual_plans, executable_plans): (Vec<_>, Vec<_>) =
+            plans.into_iter().partition(|plan| {
+                allowed_tools.is_some()
+                    && super::catalog::tool(&plan.template_id)
+                        .is_some_and(|tool| tool.execution_kind == "manual_recipe")
+            });
+        let selected_manual = if manual_plans.is_empty() {
+            0
+        } else {
+            let mut conn = pool.get().map_err(|error| error.to_string())?;
+            super::mission::select_manual_plans_for_run(
+                &mut conn,
+                run_id,
+                round_id,
+                &manual_plans,
+                allowed_tools.as_ref(),
+            )?
+        };
+        if selected_manual > 0 {
+            emit_progress(
+                &app,
+                &pool,
+                project_id,
+                run_id,
+                current_status,
+                "planning",
+                &format!(
+                    "已选择 {selected_manual} 个已审批人工配方；仅等待用户创建并发送 Repeater 草稿"
+                ),
+            );
+        }
+        let checks = templates::materialize_checks_with_allowlist(
+            &pool,
+            &executor,
+            round_id,
+            executable_plans,
+            &discovery.endpoints,
+            allowed_tools.as_ref(),
+        )?;
         if checks.is_empty() {
+            if selected_manual > 0 {
+                break;
+            }
             continue;
         }
         transition(&pool, project_id, run_id, AssessmentStatus::Executing, None)?;
@@ -448,8 +505,7 @@ fn error_redaction_references(
         let Ok(header_name) = header_name else {
             continue;
         };
-        let secret_id =
-            crate::secrets::assessment_auth_profile_secret_id(project_id, profile_id);
+        let secret_id = crate::secrets::assessment_auth_profile_secret_id(project_id, profile_id);
         let Ok(secret_id) = secret_id else {
             continue;
         };
@@ -636,4 +692,46 @@ fn emit_progress(
             occurred_at: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
         },
     );
+    let mission = pool.get().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT m.id, m.revision, m.status
+             FROM assessment_missions m
+             JOIN assessment_mission_runs mr ON mr.mission_id=m.id
+             WHERE mr.run_id=?1 AND m.project_id=?2 AND m.legacy=0",
+            rusqlite::params![run_id, project_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    });
+    if let Some((mission_id, revision, mission_status)) = mission {
+        if let Ok(mission_status) = MissionStatus::parse(&mission_status) {
+            let _ = app.emit(
+                "assessment:mission-event",
+                AssessmentMissionEvent {
+                    project_id,
+                    mission_id,
+                    run_id: Some(run_id),
+                    action_id: None,
+                    revision,
+                    event_type: "mission_progress".into(),
+                    status: mission_status,
+                    phase: phase.into(),
+                    message: message.into(),
+                    request_count,
+                    request_budget,
+                    completed_checks,
+                    total_checks,
+                    occurred_at: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                },
+            );
+        }
+    }
 }

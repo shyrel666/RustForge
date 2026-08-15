@@ -7,6 +7,7 @@
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::sync::{LazyLock, OnceLock};
 
 const REDACTED_QUERY: &str = "[REDACTED:query_value]";
 const REDACTED_HEADER: &str = "[REDACTED:sensitive_header]";
@@ -233,6 +234,21 @@ fn secret_value_kind(value: &str) -> Option<&'static str> {
     None
 }
 
+/// Detects secret material embedded inside a longer string (e.g. an error
+/// message echoing a token, or a URL carrying `access_token=`). Whole-string
+/// `secret_value_kind` anchors on the entire value, so structured leaves with
+/// embedded secrets would otherwise pass through untouched.
+fn embedded_secret_hint(value: &str) -> bool {
+    static HINT: OnceLock<Regex> = OnceLock::new();
+    let hint = HINT.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:eyJ[A-Za-z0-9_-]{8,}\.|(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|(?:sk|rk)_live_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[bpar]-[A-Za-z0-9-]{16,}|(?:access|refresh|auth|id)[_-]?token\s*[=:]|api[_-]?key\s*[=:]|x-api-key\s*[=:]|client[_-]?secret\s*[=:]|password\s*[=:]|passwd\s*[=:])",
+        )
+        .expect("static embedded secret hint regex")
+    });
+    hint.is_match(value)
+}
+
 fn redact_or_disclose_value(
     value: &str,
     location: &str,
@@ -240,6 +256,9 @@ fn redact_or_disclose_value(
     manifest: &mut RedactionManifest,
 ) -> String {
     let Some(kind) = secret_value_kind(value) else {
+        if enabled && embedded_secret_hint(value) {
+            return redact_fallback_text(value, location, true, manifest);
+        }
         return value.to_string();
     };
     if enabled {
@@ -271,6 +290,18 @@ pub fn redact_url(
     if parsed.fragment().is_some() {
         parsed.set_fragment(None);
         manifest.omit("request.url.fragment", "URL fragment 默认不进入 AI 上下文");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        let _ = parsed.set_username("REDACTED_credentials");
+        let _ = parsed.set_password(None);
+        manifest.record_redaction("request.url.userinfo", "url_credentials");
+    }
+    let path = parsed.path().to_string();
+    if path.len() > 1 {
+        let scrubbed_path = redact_fallback_text(&path, "request.url.path", true, manifest);
+        if scrubbed_path != path {
+            parsed.set_path(&scrubbed_path);
+        }
     }
     if parsed.query().is_none() {
         return parsed.to_string();
@@ -571,15 +602,12 @@ fn redact_multipart(
 
 fn replace_regex(
     input: &str,
-    pattern: &str,
+    regex: &Regex,
     replacement: &str,
     location: &str,
     kind: &str,
     manifest: &mut RedactionManifest,
 ) -> String {
-    let Ok(regex) = Regex::new(pattern) else {
-        return input.to_string();
-    };
     regex
         .replace_all(input, |_captures: &Captures<'_>| {
             manifest.record_redaction(location, kind);
@@ -587,6 +615,44 @@ fn replace_regex(
         })
         .into_owned()
 }
+
+static PEM_PRIVATE_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)-----BEGIN [^-
+]*PRIVATE KEY-----.*?-----END [^-
+]*PRIVATE KEY-----",
+    )
+    .expect("static pem private key regex")
+});
+static AUTHORIZATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+        .expect("static authorization regex")
+});
+static SENSITIVE_HEADER_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)^\s*(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Access-Token)\s*:[^\r\n]*$")
+        .expect("static sensitive header line regex")
+});
+static SENSITIVE_ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(["']?(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|pwd|secret|token|api[_-]?key|x-api-key|auth[_-]?token|x-auth-token|access[_-]?token|x-access-token|refresh[_-]?token|client[_-]?secret|session(?:id)?)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,\s}\r\n]+)"#)
+        .expect("static sensitive assignment regex")
+});
+static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+        .expect("static jwt regex")
+});
+static CLOUD_CREDENTIAL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bAKIA[0-9A-Z]{16}\b").expect("static cloud credential regex"));
+static SERVICE_CREDENTIAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:AIza[0-9A-Za-z_-]{16,}|sk-(?:proj-)?[0-9A-Za-z_-]{16,}|(?:sk|rk)_live_[0-9A-Za-z]{16,}|gh[pousr]_[0-9A-Za-z]{16,}|github_pat_[0-9A-Za-z_]{16,}|xox[bpar]-[0-9A-Za-z-]{16,})\b")
+        .expect("static service credential regex")
+});
+static KEY_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|session(?:id)?)\b(\s*[:=]\s*)[\"']?[A-Za-z0-9._~+/=-]{3,}[\"']?"#)
+        .expect("static key/value regex")
+});
+static HIGH_ENTROPY_CANDIDATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Za-z0-9_+/.-]{24,}\b").expect("static high entropy candidate regex")
+});
 
 pub fn redact_fallback_text(
     text: &str,
@@ -602,7 +668,7 @@ pub fn redact_fallback_text(
     }
     let mut output = replace_regex(
         text,
-        r"(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+        &PEM_PRIVATE_KEY_RE,
         "[REDACTED:pem_private_key]",
         location,
         "pem_private_key",
@@ -610,7 +676,7 @@ pub fn redact_fallback_text(
     );
     output = replace_regex(
         &output,
-        r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}",
+        &AUTHORIZATION_RE,
         "[REDACTED:authorization]",
         location,
         "authorization",
@@ -618,17 +684,13 @@ pub fn redact_fallback_text(
     );
     output = replace_regex(
         &output,
-        r"(?im)^\s*(?:Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|X-Auth-Token|X-Access-Token)\s*:[^\r\n]*$",
+        &SENSITIVE_HEADER_LINE_RE,
         "[REDACTED:sensitive_header]",
         location,
         "sensitive_header",
         manifest,
     );
-    let sensitive_assignment = Regex::new(
-        r#"(?i)(["']?(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|pwd|secret|token|api[_-]?key|x-api-key|auth[_-]?token|x-auth-token|access[_-]?token|x-access-token|refresh[_-]?token|client[_-]?secret|session(?:id)?)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,\s}\r\n]+)"#,
-    )
-    .expect("static sensitive assignment regex");
-    output = sensitive_assignment
+    output = SENSITIVE_ASSIGNMENT_RE
         .replace_all(&output, |captures: &Captures<'_>| {
             manifest.record_redaction(location, "sensitive_field");
             format!("{}{}", &captures[1], REDACTED_FIELD)
@@ -636,7 +698,7 @@ pub fn redact_fallback_text(
         .into_owned();
     output = replace_regex(
         &output,
-        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        &JWT_RE,
         "[REDACTED:jwt]",
         location,
         "jwt",
@@ -644,7 +706,7 @@ pub fn redact_fallback_text(
     );
     output = replace_regex(
         &output,
-        r"\bAKIA[0-9A-Z]{16}\b",
+        &CLOUD_CREDENTIAL_RE,
         "[REDACTED:cloud_credential]",
         location,
         "cloud_credential",
@@ -652,18 +714,14 @@ pub fn redact_fallback_text(
     );
     output = replace_regex(
         &output,
-        r"\b(?:AIza[0-9A-Za-z_-]{16,}|sk-(?:proj-)?[0-9A-Za-z_-]{16,}|(?:sk|rk)_live_[0-9A-Za-z]{16,}|gh[pousr]_[0-9A-Za-z]{16,}|github_pat_[0-9A-Za-z_]{16,}|xox[bpar]-[0-9A-Za-z-]{16,})\b",
+        &SERVICE_CREDENTIAL_RE,
         "[REDACTED:service_credential]",
         location,
         "service_credential",
         manifest,
     );
 
-    let key_value = Regex::new(
-        r#"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|session(?:id)?)\b(\s*[:=]\s*)[\"']?[A-Za-z0-9._~+/=-]{3,}[\"']?"#,
-    )
-    .expect("static key/value regex");
-    output = key_value
+    output = KEY_VALUE_RE
         .replace_all(&output, |captures: &Captures<'_>| {
             manifest.record_redaction(location, "sensitive_field");
             format!("{}{}{}", &captures[1], &captures[2], REDACTED_FIELD)
@@ -673,9 +731,7 @@ pub fn redact_fallback_text(
     // Excluding `=` prevents a normal `hash=<hex>` pair from becoming one
     // mixed high-entropy candidate. Dedicated passes already cover key/value,
     // Authorization, JWT, and cloud credential formats.
-    let candidate =
-        Regex::new(r"\b[A-Za-z0-9_+/.-]{24,}\b").expect("static high entropy candidate regex");
-    candidate
+    HIGH_ENTROPY_CANDIDATE_RE
         .replace_all(&output, |captures: &Captures<'_>| {
             let value = &captures[0];
             if let Some(kind) = secret_value_kind(value) {
@@ -742,6 +798,41 @@ mod tests {
             .omissions
             .iter()
             .any(|record| record.location == "request.url.fragment"));
+    }
+
+    #[test]
+    fn url_redacts_userinfo_and_embedded_path_secrets() {
+        let mut manifest = RedactionManifest::default();
+        let output = redact_url(
+            "https://alice:s3cret@example.test/cb/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            true,
+            &mut manifest,
+        );
+        assert!(!output.contains("alice"));
+        assert!(!output.contains("s3cret"));
+        assert!(!output.contains("eyJ"));
+        assert!(manifest
+            .redactions
+            .iter()
+            .any(|record| record.location == "request.url.userinfo"));
+        assert!(manifest
+            .redactions
+            .iter()
+            .any(|record| record.location == "request.url.path"));
+    }
+
+    #[test]
+    fn structured_value_embedded_secret_is_redacted() {
+        let mut manifest = RedactionManifest::default();
+        let output = redact_text_body(
+            r#"{"message":"令牌 eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c 已失效"}"#,
+            Some("application/json"),
+            "request.body",
+            true,
+            &mut manifest,
+        );
+        assert!(!output.contains("eyJ"));
+        assert!(output.contains("已失效"));
     }
 
     #[test]

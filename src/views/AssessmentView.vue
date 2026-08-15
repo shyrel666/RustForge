@@ -1,240 +1,197 @@
 <script setup lang="ts">
-import {
-  computed,
-  onMounted,
-  onUnmounted,
-  reactive,
-  ref,
-  watch,
-} from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Aim,
+  ChatDotRound,
   CircleCheck,
   Close,
+  Connection,
   Document,
   FolderOpened,
   Key,
   Plus,
   Refresh,
+  Setting,
+  VideoPause,
+  VideoPlay,
+  View,
   Warning,
 } from "@element-plus/icons-vue";
-import MarkdownIt from "markdown-it";
-import { useProjectStore } from "../stores/project";
-import { useAssessmentStore } from "../stores/assessment";
 import {
-  buildReport,
-  exportReport,
-  previewAssessmentContract,
-  type AssessmentAuthProfile,
-  type AssessmentCheck,
-  type AssessmentContractInput,
-  type AssessmentContractPreview,
+  buildAssessmentMissionReport,
+  createAssessmentAuthProfile,
+  exportAssessmentMissionReport,
+  listAssessmentRuns,
+  listFindings,
+  listTraffic,
+  type AssessmentAction,
+  type AssessmentAutonomyMode,
+  type AssessmentBudgetProfile,
+  type AssessmentManualHandoff,
+  type AssessmentMissionStatus,
   type AssessmentRun,
-  type AssessmentStatus,
-  type AssessmentVerification,
+  type Finding,
+  type TrafficSummary,
 } from "../api/tauri";
+import MissionInspector from "../components/assessment/MissionInspector.vue";
+import ProjectCreateDialog from "../components/ProjectCreateDialog.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import PageHeader from "../components/shell/PageHeader.vue";
+import { useAssessmentMissionStore } from "../stores/assessmentMission";
+import { useProjectStore } from "../stores/project";
 
-const project = useProjectStore();
-const assessment = useAssessmentStore();
+type TagType = "primary" | "success" | "warning" | "info" | "danger";
+
 const router = useRouter();
-const md = new MarkdownIt({ breaks: true, linkify: false });
+const project = useProjectStore();
+const missions = useAssessmentMissionStore();
 
 const projectId = computed(() => project.current?.id ?? null);
-const composerVisible = ref(false);
-const composerStep = ref<"setup" | "confirm">("setup");
-const preview = ref<AssessmentContractPreview | null>(null);
-const previewing = ref(false);
-const authorizationConfirmed = ref(false);
-const advancedOpen = ref<string[]>([]);
+const detail = computed(() => missions.detail);
+const selectedMission = computed(() => missions.selectedMission);
+const creating = ref(false);
+const createProjectVisible = ref(false);
+const emptyProjectChoice = ref<number | null>(null);
+const inspectorDrawerVisible = ref(false);
+const contextDialogVisible = ref(false);
+const resourceDialogVisible = ref(false);
+const resourceLoading = ref(false);
+const identityDialogVisible = ref(false);
+const identitySaving = ref(false);
+const actionDrawerVisible = ref(false);
+const selectedAction = ref<AssessmentAction | null>(null);
+const handoffDialogVisible = ref(false);
+const selectedHandoff = ref<AssessmentManualHandoff | null>(null);
+const handoffReplayRunId = ref<number | null>(null);
 const reportVisible = ref(false);
-const reportMarkdown = ref("");
 const reportLoading = ref(false);
 const reportExporting = ref(false);
+const reportMarkdown = ref("");
+const followUp = ref("");
+const followUpSending = ref(false);
 
-const form = reactive({
+const createForm = reactive({
+  title: "",
+  goal: "",
   startUrl: "",
+  excludedPaths: "",
   identityAProfileId: null as number | null,
   identityBProfileId: null as number | null,
-  ownershipPaths: "",
-  excludedPaths: "",
+  budgetProfile: "standard" as AssessmentBudgetProfile,
+  autonomyMode: "smart" as AssessmentAutonomyMode,
   tlsPolicy: "strict" as "strict" | "ignore_invalid",
-  requestBudget: 120,
-  requestsPerSecond: 1,
-  maxRounds: 3,
-  includeRecentTraffic: false,
+  includeRecentTraffic: true,
+  writtenAuthorizationConfirmed: false,
 });
 
-const profileDialogVisible = ref(false);
-const profileSaving = ref(false);
-const profileForm = reactive({
-  mode: "paste" as "paste" | "traffic",
+const identityForm = reactive({
   label: "",
-  headerName: "Authorization" as AssessmentAuthProfile["headerName"],
+  headerName: "Authorization" as "Authorization" | "Cookie" | "X-API-Key" | "X-Auth-Token",
   secret: "",
-  trafficId: null as number | null,
 });
-// 候选列表与手动输入 ID 二选一；切换时清空 trafficId，避免跨模式残留。
-const profileTrafficManual = ref(false);
 
-function toggleTrafficManual() {
-  profileTrafficManual.value = !profileTrafficManual.value;
-  profileForm.trafficId = null;
-}
+const resourceForm = reactive({
+  type: "traffic" as "traffic" | "finding" | "assessment_run",
+  sourceId: null as number | null,
+});
+const trafficResources = ref<TrafficSummary[]>([]);
+const findingResources = ref<Finding[]>([]);
+const runResources = ref<AssessmentRun[]>([]);
 
-// 切换到 Traffic 提取或更换 Header 时，自动刷新候选请求列表。
-// 更换 Header 时必须清空已选中的 trafficId：旧选择属于上一个 Header，
-// 保留会导致用旧请求 + 新 Header 导入而失败。
-watch(
-  () => [profileForm.mode, profileForm.headerName] as const,
-  ([mode, headerName], [prevMode, prevHeader]) => {
-    if (mode !== "traffic" || !profileDialogVisible.value) return;
-    if (prevHeader !== headerName) {
-      profileForm.trafficId = null;
-      profileTrafficManual.value = false;
-    }
-    void assessment.loadAuthCandidates(headerName);
-  }
-);
-
-const STATUS_LABEL: Record<AssessmentStatus, string> = {
-  queued: "排队中",
-  discovering: "发现端点",
+const STATUS_LABEL: Record<AssessmentMissionStatus, string> = {
+  draft: "草稿",
+  awaiting_context_approval: "等待上下文确认",
+  queued: "已进入队列",
+  discovering: "发现攻击面",
   planning: "AI 规划",
-  executing: "执行只读检查",
+  awaiting_action_approval: "等待动作审批",
+  executing: "执行工具",
   verifying: "确定性验证",
+  awaiting_manual_handoff: "等待人工接力",
   completed: "已完成",
-  stopped: "安全停止",
+  stopped: "已停止",
   cancelled: "已取消",
   failed: "失败",
   interrupted: "应用中断",
 };
 
-type TagType = "primary" | "success" | "warning" | "info" | "danger";
-const STATUS_TAG: Record<AssessmentStatus, TagType> = {
+const STATUS_TAG: Record<AssessmentMissionStatus, TagType> = {
+  draft: "info",
+  awaiting_context_approval: "warning",
   queued: "info",
   discovering: "primary",
   planning: "primary",
+  awaiting_action_approval: "warning",
   executing: "warning",
   verifying: "warning",
+  awaiting_manual_handoff: "warning",
   completed: "success",
-  stopped: "warning",
+  stopped: "info",
   cancelled: "info",
   failed: "danger",
   interrupted: "warning",
 };
 
-const TEMPLATE_LABEL: Record<string, string> = {
-  security_headers_cookie: "安全 Header / Cookie",
-  credentialed_cors: "凭据型 CORS",
-  jwt_integrity: "JWT 完整性",
-  open_redirect: "开放重定向",
-  lazy_reflection: "只读反射迹象",
-  readonly_idor: "双身份只读越权",
-};
-
-const PHASES: Array<{ key: AssessmentStatus; label: string }> = [
-  { key: "discovering", label: "发现" },
-  { key: "planning", label: "规划" },
-  { key: "executing", label: "执行" },
-  { key: "verifying", label: "验证" },
-  { key: "completed", label: "完成" },
-];
-
-const ACTIVE_STATUSES = new Set<AssessmentStatus>([
+const ACTIVE_STATUSES = new Set<AssessmentMissionStatus>([
   "queued",
   "discovering",
   "planning",
   "executing",
   "verifying",
 ]);
+const TERMINAL_STATUSES = new Set<AssessmentMissionStatus>([
+  "completed",
+  "stopped",
+  "cancelled",
+  "failed",
+  "interrupted",
+]);
 
-const selectedRun = computed(() => assessment.selectedRun);
-const selectedIsActive = computed(() =>
-  selectedRun.value ? ACTIVE_STATUSES.has(selectedRun.value.status) : false
-);
-const detail = computed(() => assessment.detail);
-const verificationByCheck = computed(() => {
-  const result = new Map<number, AssessmentVerification>();
-  for (const item of detail.value?.verifications ?? []) {
-    result.set(item.checkId, item);
-  }
-  return result;
-});
-const checksById = computed(() =>
-  new Map((detail.value?.checks ?? []).map((item) => [item.id, item]))
-);
+const BUDGETS: Array<{
+  key: AssessmentBudgetProfile;
+  name: string;
+  requests: number;
+  cycles: number;
+  description: string;
+}> = [
+  { key: "quick", name: "快速", requests: 40, cycles: 2, description: "验证主要入口与低风险基线" },
+  { key: "standard", name: "标准", requests: 120, cycles: 4, description: "默认，平衡覆盖与目标负载" },
+  { key: "deep", name: "深入", requests: 300, cycles: 6, description: "扩大 surface 覆盖，仍保持串行" },
+];
 
-const confirmed = computed(() =>
-  (detail.value?.verifications ?? []).filter(
-    (item) => item.verdict === "confirmed"
-  )
+const canStart = computed(
+  () =>
+    detail.value?.mission.status === "queued" &&
+    missions.pendingActions.length === 0 &&
+    missions.context?.approved === true
 );
-const suspected = computed(() =>
-  (detail.value?.verifications ?? []).filter(
-    (item) => item.verdict === "suspected"
-  )
+const isActive = computed(() =>
+  selectedMission.value ? ACTIVE_STATUSES.has(selectedMission.value.status) : false
 );
-const notObserved = computed(() =>
-  (detail.value?.verifications ?? []).filter(
-    (item) => item.verdict === "not_observed"
-  )
+const canStop = computed(
+  () => selectedMission.value && !selectedMission.value.legacy && !TERMINAL_STATUSES.has(selectedMission.value.status)
 );
-const inconclusive = computed(() =>
-  (detail.value?.verifications ?? []).filter((item) =>
-    ["inconclusive", "skipped"].includes(item.verdict)
-  )
+const contextJson = computed(() =>
+  JSON.stringify(missions.context?.contextSummary ?? {}, null, 2)
 );
-
-const requestPercentage = computed(() => {
-  const run = selectedRun.value;
-  if (!run || run.requestBudget <= 0) return 0;
-  return Math.min(100, Math.round((run.requestCount / run.requestBudget) * 100));
-});
-
-const currentPhaseIndex = computed(() => {
-  const status = selectedRun.value?.status;
-  if (!status) return 0;
-  if (["stopped", "cancelled", "failed", "interrupted"].includes(status)) {
-    // 只取 status_changed 事件中最后一个仍处于活动阶段的 newValue，
-    // 避免 coverage_gap / check 事件的 newValue 干扰阶段条。
-    const lastActive = detail.value?.events
-      .filter((event) => event.eventType === "status_changed")
-      .map((event) => event.newValue)
-      .filter((value): value is string => Boolean(value))
-      .filter((value) => ACTIVE_STATUSES.has(value as AssessmentStatus))
-      .at(-1);
-    const index = lastActive ? PHASES.findIndex((item) => item.key === lastActive) : -1;
-    return Math.max(0, index);
-  }
-  const index = PHASES.findIndex((item) => item.key === status);
-  return Math.max(0, index);
-});
+const eventAnnouncement = computed(() => missions.lastEvent?.message ?? "");
 
 watch(
   projectId,
   async (id) => {
-    assessment.activateProject(id);
-    preview.value = null;
-    authorizationConfirmed.value = false;
-    composerStep.value = "setup";
-    reportVisible.value = false;
-    if (id === null) {
-      composerVisible.value = false;
-      return;
-    }
+    missions.activateProject(id);
+    creating.value = false;
+    if (id === null) return;
     seedStartUrl();
     try {
-      await assessment.refresh(id);
-      composerVisible.value = assessment.runs.length === 0;
+      await missions.refresh(id);
+      creating.value = missions.missions.length === 0;
+      if (missions.context?.requiresApproval) contextDialogVisible.value = true;
     } catch (error) {
       ElMessage.error(String(error));
-      // 已有运行历史时保持详情视图；只有没有任何历史才退回空表单，
-      // 避免一次暂时性 IPC 失败把用户从运行详情踢回 composer。
-      composerVisible.value = assessment.runs.length === 0;
+      creating.value = missions.missions.length === 0;
     }
   },
   { immediate: true }
@@ -242,237 +199,306 @@ watch(
 
 onMounted(async () => {
   try {
-    await assessment.bindEvents(() => projectId.value);
+    await missions.bindEvents();
   } catch (error) {
-    ElMessage.warning(`实时进度通道不可用，将通过刷新恢复：${String(error)}`);
+    ElMessage.warning(`任务事件通道不可用，可使用刷新恢复：${String(error)}`);
   }
 });
 
-onUnmounted(() => assessment.unbindEvents());
+onUnmounted(() => void missions.unbindEvents());
 
 function seedStartUrl() {
   const target = project.current?.target_host.trim() ?? "";
-  if (!target) {
-    form.startUrl = "";
-  } else if (/^https?:\/\//i.test(target)) {
-    form.startUrl = target;
-  } else {
-    form.startUrl = `https://${target}/`;
-  }
+  createForm.startUrl = !target
+    ? ""
+    : /^https?:\/\//i.test(target)
+      ? target
+      : `https://${target}/`;
 }
 
 function resetComposer() {
+  createForm.title = "";
+  createForm.goal = "";
+  createForm.excludedPaths = "";
+  createForm.identityAProfileId = null;
+  createForm.identityBProfileId = null;
+  createForm.budgetProfile = "standard";
+  createForm.autonomyMode = "smart";
+  createForm.tlsPolicy = "strict";
+  createForm.includeRecentTraffic = true;
+  createForm.writtenAuthorizationConfirmed = false;
   seedStartUrl();
-  form.identityAProfileId = null;
-  form.identityBProfileId = null;
-  form.ownershipPaths = "";
-  form.excludedPaths = "";
-  form.tlsPolicy = "strict";
-  form.requestBudget = 120;
-  form.requestsPerSecond = 1;
-  form.maxRounds = 3;
-  form.includeRecentTraffic = false;
-  preview.value = null;
-  authorizationConfirmed.value = false;
-  composerStep.value = "setup";
-  composerVisible.value = true;
 }
 
-function lines(value: string): string[] {
-  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
-}
-
-function buildContract(writtenAuthorizationConfirmed: boolean): AssessmentContractInput {
-  const id = projectId.value;
-  if (id === null) throw new Error("请先选择项目");
-  const ownershipPaths = lines(form.ownershipPaths);
-  if (ownershipPaths.length && form.identityAProfileId === null) {
-    throw new Error("声明资源归属前，请先选择身份 A");
-  }
-  return {
-    projectId: id,
-    startUrl: form.startUrl.trim(),
-    excludedPaths: lines(form.excludedPaths),
-    tlsPolicy: form.tlsPolicy,
-    requestBudget: form.requestBudget,
-    requestsPerSecond: form.requestsPerSecond,
-    identityAProfileId: form.identityAProfileId,
-    identityBProfileId: form.identityBProfileId,
-    resourceOwnership: ownershipPaths.map((path) => ({
-      path,
-      ownerProfileId: form.identityAProfileId!,
-    })),
-    includeRecentTraffic: form.includeRecentTraffic,
-    providerId: "",
-    model: "",
-    maxRounds: form.maxRounds,
-    writtenAuthorizationConfirmed,
-  };
-}
-
-async function previewContract() {
-  if (!form.startUrl.trim()) {
-    ElMessage.warning("请填写已授权目标的起始 URL");
-    return;
-  }
-  if (
-    form.identityAProfileId !== null &&
-    form.identityAProfileId === form.identityBProfileId
-  ) {
-    ElMessage.warning("身份 A 与 B 必须选择不同的凭据档案");
-    return;
-  }
-  previewing.value = true;
-  try {
-    preview.value = await previewAssessmentContract(buildContract(false));
-    authorizationConfirmed.value = false;
-    composerStep.value = "confirm";
-  } catch (error) {
-    ElMessage.error(String(error));
-  } finally {
-    previewing.value = false;
-  }
-}
-
-async function startRun() {
-  if (!authorizationConfirmed.value) return;
-  previewing.value = true;
-  try {
-    const contract = buildContract(true);
-    const finalPreview = await previewAssessmentContract(contract);
-    preview.value = finalPreview;
-    await assessment.start(contract, finalPreview.contractHash);
-    composerVisible.value = false;
-    ElMessage.success("评估已在后台启动；离开页面不会中断运行");
-  } catch (error) {
-    ElMessage.error(String(error));
-  } finally {
-    previewing.value = false;
-  }
+async function selectEmptyProject() {
+  if (emptyProjectChoice.value === null) return;
+  await project.select(emptyProjectChoice.value);
 }
 
 async function refresh() {
-  const id = projectId.value;
-  if (id === null) return;
+  if (projectId.value === null) return;
   try {
-    await assessment.refresh(id);
+    await missions.refresh(projectId.value);
   } catch (error) {
     ElMessage.error(String(error));
   }
 }
 
-async function selectRun(run: AssessmentRun) {
-  composerVisible.value = false;
-  try {
-    await assessment.selectRun(run.id);
-  } catch (error) {
-    ElMessage.error(String(error));
-  }
-}
-
-async function cancelRun() {
-  try {
-    await ElMessageBox.confirm(
-      "将终止当前 AI 或 HTTP 等待，并保存已经产生的脱敏证据与部分结果。不会自动恢复网络动作。",
-      "停止本次评估",
-      { type: "warning", confirmButtonText: "停止并保存", cancelButtonText: "继续运行" }
-    );
-    await assessment.cancel();
-  } catch (error) {
-    if (error === "cancel" || error === "close") return;
-    ElMessage.error(String(error));
-  }
-}
-
-function openProfileDialog() {
-  profileForm.mode = "paste";
-  profileForm.label = "";
-  profileForm.headerName = "Authorization";
-  profileForm.secret = "";
-  profileForm.trafficId = null;
-  profileTrafficManual.value = false;
-  assessment.resetAuthCandidates();
-  profileDialogVisible.value = true;
-}
-
-function refreshAuthCandidates() {
-  profileForm.trafficId = null;
-  void assessment.loadAuthCandidates(profileForm.headerName);
-}
-
-async function saveProfile() {
-  if (!profileForm.label.trim()) {
-    ElMessage.warning("请填写身份标签");
+async function createMission() {
+  if (projectId.value === null) return;
+  if (!createForm.goal.trim() || !createForm.startUrl.trim()) {
+    ElMessage.warning("请填写评估目标和起始 URL");
     return;
   }
-  profileSaving.value = true;
+  if (!createForm.writtenAuthorizationConfirmed) {
+    ElMessage.warning("请确认已获得目标系统的书面授权");
+    return;
+  }
+  if (
+    createForm.identityAProfileId !== null &&
+    createForm.identityAProfileId === createForm.identityBProfileId
+  ) {
+    ElMessage.warning("身份 A 与身份 B 不能使用同一凭据");
+    return;
+  }
   try {
-    if (profileForm.mode === "paste") {
-      if (!profileForm.secret) throw new Error("请填写 Header 值");
-      await assessment.createProfile({
-        label: profileForm.label.trim(),
-        headerName: profileForm.headerName,
-        secret: profileForm.secret,
-      });
-    } else {
-      if (!profileForm.trafficId) throw new Error("请选择候选请求");
-      await assessment.importProfile(
-        profileForm.trafficId,
-        profileForm.label.trim(),
-        profileForm.headerName
-      );
-    }
-    profileForm.secret = "";
-    profileDialogVisible.value = false;
-    ElMessage.success("身份已保存到系统凭据库；SQLite 不保存秘密值");
+    await missions.create({
+      projectId: projectId.value,
+      title: createForm.title.trim() || null,
+      goal: createForm.goal.trim(),
+      startUrl: createForm.startUrl.trim(),
+      excludedPaths: createForm.excludedPaths
+        .split(/[\n,;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+      tlsPolicy: createForm.tlsPolicy,
+      identityAProfileId: createForm.identityAProfileId,
+      identityBProfileId: createForm.identityBProfileId,
+      includeRecentTraffic: createForm.includeRecentTraffic,
+      autonomyMode: createForm.autonomyMode,
+      budgetProfile: createForm.budgetProfile,
+      writtenAuthorizationConfirmed: true,
+    });
+    creating.value = false;
+    contextDialogVisible.value = true;
+    ElMessage.success("任务已创建，请检查最终 AI 上下文");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function confirmContext() {
+  try {
+    await missions.confirmContext();
+    contextDialogVisible.value = false;
+    ElMessage.success(
+      missions.pendingActions.length > 0 ? "上下文已确认，请审批待处理动作" : "上下文与动作策略已确认"
+    );
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function decide(action: AssessmentAction, approve: boolean, sameTool = false) {
+  try {
+    await missions.decide(action, approve, sameTool);
+    ElMessage.success(approve ? "动作已批准" : "动作已拒绝；不会创建目标请求");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function startMission() {
+  if (missions.context?.requiresApproval) {
+    contextDialogVisible.value = true;
+    ElMessage.warning("上下文或权限已变化，请再次确认");
+    return;
+  }
+  try {
+    await missions.start();
+    ElMessage.success("任务已进入串行执行器");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function stopMission() {
+  try {
+    await ElMessageBox.confirm(
+      "将立即取消等待；正在执行的单个请求安全结束后保存部分结果。",
+      "停止当前任务",
+      { type: "warning", confirmButtonText: "停止并保存", cancelButtonText: "继续任务" }
+    );
+    await missions.stop();
+    ElMessage.success("停止请求已记录");
+  } catch (error) {
+    if (String(error).includes("cancel")) return;
+    ElMessage.error(String(error));
+  }
+}
+
+async function sendFollowUp() {
+  const content = followUp.value.trim();
+  if (!content) return;
+  followUpSending.value = true;
+  try {
+    await missions.sendMessage(content);
+    followUp.value = "";
+    ElMessage.success("追问已加入，下一个规划点会重新规划");
   } catch (error) {
     ElMessage.error(String(error));
   } finally {
-    profileSaving.value = false;
+    followUpSending.value = false;
   }
 }
 
-async function removeProfile(profile: AssessmentAuthProfile) {
+async function openResourceDialog() {
+  if (projectId.value === null) return;
+  resourceDialogVisible.value = true;
+  resourceLoading.value = true;
+  resourceForm.sourceId = null;
   try {
-    await ElMessageBox.confirm(
-      `删除身份“${profile.label}”及其系统凭据？`,
-      "删除身份",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
-    );
-    await assessment.removeProfile(profile.id);
-    if (form.identityAProfileId === profile.id) form.identityAProfileId = null;
-    if (form.identityBProfileId === profile.id) form.identityBProfileId = null;
+    [trafficResources.value, findingResources.value, runResources.value] = await Promise.all([
+      listTraffic(projectId.value, { limit: 100 }),
+      listFindings(projectId.value),
+      listAssessmentRuns(projectId.value),
+    ]);
   } catch (error) {
-    if (error === "cancel" || error === "close") return;
+    ElMessage.error(String(error));
+  } finally {
+    resourceLoading.value = false;
+  }
+}
+
+async function attachResource() {
+  if (resourceForm.sourceId === null) {
+    ElMessage.warning("请选择一个同项目资源");
+    return;
+  }
+  try {
+    await missions.attachResource(resourceForm.type, resourceForm.sourceId);
+    resourceDialogVisible.value = false;
+    contextDialogVisible.value = true;
+    ElMessage.success("资源摘要已冻结并加入上下文");
+  } catch (error) {
     ElMessage.error(String(error));
   }
 }
 
-async function openRunReport() {
-  const id = projectId.value;
-  const runId = selectedRun.value?.id;
-  if (id === null || runId === undefined) return;
+async function importOpenApi() {
+  try {
+    if (await missions.importOpenApi()) {
+      contextDialogVisible.value = true;
+      ElMessage.success("已导入有界 OpenAPI 结构摘要");
+    }
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function createIdentity() {
+  if (projectId.value === null || !identityForm.label.trim() || !identityForm.secret.trim()) {
+    ElMessage.warning("请填写身份名称和凭据值");
+    return;
+  }
+  identitySaving.value = true;
+  try {
+    await createAssessmentAuthProfile({
+      projectId: projectId.value,
+      label: identityForm.label.trim(),
+      headerName: identityForm.headerName,
+      secret: identityForm.secret,
+      sourceTrafficId: null,
+    });
+    identityForm.label = "";
+    identityForm.secret = "";
+    await missions.refresh(projectId.value);
+    identityDialogVisible.value = false;
+    ElMessage.success("身份已保存到系统凭据库");
+  } catch (error) {
+    ElMessage.error(String(error));
+  } finally {
+    identityForm.secret = "";
+    identitySaving.value = false;
+  }
+}
+
+async function updatePermission(toolId: string, decision: "disabled" | "ask" | "execute") {
+  try {
+    await missions.setPermission(toolId, decision);
+    if (missions.context?.requiresApproval) contextDialogVisible.value = true;
+    ElMessage.success("项目级工具权限已更新");
+  } catch (error) {
+    ElMessage.error(String(error));
+    await refresh();
+  }
+}
+
+function openActionDetails(action: AssessmentAction) {
+  selectedAction.value = action;
+  actionDrawerVisible.value = true;
+}
+
+function handoffFor(actionId: number) {
+  return detail.value?.handoffs.find((handoff) => handoff.actionId === actionId) ?? null;
+}
+
+async function createHandoff(action: AssessmentAction) {
+  try {
+    const handoff = await missions.createHandoff(action);
+    ElMessage.success("人工 Repeater 会话已创建并选中；草稿尚未发送");
+    selectedHandoff.value = handoff;
+    await router.push("/repeater");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+function openHandoffLink(handoff: AssessmentManualHandoff) {
+  selectedHandoff.value = handoff;
+  handoffReplayRunId.value = null;
+  handoffDialogVisible.value = true;
+}
+
+async function linkHandoff() {
+  if (!selectedHandoff.value || handoffReplayRunId.value === null) {
+    ElMessage.warning("请输入在该人工会话中发送得到的 ReplayRun ID");
+    return;
+  }
+  try {
+    await missions.linkHandoff(selectedHandoff.value.id, handoffReplayRunId.value);
+    handoffDialogVisible.value = false;
+    ElMessage.success("结果已回传为默认未接受的 Evidence");
+  } catch (error) {
+    ElMessage.error(String(error));
+  }
+}
+
+async function previewReport() {
+  if (!detail.value) return;
   reportVisible.value = true;
   reportLoading.value = true;
-  reportMarkdown.value = "";
   try {
-    reportMarkdown.value = await buildReport(id, runId);
+    reportMarkdown.value = await buildAssessmentMissionReport(
+      detail.value.mission.projectId,
+      detail.value.mission.id
+    );
   } catch (error) {
-    reportVisible.value = false;
-    ElMessage.error(String(error));
+    reportMarkdown.value = `报告生成失败：${String(error)}`;
   } finally {
     reportLoading.value = false;
   }
 }
 
-async function exportRunReport() {
-  const id = projectId.value;
-  const runId = selectedRun.value?.id;
-  if (id === null || runId === undefined) return;
+async function exportMissionReport() {
+  if (!detail.value) return;
   reportExporting.value = true;
   try {
-    const result = await exportReport(id, false, runId);
-    ElMessage.success(`报告已导出：${result.markdown_path}`);
+    const result = await exportAssessmentMissionReport(
+      detail.value.mission.projectId,
+      detail.value.mission.id
+    );
+    ElMessage.success(`Report v4 已导出：${result.markdown_path}`);
   } catch (error) {
     ElMessage.error(String(error));
   } finally {
@@ -480,1401 +506,553 @@ async function exportRunReport() {
   }
 }
 
-function checkFor(verification: AssessmentVerification): AssessmentCheck | null {
-  return checksById.value.get(verification.checkId) ?? null;
+function selectMission(missionId: number) {
+  creating.value = false;
+  void missions.selectMission(missionId).catch((error) => ElMessage.error(String(error)));
 }
 
-function checkLabel(verification: AssessmentVerification): string {
-  const check = checkFor(verification);
-  return check
-    ? TEMPLATE_LABEL[check.templateId] ?? check.templateId
-    : verification.verifierId;
-}
-
-function endpointLabel(verification: AssessmentVerification): string {
-  const check = checkFor(verification);
-  if (!check) return "未知端点";
-  const endpoint = detail.value?.endpoints.find(
-    (candidate) => candidate.id === check.endpointId
-  );
-  return endpoint?.path ?? check.requestedEndpointId;
-}
-
-function observationText(verification: AssessmentVerification): string {
-  try {
-    return JSON.stringify(verification.observations, null, 2);
-  } catch {
-    return String(verification.observations);
-  }
-}
-
-function formatDate(value: string | null | undefined): string {
+function formatTime(value: string | null | undefined) {
   if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : new Intl.DateTimeFormat("zh-CN", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      }).format(date);
+  const parsed = new Date(value.replace(" ", "T"));
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN", { hour12: false });
 }
 
-function shortHash(value: string): string {
-  return value.length > 18 ? `${value.slice(0, 12)}…${value.slice(-6)}` : value;
+function shortHash(value: string | null | undefined) {
+  return value ? `${value.slice(0, 10)}…${value.slice(-6)}` : "—";
 }
 
-function goFindings() {
-  void router.push("/findings");
+function pretty(value: unknown) {
+  return value === null || value === undefined ? "—" : JSON.stringify(value, null, 2);
+}
+
+function actionToolLabel(action: AssessmentAction) {
+  return missions.context?.tools.find((tool) => tool.id === action.toolId)?.displayName ?? action.toolId;
+}
+
+function workstreamTitle(workstreamId: number | null) {
+  return detail.value?.workstreams.find((item) => item.id === workstreamId)?.title ?? "未归类工作流";
+}
+
+function riskType(risk: string): TagType {
+  if (risk === "manual") return "danger";
+  if (risk === "guarded") return "warning";
+  if (risk === "low") return "primary";
+  return "info";
+}
+
+function resultLabel(action: AssessmentAction) {
+  if (action.status === "awaiting_approval") return "等待批准";
+  if (action.executionKind === "manual_recipe" && action.status === "queued") return "已批准 · 等待 AI 选择";
+  if (action.status === "manual_ready") return "等待人工发送";
+  if (action.status === "manual_result_pending") return "Evidence 待复核";
+  if (action.status === "completed") return "已完成";
+  if (action.status === "rejected") return "已拒绝 · 零请求";
+  return action.status;
 }
 </script>
 
 <template>
-  <div class="assessment-page rf-page rf-page--inset">
+  <div class="assessment-page">
     <PageHeader
       title="AI 安全评估"
-      description="在后端只读安全边界内自动发现、规划、执行和验证；AI 不能生成请求或漏洞结论。"
+      description="目标驱动地发现、规划、审批、验证并沉淀证据；AI 不能生成或发送任意请求。"
     >
-      <el-button v-if="project.current" :icon="Refresh" :loading="assessment.loading" @click="refresh">
-        刷新
-      </el-button>
-      <el-button
-        v-if="project.current && !assessment.isRunning && !composerVisible"
-        type="primary"
-        :icon="Plus"
-        @click="resetComposer"
-      >
-        新评估
-      </el-button>
+      <template v-if="project.current">
+        <el-button :icon="Refresh" circle aria-label="刷新任务" :loading="missions.loading" @click="refresh" />
+        <el-button class="inspector-trigger" :icon="Setting" @click="inspectorDrawerVisible = true">边界与覆盖</el-button>
+        <el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">新任务</el-button>
+      </template>
     </PageHeader>
 
-    <EmptyState
-      v-if="!project.current"
-      title="尚未选择项目"
-      description="请先创建或选择一个包含书面授权 Scope 的项目。"
-      centered
-    >
-      <template #icon><el-icon :size="22"><FolderOpened /></el-icon></template>
-    </EmptyState>
+    <div class="sr-live" aria-live="polite">{{ eventAnnouncement }}</div>
 
-    <template v-else>
-      <el-alert
-        class="safety-banner"
-        type="info"
-        :closable="false"
-        show-icon
-        title="强制安全边界：仅 GET / HEAD / OPTIONS、无正文、精确同源、单并发、不跟随重定向。"
-      />
+    <section v-if="!project.current" class="project-empty-shell">
+      <EmptyState
+        centered
+        title="先选择一个已授权项目"
+        description="任务必须绑定后端 Scope、AI Provider、身份凭据与书面授权。未选择项目时不会构造任何目标请求。"
+      >
+        <template #icon><FolderOpened :size="26" /></template>
+        <template #action>
+          <div class="project-actions">
+            <el-select v-model="emptyProjectChoice" placeholder="选择已有项目" aria-label="选择已有项目">
+              <el-option v-for="item in project.projects" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+            <el-button type="primary" :disabled="emptyProjectChoice === null" @click="selectEmptyProject">进入项目</el-button>
+            <el-button :icon="Plus" @click="createProjectVisible = true">创建项目</el-button>
+          </div>
+        </template>
+      </EmptyState>
+      <div class="readiness-grid" aria-label="开始评估前准备清单">
+        <div><CircleCheck /><strong>Scope</strong><span>由项目白名单和精确 origin 双重约束</span></div>
+        <div><Connection /><strong>AI Provider</strong><span>创建任务时由后端重新解析并绑定</span></div>
+        <div><Key /><strong>身份</strong><span>真实值只保存在系统凭据库，不进入上下文</span></div>
+        <div><Document /><strong>授权</strong><span>每个新任务都需要显式确认书面授权</span></div>
+      </div>
+    </section>
 
-      <div class="workspace">
-        <aside class="history-panel">
-          <div class="panel-heading">
-            <div>
-              <strong>运行历史</strong>
-              <span>中断与停止也保留部分结果</span>
-            </div>
-          </div>
-          <div v-if="assessment.runs.length" class="run-list">
-            <button
-              v-for="run in assessment.runs"
-              :key="run.id"
-              type="button"
-              class="run-row"
-              :class="{ active: !composerVisible && assessment.selectedRunId === run.id }"
-              @click="selectRun(run)"
-            >
-              <span class="run-row-top">
-                <strong>#{{ run.id }}</strong>
-                <el-tag size="small" :type="STATUS_TAG[run.status]" effect="plain">
-                  {{ STATUS_LABEL[run.status] }}
-                </el-tag>
-              </span>
-              <span class="run-origin">{{ run.exactOrigin }}</span>
-              <span class="run-meta">
-                {{ run.requestCount }}/{{ run.requestBudget }} 请求 · {{ formatDate(run.createdAt) }}
-              </span>
-            </button>
-          </div>
-          <div v-else class="history-empty">尚无评估记录</div>
-
-          <div v-if="assessment.profiles.length" class="identity-list">
-            <div class="identity-title">身份档案</div>
-            <div v-for="profile in assessment.profiles" :key="profile.id" class="identity-row">
-              <span>
-                <strong>{{ profile.label }}</strong>
-                <small>{{ profile.headerName }} · r{{ profile.secretRevision }}</small>
-              </span>
-              <button
-                type="button"
-                class="icon-action"
-                :aria-label="`删除身份 ${profile.label}`"
-                :disabled="assessment.isRunning"
-                @click="removeProfile(profile)"
-              >
-                <el-icon><Close /></el-icon>
-              </button>
-            </div>
-          </div>
-          <el-button
-            class="profile-button"
-            :icon="Key"
-            :disabled="assessment.isRunning"
-            @click="openProfileDialog"
+    <div v-else class="mission-layout">
+      <aside class="mission-sidebar" aria-label="评估任务历史">
+        <div class="sidebar-heading">
+          <div><small>{{ project.current.name }}</small><strong>任务历史</strong></div>
+          <el-button text :icon="Plus" aria-label="创建新任务" @click="resetComposer(); creating = true" />
+        </div>
+        <div class="mission-list">
+          <button
+            v-for="mission in missions.missions"
+            :key="mission.id"
+            type="button"
+            class="mission-item"
+            :class="{ active: mission.id === missions.selectedMissionId && !creating }"
+            @click="selectMission(mission.id)"
           >
-            添加身份
-          </el-button>
-        </aside>
+            <span class="mission-item-top">
+              <strong>{{ mission.title }}</strong>
+              <el-tag size="small" :type="STATUS_TAG[mission.status]">{{ STATUS_LABEL[mission.status] }}</el-tag>
+            </span>
+            <span class="mission-goal">{{ mission.goal }}</span>
+            <span class="mission-meta">
+              <span>#{{ mission.id }}{{ mission.legacy ? " · legacy" : "" }}</span>
+              <time>{{ formatTime(mission.updatedAt) }}</time>
+            </span>
+          </button>
+          <div v-if="missions.missions.length === 0" class="sidebar-empty">还没有任务</div>
+        </div>
 
-        <main class="main-panel" v-loading="assessment.loading">
-          <section v-if="composerVisible" class="composer-card">
-            <template v-if="composerStep === 'setup'">
-              <div class="card-head">
-                <span class="step-number">1</span>
-                <div>
-                  <h2>填写已授权目标</h2>
-                  <p>无需预先抓包。RustForge 从这个 URL 开始，只跟随页面中实际出现的同源链接。</p>
-                </div>
-              </div>
+        <div v-if="detail && !creating" class="workflow-list">
+          <header>逻辑工作流</header>
+          <div v-for="stream in detail.workstreams" :key="stream.id" class="workflow-row">
+            <span class="workflow-dot" :data-status="stream.status" />
+            <div><strong>{{ stream.title }}</strong><small>{{ stream.objective }}</small></div>
+          </div>
+          <div v-if="detail.workstreams.length === 0" class="sidebar-empty">
+            {{ detail.mission.legacy ? "旧运行不激活 task_nodes" : "确认上下文后生成工作流" }}
+          </div>
+        </div>
+      </aside>
 
-              <el-form label-position="top" class="contract-form" @submit.prevent="previewContract">
-                <el-form-item label="起始 URL" required>
-                  <el-input
-                    v-model="form.startUrl"
-                    size="large"
-                    placeholder="https://example.com/app"
-                    spellcheck="false"
-                    clearable
-                  />
-                  <div class="field-help">必须同时属于当前项目 Scope；最终只访问它的精确 scheme、host 和端口。</div>
-                </el-form-item>
+      <main class="mission-main">
+        <section v-if="creating" class="composer-card">
+          <header class="composer-heading">
+            <div><span class="eyebrow">NEW MISSION</span><h2>描述你想达成的安全目标</h2><p>后端会把目标分解为有界工作流，模型只能选择已注册工具与不透明 surface。</p></div>
+            <el-button v-if="missions.missions.length" text :icon="Close" @click="creating = false">取消</el-button>
+          </header>
+          <el-form label-position="top" class="mission-form">
+            <div class="form-grid two">
+              <el-form-item label="任务标题（可选）"><el-input v-model="createForm.title" maxlength="160" placeholder="例如：登录后订单接口授权边界" /></el-form-item>
+              <el-form-item label="起始 URL" required><el-input v-model="createForm.startUrl" placeholder="https://target.example/" /></el-form-item>
+            </div>
+            <el-form-item label="评估目标" required>
+              <el-input v-model="createForm.goal" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="说明业务区域、希望回答的问题和不希望触碰的边界。例：检查登录前后订单 API 的可见性、CORS 与只读授权边界，并为高风险输入点生成人工 Repeater 配方。" />
+            </el-form-item>
+            <div class="form-grid two">
+              <el-form-item label="身份 A">
+                <el-select v-model="createForm.identityAProfileId" clearable placeholder="匿名或选择身份 A">
+                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="身份 B">
+                <el-select v-model="createForm.identityBProfileId" clearable placeholder="可选，用于 A/B 只读比较">
+                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <el-button text :icon="Key" class="identity-link" @click="identityDialogVisible = true">新建系统凭据身份</el-button>
 
-                <el-collapse v-model="advancedOpen" class="advanced-collapse">
-                  <el-collapse-item name="advanced" title="高级选项（身份、排除路径与预算）">
-                    <div class="advanced-grid">
-                      <el-form-item label="身份 A（可选）">
-                        <el-select v-model="form.identityAProfileId" clearable placeholder="匿名评估">
-                          <el-option
-                            v-for="item in assessment.profiles"
-                            :key="item.id"
-                            :label="`${item.label} · ${item.headerName}`"
-                            :value="item.id"
-                          />
-                        </el-select>
-                      </el-form-item>
-                      <el-form-item label="身份 B（可选）">
-                        <el-select v-model="form.identityBProfileId" clearable placeholder="不做双身份比较">
-                          <el-option
-                            v-for="item in assessment.profiles"
-                            :key="item.id"
-                            :label="`${item.label} · ${item.headerName}`"
-                            :value="item.id"
-                            :disabled="item.id === form.identityAProfileId"
-                          />
-                        </el-select>
-                      </el-form-item>
-                    </div>
-
-                    <el-form-item label="仅属于身份 A 的资源路径（可选，每行一条）">
-                      <el-input
-                        v-model="form.ownershipPaths"
-                        type="textarea"
-                        :rows="2"
-                        placeholder="/account/orders/123"
-                      />
-                      <div class="field-help">没有明确归属声明时，双身份结果最多标为疑似，不会自动确认越权。</div>
-                    </el-form-item>
-
-                    <el-form-item label="额外排除路径（可选，每行一条）">
-                      <el-input
-                        v-model="form.excludedPaths"
-                        type="textarea"
-                        :rows="2"
-                        placeholder="/billing/&#10;/internal/archive/"
-                      />
-                      <div class="field-help">只能增加排除项；logout、delete、reset 等内置危险路径始终禁止。</div>
-                    </el-form-item>
-
-                    <div class="advanced-grid three">
-                      <el-form-item label="最大请求数">
-                        <el-input-number v-model="form.requestBudget" :min="1" :max="300" controls-position="right" />
-                      </el-form-item>
-                      <el-form-item label="每秒请求数">
-                        <el-input-number
-                          v-model="form.requestsPerSecond"
-                          :min="0.1"
-                          :max="2"
-                          :step="0.1"
-                          :precision="1"
-                          controls-position="right"
-                        />
-                      </el-form-item>
-                      <el-form-item label="TLS">
-                        <el-select v-model="form.tlsPolicy">
-                          <el-option label="严格校验证书（推荐）" value="strict" />
-                          <el-option label="忽略无效证书" value="ignore_invalid" />
-                        </el-select>
-                      </el-form-item>
-                    </div>
-                    <el-checkbox v-model="form.includeRecentTraffic">
-                      合并同 origin 最近的唯一 GET / HEAD Traffic 作为端点种子
-                    </el-checkbox>
-                  </el-collapse-item>
-                </el-collapse>
-
-                <div class="composer-actions">
-                  <span>下一步只生成契约预览，不会建立网络连接。</span>
-                  <el-button type="primary" size="large" :loading="previewing" @click="previewContract">
-                    预览运行契约
-                  </el-button>
-                </div>
-              </el-form>
-            </template>
-
-            <template v-else-if="preview">
-              <div class="card-head">
-                <span class="step-number">2</span>
-                <div>
-                  <h2>确认一次运行契约</h2>
-                  <p>开始时后端会重建并比对 hash；Scope、身份、AI 或模板版本变化都会拒绝运行。</p>
-                </div>
-              </div>
-
-              <div class="contract-summary">
-                <div class="summary-primary">
-                  <span>精确 origin</span>
-                  <strong>{{ preview.exactOrigin }}</strong>
-                </div>
-                <dl>
-                  <div><dt>允许动作</dt><dd>GET / HEAD / OPTIONS，无正文，不跟随重定向</dd></div>
-                  <div><dt>预算</dt><dd>最多 {{ preview.requestBudget }} 请求，{{ preview.requestsPerSecond }}/秒，并发 1</dd></div>
-                  <div><dt>发现预算</dt><dd>{{ preview.discoveryBudget }} 请求；其余保留给验证</dd></div>
-                  <div><dt>身份</dt><dd>A：{{ preview.identityALabel ?? "无" }}；B：{{ preview.identityBLabel ?? "无" }}</dd></div>
-                  <div><dt>AI</dt><dd>{{ preview.providerId }} / {{ preview.model }}，最多 {{ preview.maxRounds }} 轮</dd></div>
-                  <div><dt>AI 可见数据</dt><dd>{{ preview.dataDisclosure.join("、") }}</dd></div>
-                  <div><dt>模板注册表</dt><dd>{{ preview.templateRegistryVersion }} · {{ shortHash(preview.templateRegistryHash) }}</dd></div>
-                  <div><dt>契约 hash</dt><dd class="mono">{{ shortHash(preview.contractHash) }}</dd></div>
-                </dl>
-              </div>
-
-              <el-alert
-                type="warning"
-                :closable="false"
-                show-icon
-                :title="preview.residualRiskNotice"
-              />
-              <label class="authorization-check">
-                <el-checkbox v-model="authorizationConfirmed" />
-                <span>我确认已获得对该目标和 Scope 进行本次安全评估的书面授权，并理解上述残余风险。</span>
+            <label class="field-label">评估档位</label>
+            <div class="budget-options">
+              <label v-for="budget in BUDGETS" :key="budget.key" :class="{ selected: createForm.budgetProfile === budget.key }">
+                <input v-model="createForm.budgetProfile" type="radio" :value="budget.key" />
+                <strong>{{ budget.name }}</strong><span>{{ budget.requests }} 请求 · {{ budget.cycles }} 次规划</span><small>{{ budget.description }}</small>
               </label>
-              <div class="composer-actions">
-                <el-button @click="composerStep = 'setup'">返回修改</el-button>
-                <el-button
-                  type="primary"
-                  size="large"
-                  :disabled="!authorizationConfirmed"
-                  :loading="previewing || assessment.starting"
-                  @click="startRun"
-                >
-                  确认并开始评估
-                </el-button>
+            </div>
+
+            <div class="form-grid two compact-grid">
+              <el-form-item label="权限模式">
+                <el-radio-group v-model="createForm.autonomyMode">
+                  <el-radio-button value="manual">手动</el-radio-button>
+                  <el-radio-button value="smart">智能（默认）</el-radio-button>
+                  <el-radio-button value="automatic">自动</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
+              <el-form-item label="TLS 策略">
+                <el-select v-model="createForm.tlsPolicy"><el-option label="严格校验证书" value="strict" /><el-option label="忽略无效证书（靶场）" value="ignore_invalid" /></el-select>
+              </el-form-item>
+            </div>
+            <el-form-item label="额外排除路径">
+              <el-input v-model="createForm.excludedPaths" type="textarea" :rows="2" placeholder="每行一个路径；内置危险路径仍始终拒绝" />
+            </el-form-item>
+            <div class="composer-checks">
+              <el-checkbox v-model="createForm.includeRecentTraffic">把同项目近期 Traffic 作为只读发现种子</el-checkbox>
+              <el-checkbox v-model="createForm.writtenAuthorizationConfirmed">我确认已获得对该目标执行安全评估的书面授权</el-checkbox>
+            </div>
+            <el-alert type="info" :closable="false" show-icon title="人工配方永远不会自动发送；SQLi、SSRF、XSS 和业务逻辑差异必须由你在 Repeater 中亲自点击。" />
+            <footer class="composer-footer">
+              <span>硬上限始终为 2 RPS、单并发、精确 origin。</span>
+              <el-button type="primary" :icon="Aim" :loading="missions.mutating" @click="createMission">创建并预览上下文</el-button>
+            </footer>
+          </el-form>
+        </section>
+
+        <EmptyState v-else-if="!detail" centered title="选择或创建一个任务" description="任务历史、审批等待和旧版运行都会保存在当前项目中。">
+          <template #icon><Aim :size="26" /></template>
+          <template #action><el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">创建任务</el-button></template>
+        </EmptyState>
+
+        <template v-else>
+          <section class="mission-hero">
+            <div class="mission-title-row">
+              <div><span class="eyebrow">MISSION #{{ detail.mission.id }}</span><h2>{{ detail.mission.title }}</h2></div>
+              <el-tag :type="STATUS_TAG[detail.mission.status]">{{ STATUS_LABEL[detail.mission.status] }}</el-tag>
+            </div>
+            <p class="goal-copy">{{ detail.mission.goal }}</p>
+            <div class="mission-command-row">
+              <div class="mission-facts"><span>{{ detail.mission.exactOrigin }}</span><span>{{ detail.mission.autonomyMode }}</span><span>{{ detail.mission.budgetProfile }}</span></div>
+              <div class="mission-buttons">
+                <el-button :icon="Document" @click="previewReport">报告</el-button>
+                <el-button v-if="canStop" :icon="VideoPause" :loading="missions.mutating" @click="stopMission">停止</el-button>
+                <el-button v-if="!detail.mission.legacy" type="primary" :icon="VideoPlay" :disabled="!canStart" :loading="missions.mutating" @click="startMission">开始 / 恢复</el-button>
               </div>
-            </template>
+            </div>
+            <el-progress v-if="isActive" :percentage="Math.min(100, Math.round((detail.mission.requestCount / Math.max(1, detail.mission.requestBudget)) * 100))" :stroke-width="5" :show-text="false" />
           </section>
 
-          <template v-else-if="selectedRun">
-            <section class="run-header-card">
-              <div class="run-title-row">
-                <div>
-                  <span class="eyebrow">评估 #{{ selectedRun.id }}</span>
-                  <h2>{{ selectedRun.exactOrigin }}</h2>
-                  <p>{{ selectedRun.startUrl }}</p>
-                </div>
-                <div class="run-actions">
-                  <el-tag :type="STATUS_TAG[selectedRun.status]" effect="dark">
-                    {{ STATUS_LABEL[selectedRun.status] }}
-                  </el-tag>
-                  <el-button
-                    v-if="selectedIsActive"
-                    type="danger"
-                    plain
-                    :loading="assessment.cancelling"
-                    @click="cancelRun"
-                  >停止</el-button>
-                  <template v-else>
-                    <el-button :icon="Document" @click="openRunReport">报告</el-button>
-                    <el-button type="primary" :icon="Plus" :disabled="assessment.isRunning" @click="resetComposer">
-                      新评估
-                    </el-button>
-                  </template>
-                </div>
+          <el-alert v-if="detail.mission.legacy" class="mission-alert" type="info" :closable="false" show-icon title="这是旧版 Phase 6 运行：仅支持只读查看与 legacy 报告，不会重新激活旧 task_nodes。" />
+          <section v-else-if="missions.context?.requiresApproval" class="approval-banner">
+            <div><Warning /><span><strong>需要确认 AI 上下文</strong><small>首次调用、附件或工具权限变化后，模型不会在确认前收到上下文。</small></span></div>
+            <el-button type="warning" @click="contextDialogVisible = true">查看披露清单并确认</el-button>
+          </section>
+
+          <section class="conversation" aria-label="任务对话与事件">
+            <article v-for="message in detail.messages" :key="message.id" class="message" :data-role="message.role">
+              <div class="message-avatar">{{ message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "RF" }}</div>
+              <div class="message-body"><header><strong>{{ message.messageKind === "goal" ? "任务目标" : message.messageKind === "follow_up" ? "中途引导" : "系统记录" }}</strong><time>{{ formatTime(message.createdAt) }}</time></header><p>{{ message.content }}</p><small v-if="message.redactionManifest.length">已脱敏：{{ message.redactionManifest.join("、") }}</small></div>
+            </article>
+          </section>
+
+          <section v-if="!detail.mission.legacy" class="action-timeline" aria-label="可信工具动作">
+            <header class="timeline-heading"><div><span class="eyebrow">TRUSTED ACTIONS</span><h3>计划与动作</h3></div><span>{{ detail.actions.length }} 个动作 · {{ missions.pendingActions.length }} 个待审批</span></header>
+            <article v-for="action in detail.actions" :key="action.id" class="action-card" :class="{ pending: action.approvalStatus === 'pending', manual: action.executionKind === 'manual_recipe' }">
+              <header class="action-header">
+                <div class="action-name"><span class="action-index">{{ action.id }}</span><div><strong>{{ actionToolLabel(action) }}</strong><small>{{ workstreamTitle(action.workstreamId) }} · {{ action.toolId }}@{{ action.toolVersion }}</small></div></div>
+                <div class="action-tags"><el-tag size="small" :type="riskType(action.riskLevel)">{{ action.riskLevel }}</el-tag><el-tag size="small" type="info">{{ resultLabel(action) }}</el-tag></div>
+              </header>
+              <div class="action-explanation">
+                <div><small>为什么执行</small><p>{{ action.rationale }}</p></div>
+                <div><small>预期观察</small><p>{{ action.expectedSignal || "等待确定性执行器记录预期信号" }}</p></div>
               </div>
-
-              <div class="phase-strip" role="list" aria-label="评估阶段">
-                <div
-                  v-for="(phase, index) in PHASES"
-                  :key="phase.key"
-                  class="phase-item"
-                  :class="{
-                    done: index < currentPhaseIndex || selectedRun.status === 'completed',
-                    active: index === currentPhaseIndex && selectedRun.status !== 'completed',
-                  }"
-                  role="listitem"
-                >
-                  <span>{{ index + 1 }}</span>
-                  <strong>{{ phase.label }}</strong>
+              <div class="action-meta"><span>后端工具：{{ action.toolId }}</span><span>批准方式：{{ action.approvalSource || action.permissionSnapshot }}</span><span>身份：{{ action.identityMode }}</span><span>成本：{{ action.requestCost }} 请求</span></div>
+              <el-alert v-if="action.executionKind === 'manual_recipe'" type="warning" :closable="false" show-icon title="仅生成 Repeater 差异草稿；评估引擎不能自动发送。" />
+              <footer class="action-footer">
+                <el-button text :icon="View" @click="openActionDetails(action)">技术详情</el-button>
+                <div v-if="action.approvalStatus === 'pending'" class="approval-buttons">
+                  <el-button :loading="missions.mutating" @click="decide(action, false)">拒绝</el-button>
+                  <el-button :loading="missions.mutating" @click="decide(action, true, true)">批准同工具</el-button>
+                  <el-button type="primary" :loading="missions.mutating" @click="decide(action, true)">批准本动作</el-button>
                 </div>
-              </div>
-
-              <div class="runtime-metrics">
-                <div>
-                  <span>目标请求</span>
-                  <strong>{{ selectedRun.requestCount }} / {{ selectedRun.requestBudget }}</strong>
-                  <el-progress :percentage="requestPercentage" :stroke-width="5" :show-text="false" />
+                <div v-else-if="action.executionKind === 'manual_recipe' && ['manual_ready', 'manual_result_pending'].includes(action.status)" class="approval-buttons">
+                  <el-button v-if="!handoffFor(action.id)" type="warning" @click="createHandoff(action)">创建 Repeater 草稿</el-button>
+                  <template v-else><el-tag type="warning">会话 #{{ handoffFor(action.id)?.replaySessionId }} · 尚需用户点击发送</el-tag><el-button v-if="handoffFor(action.id)?.status !== 'result_linked'" @click="openHandoffLink(handoffFor(action.id)!)">回传 ReplayRun</el-button></template>
                 </div>
-                <div><span>响应读取</span><strong>{{ (selectedRun.responseBytesRead / 1024 / 1024).toFixed(2) }} / {{ (selectedRun.responseByteBudget / 1024 / 1024).toFixed(2) }} MiB</strong></div>
-                <div><span>AI 轮次</span><strong>{{ selectedRun.completedRounds }} / {{ selectedRun.maxRounds }}</strong></div>
-                <div><span>端点</span><strong>{{ detail?.endpoints.length ?? 0 }}</strong></div>
-              </div>
+              </footer>
+            </article>
+            <div v-if="detail.actions.length === 0" class="timeline-empty">确认上下文后，工具动作会在这里显示理由、预期信号、风险与审批方式。</div>
+          </section>
 
-              <div v-if="selectedIsActive" class="live-progress" aria-live="polite">
-                <span class="live-dot" />
-                <div>
-                  <strong>{{ assessment.progress?.message ?? "后台运行中" }}</strong>
-                  <span>已验证 {{ assessment.progress?.completedChecks ?? detail?.verifications.length ?? 0 }} / {{ assessment.progress?.totalChecks ?? detail?.checks.length ?? 0 }} 项</span>
-                </div>
-              </div>
-              <el-alert
-                v-else-if="selectedRun.stopReason"
-                :type="selectedRun.status === 'failed' ? 'error' : 'warning'"
-                :closable="false"
-                show-icon
-                :title="selectedRun.stopReason"
-              />
-            </section>
+          <section v-if="!detail.mission.legacy && !TERMINAL_STATUSES.has(detail.mission.status)" class="followup-box">
+            <ChatDotRound />
+            <el-input v-model="followUp" type="textarea" :autosize="{ minRows: 1, maxRows: 4 }" maxlength="2000" placeholder="中途调整目标或追问；当前单个请求先安全结束，下一规划点重新规划。" @keydown.ctrl.enter.prevent="sendFollowUp" />
+            <el-button type="primary" :loading="followUpSending" :disabled="!followUp.trim()" @click="sendFollowUp">发送</el-button>
+          </section>
+        </template>
+      </main>
 
-            <section v-if="!selectedIsActive || (detail?.verifications.length ?? 0) > 0" class="results-grid">
-              <article class="result-column confirmed-column">
-                <header>
-                  <span class="result-icon"><el-icon><CircleCheck /></el-icon></span>
-                  <div><h3>已确认漏洞</h3><p>安全验证器已满足版本化证据阈值</p></div>
-                  <strong>{{ confirmed.length }}</strong>
-                </header>
-                <div v-if="confirmed.length" class="result-list">
-                  <button v-for="item in confirmed" :key="item.id" type="button" class="result-card" @click="goFindings">
-                    <span class="result-card-title">{{ checkLabel(item) }}</span>
-                    <span class="result-target">{{ endpointLabel(item) }}</span>
-                    <small>Finding #{{ item.findingId }} · {{ item.verifierId }}@{{ item.verifierVersion }}</small>
-                    <pre>{{ observationText(item) }}</pre>
-                  </button>
-                </div>
-                <p v-else class="result-empty">本轮没有满足自动确认阈值的漏洞。</p>
-              </article>
-
-              <article class="result-column suspected-column">
-                <header>
-                  <span class="result-icon"><el-icon><Warning /></el-icon></span>
-                  <div><h3>疑似漏洞</h3><p>存在迹象，但非破坏式证据不足</p></div>
-                  <strong>{{ suspected.length }}</strong>
-                </header>
-                <div v-if="suspected.length" class="result-list">
-                  <button v-for="item in suspected" :key="item.id" type="button" class="result-card" @click="goFindings">
-                    <span class="result-card-title">{{ checkLabel(item) }}</span>
-                    <span class="result-target">{{ endpointLabel(item) }}</span>
-                    <small>{{ item.verifierId }}@{{ item.verifierVersion }}</small>
-                    <pre>{{ observationText(item) }}</pre>
-                  </button>
-                </div>
-                <p v-else class="result-empty">没有仅停留在疑似层级的验证结果。</p>
-              </article>
-
-              <article class="result-column neutral-column">
-                <header>
-                  <span class="result-icon"><el-icon><Aim /></el-icon></span>
-                  <div><h3>未观察到</h3><p>本轮已执行，但验证器未命中</p></div>
-                  <strong>{{ notObserved.length }}</strong>
-                </header>
-                <div v-if="notObserved.length" class="result-list">
-                  <div v-for="item in notObserved" :key="item.id" class="result-card">
-                    <span class="result-card-title">{{ checkLabel(item) }}</span>
-                    <span class="result-target">{{ endpointLabel(item) }}</span>
-                    <small>{{ item.verifierId }}@{{ item.verifierVersion }}</small>
-                  </div>
-                </div>
-                <p v-else class="result-empty">尚无完整执行且未命中的检查。</p>
-              </article>
-
-              <article class="result-column gap-column">
-                <header>
-                  <span class="result-icon"><el-icon><Close /></el-icon></span>
-                  <div><h3>覆盖缺口</h3><p>安全边界、预算或上下文限制</p></div>
-                  <strong>{{ (detail?.coverageGaps.length ?? 0) + inconclusive.length }}</strong>
-                </header>
-                <div v-if="(detail?.coverageGaps.length ?? 0) || inconclusive.length" class="result-list">
-                  <div v-for="gap in detail?.coverageGaps ?? []" :key="`gap-${gap.id}`" class="result-card">
-                    <span class="result-card-title">{{ gap.category }}</span>
-                    <span class="result-target">{{ gap.reasonCode }}</span>
-                    <small>{{ gap.detail }}</small>
-                  </div>
-                  <div v-for="item in inconclusive" :key="`verification-${item.id}`" class="result-card">
-                    <span class="result-card-title">{{ checkLabel(item) }}</span>
-                    <span class="result-target">{{ item.verdict }}</span>
-                    <small>{{ endpointLabel(item) }}</small>
-                  </div>
-                </div>
-                <p v-else class="result-empty">没有额外覆盖缺口。</p>
-              </article>
-            </section>
-
-            <section class="audit-card">
-              <div class="panel-heading">
-                <div><strong>运行审计</strong><span>事件、契约与验证结果均来自持久化数据</span></div>
-              </div>
-              <div class="audit-layout">
-                <dl class="audit-facts">
-                  <div><dt>契约</dt><dd class="mono">{{ shortHash(selectedRun.contractHash) }}</dd></div>
-                  <div><dt>模板注册表</dt><dd class="mono">{{ shortHash(selectedRun.templateRegistryHash) }}</dd></div>
-                  <div><dt>AI</dt><dd>{{ selectedRun.providerId }} / {{ selectedRun.model }}</dd></div>
-                  <div><dt>TLS</dt><dd>{{ selectedRun.tlsPolicy }}</dd></div>
-                  <div><dt>开始</dt><dd>{{ formatDate(selectedRun.startedAt ?? selectedRun.createdAt) }}</dd></div>
-                  <div><dt>结束</dt><dd>{{ formatDate(selectedRun.endedAt) }}</dd></div>
-                </dl>
-                <div class="event-list">
-                  <div v-for="event in (detail?.events ?? []).slice().reverse().slice(0, 12)" :key="event.id" class="event-row">
-                    <span />
-                    <div><strong>{{ event.eventType }}</strong><small>{{ event.oldValue ?? "—" }} → {{ event.newValue ?? "—" }} · {{ formatDate(event.createdAt) }}</small></div>
-                  </div>
-                  <p v-if="!detail?.events.length" class="result-empty">暂无审计事件。</p>
-                </div>
-              </div>
-            </section>
-          </template>
-
-          <EmptyState
-            v-else
-            title="开始第一次 AI 安全评估"
-            description="填写一个已授权起始 URL；不需要先抓取流量，也不需要手写测试计划。"
-            action-label="配置评估"
-            centered
-            @action="resetComposer"
-          >
-            <template #icon><el-icon :size="22"><Aim /></el-icon></template>
-          </EmptyState>
-        </main>
-      </div>
-    </template>
-
-    <el-dialog v-model="profileDialogVisible" title="添加评估身份" width="540px" destroy-on-close>
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        title="秘密值只写入系统凭据库；界面、SQLite、AI 上下文、事件和报告只使用身份占位符。"
+      <MissionInspector
+        v-if="detail && !creating"
+        class="mission-inspector desktop-inspector"
+        :project="project.current"
+        :detail="detail"
+        :context="missions.context"
+        :profiles="missions.profiles"
+        :disabled="missions.mutating || detail.mission.legacy"
+        @open-context="contextDialogVisible = true"
+        @open-resource="openResourceDialog"
+        @import-open-api="importOpenApi"
+        @open-identity="identityDialogVisible = true"
+        @update-permission="updatePermission"
       />
-      <el-form label-position="top" class="profile-form">
-        <el-form-item label="来源">
-          <el-segmented v-model="profileForm.mode" :options="[{ label: '粘贴 Header', value: 'paste' }, { label: '从 Traffic 提取', value: 'traffic' }]" />
-        </el-form-item>
-        <div class="advanced-grid">
-          <el-form-item label="身份标签" required>
-            <el-input v-model="profileForm.label" placeholder="例如：普通用户 A" maxlength="80" />
-          </el-form-item>
-          <el-form-item label="鉴权 Header" required>
-            <el-select v-model="profileForm.headerName">
-              <el-option label="Authorization" value="Authorization" />
-              <el-option label="Cookie" value="Cookie" />
-              <el-option label="X-API-Key" value="X-API-Key" />
-              <el-option label="X-Auth-Token" value="X-Auth-Token" />
-            </el-select>
-          </el-form-item>
-        </div>
-        <el-form-item v-if="profileForm.mode === 'paste'" label="Header 值" required>
-          <el-input
-            v-model="profileForm.secret"
-            type="password"
-            show-password
-            autocomplete="new-password"
-            placeholder="只粘贴值，不包含 Header 名称"
-          />
-        </el-form-item>
-        <el-form-item v-else label="候选请求" required>
-          <template #label>
-            <span class="candidate-label">
-              候选请求
-              <el-tooltip content="重新扫描近期流量" placement="top">
-                <el-button
-                  class="candidate-refresh"
-                  text
-                  :icon="Refresh"
-                  :loading="assessment.authCandidatesLoading"
-                  :aria-label="`重新扫描 ${profileForm.headerName} 候选`"
-                  @click.stop="refreshAuthCandidates"
-                />
-              </el-tooltip>
-            </span>
-          </template>
-          <template v-if="!profileTrafficManual">
-            <div v-if="assessment.authCandidatesLoading" class="candidate-hint">
-              正在扫描近期流量…
-            </div>
-            <el-alert
-              v-else-if="assessment.authCandidatesError"
-              type="error"
-              :closable="false"
-              show-icon
-              class="candidate-error"
-              :title="`候选扫描失败：${assessment.authCandidatesError}`"
-            />
-            <el-radio-group
-              v-else-if="assessment.authCandidates.length"
-              v-model="profileForm.trafficId"
-              class="candidate-list"
-            >
-              <el-radio
-                v-for="candidate in assessment.authCandidates"
-                :key="candidate.trafficId"
-                :value="candidate.trafficId"
-                class="candidate-row"
-                border
-              >
-                <span class="candidate-method">{{ candidate.method }}</span>
-                <span class="candidate-url">{{ candidate.url }}</span>
-                <span class="candidate-meta">
-                  {{ candidate.status ?? "—" }} · {{ formatDate(candidate.createdAt) }}
-                </span>
-              </el-radio>
-            </el-radio-group>
-            <el-empty
-              v-else
-              description="近期流量中没有包含该 Header 的请求"
-              :image-size="56"
-            />
-          </template>
-          <el-input-number
-            v-else
-            v-model="profileForm.trafficId"
-            :min="1"
-            :precision="0"
-            controls-position="right"
-            class="candidate-manual"
-          />
-          <div class="field-help">
-            只读取所选请求的这一项 Header，不会复用其他 Header 或正文；若列表为空，可先在抓包页产生该 Header 的流量后刷新。
-          </div>
-          <el-button
-            v-if="profileForm.mode === 'traffic'"
-            text
-            type="primary"
-            class="candidate-toggle"
-            @click="toggleTrafficManual"
-          >
-            {{ profileTrafficManual ? "返回候选列表" : "手动输入 Traffic ID" }}
-          </el-button>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="profileDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="profileSaving" @click="saveProfile">保存到系统凭据库</el-button>
+    </div>
+
+    <el-drawer v-model="inspectorDrawerVisible" title="边界、资源与覆盖" direction="rtl" size="380px">
+      <MissionInspector
+        v-if="detail && project.current"
+        :project="project.current"
+        :detail="detail"
+        :context="missions.context"
+        :profiles="missions.profiles"
+        :disabled="missions.mutating || detail.mission.legacy"
+        @open-context="contextDialogVisible = true"
+        @open-resource="openResourceDialog"
+        @import-open-api="importOpenApi"
+        @open-identity="identityDialogVisible = true"
+        @update-permission="updatePermission"
+      />
+    </el-drawer>
+
+    <el-dialog v-model="contextDialogVisible" title="最终 AI 上下文与披露清单" width="min(820px, 92vw)" destroy-on-close>
+      <template v-if="missions.context">
+        <el-alert :type="missions.context.approved ? 'success' : 'warning'" :closable="false" show-icon :title="missions.context.approved ? '当前上下文已确认' : '确认前不会调用模型'" />
+        <div class="context-manifest"><strong>披露数据类别</strong><div><el-tag v-for="item in missions.context.disclosureManifest" :key="item" size="small">{{ item }}</el-tag></div></div>
+        <details class="context-details" open><summary>脱敏结构摘要</summary><pre>{{ contextJson }}</pre></details>
+        <div class="hash-grid"><span>context <code>{{ shortHash(missions.context.contextHash) }}</code></span><span>contract <code>{{ shortHash(missions.context.contractHash) }}</code></span><span>registry <code>{{ shortHash(missions.context.toolRegistryHash) }}</code></span><span>permission <code>{{ shortHash(missions.context.permissionHash) }}</code></span></div>
       </template>
+      <el-empty v-else description="旧运行没有 v2 AI 上下文" />
+      <template #footer><el-button @click="contextDialogVisible = false">关闭</el-button><el-button v-if="missions.context?.requiresApproval" type="primary" :loading="missions.mutating" @click="confirmContext">确认上下文并生成动作</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="reportVisible" title="本次评估报告" width="min(940px, 92vw)" top="5vh">
-      <div v-loading="reportLoading" class="report-preview" v-html="md.render(reportMarkdown)" />
-      <template #footer>
-        <el-button @click="reportVisible = false">关闭</el-button>
-        <el-button type="primary" :icon="Document" :loading="reportExporting" @click="exportRunReport">
-          导出 Markdown + JSON
-        </el-button>
-      </template>
+    <el-dialog v-model="resourceDialogVisible" title="附加同项目资源" width="620px">
+      <el-form label-position="top" v-loading="resourceLoading">
+        <el-form-item label="资源类型"><el-radio-group v-model="resourceForm.type" @change="resourceForm.sourceId = null"><el-radio-button value="traffic">Traffic</el-radio-button><el-radio-button value="finding">Finding</el-radio-button><el-radio-button value="assessment_run">历史评估</el-radio-button></el-radio-group></el-form-item>
+        <el-form-item label="资源" required>
+          <el-select v-if="resourceForm.type === 'traffic'" v-model="resourceForm.sourceId" filterable placeholder="选择最近 Traffic"><el-option v-for="item in trafficResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.method} ${item.path} · ${item.status ?? '—'}`" /></el-select>
+          <el-select v-else-if="resourceForm.type === 'finding'" v-model="resourceForm.sourceId" filterable placeholder="选择 Finding"><el-option v-for="item in findingResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.title} · ${item.status}`" /></el-select>
+          <el-select v-else v-model="resourceForm.sourceId" filterable placeholder="选择历史运行"><el-option v-for="item in runResources" :key="item.id" :value="item.id" :label="`Run #${item.id} · ${item.status} · ${item.startUrl}`" /></el-select>
+        </el-form-item>
+        <el-alert type="info" :closable="false" title="只保存不可变脱敏摘要与 hash；资源必须属于当前项目。" />
+      </el-form>
+      <template #footer><el-button @click="resourceDialogVisible = false">取消</el-button><el-button type="primary" :loading="missions.mutating" @click="attachResource">附加并重新预览</el-button></template>
     </el-dialog>
+
+    <el-dialog v-model="identityDialogVisible" title="新建评估身份" width="520px" destroy-on-close>
+      <el-alert type="warning" :closable="false" title="凭据真实值只写入系统凭据库，不进入 SQLite、事件、报告或 AI 上下文。" />
+      <el-form label-position="top" class="identity-form"><el-form-item label="名称" required><el-input v-model="identityForm.label" maxlength="80" placeholder="例如：普通用户 A" /></el-form-item><el-form-item label="Header"><el-select v-model="identityForm.headerName"><el-option label="Authorization" value="Authorization" /><el-option label="Cookie" value="Cookie" /><el-option label="X-API-Key" value="X-API-Key" /><el-option label="X-Auth-Token" value="X-Auth-Token" /></el-select></el-form-item><el-form-item label="凭据值" required><el-input v-model="identityForm.secret" type="password" show-password autocomplete="off" /></el-form-item></el-form>
+      <template #footer><el-button @click="identityDialogVisible = false; identityForm.secret = ''">取消</el-button><el-button type="primary" :loading="identitySaving" @click="createIdentity">保存到系统凭据库</el-button></template>
+    </el-dialog>
+
+    <el-drawer v-model="actionDrawerVisible" title="动作技术详情" size="min(620px, 92vw)">
+      <template v-if="selectedAction">
+        <el-descriptions :column="1" border><el-descriptions-item label="工具">{{ selectedAction.toolId }}@{{ selectedAction.toolVersion }}</el-descriptions-item><el-descriptions-item label="surface">{{ selectedAction.surfaceId ?? "由后端在发现后绑定" }}</el-descriptions-item><el-descriptions-item label="风险 / 权限">{{ selectedAction.riskLevel }} / {{ selectedAction.permissionSnapshot }} / {{ selectedAction.approvalSource }}</el-descriptions-item><el-descriptions-item label="策略结果">{{ selectedAction.policyReason || selectedAction.status }}</el-descriptions-item><el-descriptions-item label="request hash">{{ selectedAction.requestHash ?? "—" }}</el-descriptions-item><el-descriptions-item label="response hash">{{ selectedAction.responseHash ?? "—" }}</el-descriptions-item><el-descriptions-item label="result hash">{{ selectedAction.resultHash ?? "—" }}</el-descriptions-item></el-descriptions>
+        <section class="technical-block"><h4>参数（仅已有参数名与身份模式）</h4><pre>{{ pretty(selectedAction.parameters) }}</pre></section>
+        <section class="technical-block"><h4>脱敏请求</h4><pre>{{ pretty(selectedAction.redactedRequest) }}</pre></section>
+        <section class="technical-block"><h4>脱敏响应 / Replay 关联结果</h4><pre>{{ pretty(selectedAction.redactedResponse) }}</pre></section>
+        <section class="technical-block"><h4>确定性结果</h4><pre>{{ pretty(selectedAction.result) }}</pre></section>
+      </template>
+    </el-drawer>
+
+    <el-dialog v-model="handoffDialogVisible" title="回传人工 ReplayRun" width="520px"><el-alert type="warning" :closable="false" show-icon title="只接受同项目、同 handoff 人工会话的 ReplayRun；Evidence 默认未接受且不会自动确认 Finding。" /><el-form label-position="top"><el-form-item label="ReplayRun ID" required><el-input-number v-model="handoffReplayRunId" :min="1" :step="1" controls-position="right" /></el-form-item></el-form><template #footer><el-button @click="handoffDialogVisible = false">取消</el-button><el-button type="primary" :loading="missions.mutating" @click="linkHandoff">回传为待复核 Evidence</el-button></template></el-dialog>
+
+    <el-dialog v-model="reportVisible" title="证据化报告 · Schema v4" width="min(900px, 94vw)"><div v-loading="reportLoading" class="report-preview"><pre>{{ reportMarkdown }}</pre></div><template #footer><el-button @click="reportVisible = false">关闭</el-button><el-button type="primary" :loading="reportExporting" @click="exportMissionReport">导出 Markdown + JSON</el-button></template></el-dialog>
+    <ProjectCreateDialog v-model="createProjectVisible" />
   </div>
 </template>
 
 <style scoped>
 .assessment-page {
+  display: flex;
+  height: 100%;
   min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 18px;
+  overflow: hidden;
+  background: var(--rf-bg-base);
 }
 
-.safety-banner {
-  flex-shrink: 0;
+.sr-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
-.workspace {
-  flex: 1;
-  min-height: 0;
+.project-empty-shell {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: var(--rf-space-3);
+  min-height: 0;
+  flex: 1;
+  grid-template-rows: minmax(300px, 1fr) auto;
+  gap: 14px;
 }
 
-.history-panel,
-.main-panel,
-.composer-card,
-.run-header-card,
-.result-column,
-.audit-card {
+.project-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.project-actions :deep(.el-select) { width: 230px; }
+.project-actions :deep(.el-button + .el-button) { margin-left: 0; }
+
+.readiness-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.readiness-grid > div {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 2px 8px;
+  padding: 13px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-panel);
+}
+.readiness-grid svg { grid-row: 1 / 3; width: 20px; color: var(--rf-accent); }
+.readiness-grid strong { color: var(--rf-text); font-size: 12px; }
+.readiness-grid span { color: var(--rf-text-muted); font-size: 10.5px; line-height: 1.4; }
+
+.mission-layout {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: 250px minmax(430px, 1fr) 310px;
+  overflow: hidden;
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-shell);
   background: var(--rf-bg-panel);
-}
-
-.history-panel {
-  min-height: 0;
-  padding: var(--rf-space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-3);
-  overflow: auto;
-}
-
-.main-panel {
-  min-width: 0;
-  min-height: 0;
-  padding: var(--rf-space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-3);
-  overflow: auto;
-  background: color-mix(in srgb, var(--rf-bg-panel) 72%, var(--rf-bg-base));
-}
-
-.panel-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.panel-heading > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.panel-heading strong,
-.identity-title {
-  font-size: 12.5px;
-  color: var(--rf-text);
-}
-
-.panel-heading span {
-  font-size: 11px;
-  color: var(--rf-text-muted);
-}
-
-.run-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.run-row {
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.run-row:hover {
-  background: var(--rf-bg-hover);
-}
-
-.run-row.active {
-  border-color: var(--rf-accent);
-  background: var(--rf-accent-muted);
-}
-
-.run-row-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.run-row-top strong {
-  font-size: 12px;
-}
-
-.run-origin {
-  font-size: 11.5px;
-  color: var(--rf-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-meta,
-.history-empty {
-  font-size: 10.5px;
-  color: var(--rf-text-muted);
-}
-
-.history-empty {
-  padding: 24px 8px;
-  text-align: center;
-  border: 1px dashed var(--rf-border);
-  border-radius: 10px;
-}
-
-.identity-list {
-  padding-top: var(--rf-space-2);
-  border-top: 1px solid var(--rf-border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.identity-title {
-  margin-bottom: 2px;
-}
-
-.identity-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  background: var(--rf-bg-raised);
-}
-
-.identity-row > span {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.identity-row strong {
-  font-size: 11.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.identity-row small {
-  font-size: 10px;
-  color: var(--rf-text-muted);
-}
-
-.icon-action {
-  border: 0;
-  background: transparent;
-  color: var(--rf-text-muted);
-  cursor: pointer;
-  padding: 3px;
-}
-
-.icon-action:hover:not(:disabled) {
-  color: var(--rf-danger);
-}
-
-.profile-button {
-  width: 100%;
-  margin-top: auto;
-}
-
-.candidate-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.candidate-refresh {
-  padding: 0;
-  margin: 0;
-}
-
-.candidate-hint {
-  padding: 10px 0;
-  font-size: 12px;
-  color: var(--rf-text-muted);
-}
-
-.candidate-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 100%;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.candidate-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: auto;
-  margin-right: 0;
-  padding: 7px 10px;
-}
-
-/* Element Plus 的 el-radio 内部 label 默认是 inline 布局；这里把插槽内容
-   变成 flex 容器，长 URL 才能用 ellipsis 收进一行而不是溢出对话框。 */
-.candidate-row :deep(.el-radio__label) {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  white-space: nowrap;
-}
-
-.candidate-method {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 600;
-  font-family: var(--rf-mono, ui-monospace, monospace);
-  color: var(--rf-accent, var(--el-color-primary));
-}
-
-.candidate-url {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.candidate-meta {
-  flex-shrink: 0;
-  font-size: 10.5px;
-  color: var(--rf-text-muted);
-}
-
-.candidate-error {
-  margin-bottom: 6px;
-}
-
-.candidate-manual {
-  width: 100%;
-}
-
-.candidate-toggle {
-  padding: 0;
-  margin-top: 2px;
-  font-size: 12px;
-}
-
-.composer-card {
-  width: min(780px, 100%);
-  margin: auto;
-  padding: clamp(22px, 4vw, 36px);
-}
-
-.card-head {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-  margin-bottom: 24px;
-}
-
-.step-number {
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--rf-accent);
-  color: var(--rf-accent-on);
-  font-weight: 750;
-}
-
-.card-head h2,
-.run-title-row h2 {
-  margin: 0;
-  font-size: 19px;
-  color: var(--rf-text);
-}
-
-.card-head p,
-.run-title-row p {
-  margin: 4px 0 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--rf-text-secondary);
-}
-
-.contract-form,
-.profile-form {
-  display: flex;
-  flex-direction: column;
-}
-
-.field-help {
-  margin-top: 5px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--rf-text-muted);
-}
-
-.advanced-collapse {
-  margin: 2px 0 18px;
-  border-color: var(--rf-border);
-}
-
-.advanced-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 var(--rf-space-3);
-}
-
-.advanced-grid.three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.advanced-grid :deep(.el-select),
-.advanced-grid :deep(.el-input-number) {
-  width: 100%;
-}
-
-.composer-actions {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: var(--rf-space-2);
-  margin-top: 18px;
-}
-
-.composer-actions > span {
-  margin-right: auto;
-  font-size: 11px;
-  color: var(--rf-text-muted);
-}
-
-.contract-summary {
-  border: 1px solid var(--rf-border);
-  border-radius: 12px;
-  overflow: hidden;
-  margin-bottom: var(--rf-space-3);
-}
-
-.summary-primary {
-  padding: 15px 17px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: var(--rf-accent-muted);
-}
-
-.summary-primary span,
-.contract-summary dt {
-  font-size: 10.5px;
-  color: var(--rf-text-muted);
-}
-
-.summary-primary strong {
-  font-size: 16px;
-  word-break: break-all;
-}
-
-.contract-summary dl,
-.audit-facts {
-  margin: 0;
-}
-
-.contract-summary dl > div,
-.audit-facts > div {
-  display: grid;
-  grid-template-columns: 130px 1fr;
-  gap: 12px;
-  padding: 9px 16px;
-  border-top: 1px solid var(--rf-border);
-}
-
-.contract-summary dd,
-.audit-facts dd {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--rf-text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.authorization-check {
-  margin-top: var(--rf-space-3);
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  padding: 13px;
-  border: 1px solid var(--rf-border-strong);
-  border-radius: 10px;
-  cursor: pointer;
-}
-
-.authorization-check span {
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.run-header-card,
-.audit-card {
-  padding: var(--rf-space-4);
-}
-
-.run-title-row {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--rf-space-3);
-}
-
-.run-title-row h2 {
-  overflow-wrap: anywhere;
-}
-
-.run-title-row p {
-  word-break: break-all;
-}
-
-.eyebrow {
-  display: block;
-  margin-bottom: 4px;
-  color: var(--rf-accent);
-  font-size: 10.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.run-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.phase-strip {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 4px;
-  margin: 22px 0 18px;
-}
-
-.phase-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 9px;
-  border-radius: 9px;
-  background: var(--rf-bg-raised);
-  color: var(--rf-text-muted);
-}
-
-.phase-item span {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  border: 1px solid var(--rf-border-strong);
-  font-size: 10px;
-}
-
-.phase-item strong {
-  font-size: 11px;
-}
-
-.phase-item.done {
-  color: var(--rf-success);
-  background: color-mix(in srgb, var(--rf-success) 10%, var(--rf-bg-panel));
-}
-
-.phase-item.active {
-  color: var(--rf-accent);
-  background: var(--rf-accent-muted);
-}
-
-.phase-item.active span,
-.phase-item.done span {
-  border-color: currentColor;
-}
-
-.runtime-metrics {
-  display: grid;
-  grid-template-columns: 1.4fr repeat(3, 1fr);
-  border: 1px solid var(--rf-border);
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-.runtime-metrics > div {
-  min-width: 0;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border-left: 1px solid var(--rf-border);
-}
-
-.runtime-metrics > div:first-child {
-  border-left: 0;
-}
-
-.runtime-metrics span {
-  font-size: 10px;
-  color: var(--rf-text-muted);
-}
-
-.runtime-metrics strong {
-  font-size: 13px;
-}
-
-.live-progress {
-  margin-top: var(--rf-space-3);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--rf-accent-muted);
-}
-
-.live-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--rf-accent);
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--rf-accent) 17%, transparent);
-  animation: pulse 1.6s ease-in-out infinite;
-}
-
-.live-progress > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.live-progress strong {
-  font-size: 11.5px;
-}
-
-.live-progress span {
-  font-size: 10.5px;
-  color: var(--rf-text-secondary);
-}
-
-.results-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--rf-space-3);
-}
-
-.result-column {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.result-column > header {
-  padding: 13px 14px;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 10px;
-  align-items: center;
-  border-bottom: 1px solid var(--rf-border);
-}
-
-.result-icon {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--rf-bg-raised);
-}
-
-.result-column h3 {
-  margin: 0;
-  font-size: 13px;
-}
-
-.result-column header p {
-  margin: 2px 0 0;
-  font-size: 10.5px;
-  color: var(--rf-text-muted);
-}
-
-.result-column header > strong {
-  font-size: 20px;
-}
-
-.confirmed-column .result-icon,
-.confirmed-column header > strong { color: var(--rf-success); }
-.suspected-column .result-icon,
-.suspected-column header > strong { color: var(--rf-warning); }
-.neutral-column .result-icon,
-.neutral-column header > strong { color: var(--rf-accent); }
-.gap-column .result-icon,
-.gap-column header > strong { color: var(--rf-text-secondary); }
-
-.result-list {
-  max-height: 360px;
-  overflow: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.result-card {
-  width: 100%;
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid var(--rf-border);
-  border-radius: 8px;
-  background: var(--rf-bg-raised);
-  color: inherit;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-button.result-card {
-  cursor: pointer;
-}
-
-button.result-card:hover {
-  border-color: var(--rf-accent);
-}
-
-.result-card-title {
-  font-size: 11.5px;
-  font-weight: 650;
-}
-
-.result-target {
-  font-size: 10.5px;
-  color: var(--rf-accent);
-  overflow-wrap: anywhere;
-}
-
-.result-card small {
-  font-size: 10px;
-  line-height: 1.45;
-  color: var(--rf-text-muted);
-  overflow-wrap: anywhere;
-}
-
-.result-card pre {
-  margin: 5px 0 0;
-  max-height: 110px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
-  color: var(--rf-text-secondary);
-}
-
-.result-empty {
-  margin: 0;
-  padding: 24px 14px;
-  font-size: 11px;
-  text-align: center;
-  color: var(--rf-text-muted);
-}
-
-.audit-layout {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.8fr) minmax(300px, 1.2fr);
-  gap: var(--rf-space-4);
-  margin-top: var(--rf-space-3);
-}
-
-.audit-facts {
-  border: 1px solid var(--rf-border);
-  border-radius: 9px;
-  overflow: hidden;
-}
-
-.audit-facts > div:first-child {
-  border-top: 0;
-}
-
-.event-list {
-  max-height: 250px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.event-row {
-  display: grid;
-  grid-template-columns: 8px 1fr;
-  gap: 9px;
-  align-items: start;
-}
-
-.event-row > span {
-  width: 7px;
-  height: 7px;
-  margin-top: 4px;
-  border-radius: 50%;
-  background: var(--rf-border-strong);
-}
-
-.event-row > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.event-row strong { font-size: 11px; }
-.event-row small { font-size: 10px; color: var(--rf-text-muted); }
-
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.profile-form {
-  margin-top: var(--rf-space-3);
-}
-
-.report-preview {
-  min-height: 220px;
-  max-height: 72vh;
-  overflow: auto;
-  padding: 4px 12px;
-  line-height: 1.65;
-}
-
-.report-preview :deep(pre) {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
-}
-
-@media (max-width: 900px) {
-  .workspace { grid-template-columns: 190px minmax(0, 1fr); }
-  .results-grid { grid-template-columns: 1fr; }
-  .runtime-metrics { grid-template-columns: repeat(2, 1fr); }
-  .runtime-metrics > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--rf-border); }
-  .runtime-metrics > div:nth-child(4) { border-top: 1px solid var(--rf-border); }
-  .audit-layout { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 680px) {
-  .workspace { grid-template-columns: 1fr; }
-  .history-panel { max-height: 250px; }
-  .advanced-grid,
-  .advanced-grid.three { grid-template-columns: 1fr; }
-  .phase-item strong { display: none; }
-  .run-title-row { flex-direction: column; }
-  .run-actions { align-self: flex-start; }
+  box-shadow: var(--rf-shadow-light);
+}
+
+.mission-sidebar { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--rf-border); background: color-mix(in srgb, var(--rf-bg-panel) 80%, var(--rf-bg-base)); }
+.sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 13px; border-bottom: 1px solid var(--rf-border); }
+.sidebar-heading div { display: grid; gap: 1px; }
+.sidebar-heading small { color: var(--rf-text-muted); font-size: 9px; text-transform: uppercase; }
+.sidebar-heading strong { color: var(--rf-text); font-size: 13px; }
+.mission-list { display: grid; gap: 5px; max-height: 48%; padding: 8px; overflow: auto; }
+.mission-item { display: grid; gap: 6px; width: 100%; padding: 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.mission-item:hover { background: var(--rf-bg-hover); }
+.mission-item.active { border-color: color-mix(in srgb, var(--rf-accent) 45%, var(--rf-border)); background: var(--rf-accent-muted); }
+.mission-item:focus-visible { outline: 2px solid var(--rf-accent); outline-offset: -2px; }
+.mission-item-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.mission-item-top strong { min-width: 0; overflow: hidden; color: var(--rf-text); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.mission-goal { display: -webkit-box; overflow: hidden; color: var(--rf-text-secondary); font-size: 10.5px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.mission-meta { display: flex; justify-content: space-between; gap: 5px; color: var(--rf-text-muted); font-size: 9px; }
+.sidebar-empty { padding: 14px; color: var(--rf-text-muted); font-size: 10.5px; text-align: center; }
+.workflow-list { min-height: 0; flex: 1; padding: 12px; overflow: auto; border-top: 1px solid var(--rf-border); }
+.workflow-list > header { margin-bottom: 10px; color: var(--rf-text-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.workflow-row { position: relative; display: grid; grid-template-columns: 12px 1fr; gap: 7px; padding-bottom: 13px; }
+.workflow-row:not(:last-child)::before { position: absolute; top: 10px; bottom: 0; left: 4px; width: 1px; background: var(--rf-border-strong); content: ""; }
+.workflow-dot { z-index: 1; width: 9px; height: 9px; margin-top: 3px; border: 2px solid var(--rf-border-strong); border-radius: 50%; background: var(--rf-bg-panel); }
+.workflow-dot[data-status="completed"] { border-color: var(--rf-success); background: var(--rf-success); }
+.workflow-dot[data-status="active"] { border-color: var(--rf-accent); background: var(--rf-accent); }
+.workflow-row div { display: grid; gap: 2px; }
+.workflow-row strong { color: var(--rf-text-secondary); font-size: 10.5px; }
+.workflow-row small { color: var(--rf-text-muted); font-size: 9.5px; line-height: 1.4; }
+
+.mission-main { min-width: 0; min-height: 0; padding: 16px 18px 24px; overflow: auto; background: var(--rf-bg-base); }
+.composer-card, .mission-hero, .conversation, .action-timeline, .followup-box { max-width: 880px; margin-right: auto; margin-left: auto; }
+.composer-card { padding: 20px; border: 1px solid var(--rf-border); border-radius: var(--rf-radius-shell); background: var(--rf-bg-panel); }
+.composer-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+.composer-heading h2, .mission-title-row h2, .timeline-heading h3 { margin: 2px 0 0; color: var(--rf-text); }
+.composer-heading h2 { font-size: 19px; }
+.composer-heading p { max-width: 660px; margin: 5px 0 0; color: var(--rf-text-secondary); font-size: 11.5px; line-height: 1.5; }
+.eyebrow { color: var(--rf-accent); font-size: 9px; font-weight: 750; letter-spacing: .11em; }
+.form-grid { display: grid; gap: 12px; }
+.form-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.mission-form :deep(.el-form-item) { margin-bottom: 13px; }
+.mission-form :deep(.el-form-item__label) { color: var(--rf-text-secondary); font-size: 11px; }
+.identity-link { margin: -9px 0 12px; }
+.field-label { display: block; margin: 1px 0 8px; color: var(--rf-text-secondary); font-size: 11px; }
+.budget-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+.budget-options label { position: relative; display: grid; gap: 3px; padding: 11px; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); cursor: pointer; }
+.budget-options label.selected { border-color: var(--rf-accent); box-shadow: 0 0 0 1px var(--rf-accent-muted); }
+.budget-options input { position: absolute; opacity: 0; }
+.budget-options strong { color: var(--rf-text); font-size: 12px; }
+.budget-options span { color: var(--rf-accent); font-size: 10px; }
+.budget-options small { color: var(--rf-text-muted); font-size: 9.5px; line-height: 1.4; }
+.composer-checks { display: grid; gap: 5px; margin: 4px 0 13px; }
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.composer-footer > span { color: var(--rf-text-muted); font-size: 10.5px; }
+
+.mission-hero { padding: 3px 2px 15px; }
+.mission-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.mission-title-row h2 { font-size: 20px; }
+.goal-copy { margin: 9px 0 12px; color: var(--rf-text-secondary); font-size: 12.5px; line-height: 1.65; }
+.mission-command-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mission-facts, .mission-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.mission-facts span { padding: 4px 8px; border-radius: var(--rf-radius-tag); background: var(--rf-bg-raised); color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9.5px; }
+.mission-buttons :deep(.el-button + .el-button) { margin-left: 0; }
+.mission-hero :deep(.el-progress) { margin-top: 12px; }
+.mission-alert { max-width: 880px; margin: 0 auto 12px; }
+.approval-banner { display: flex; max-width: 880px; align-items: center; justify-content: space-between; gap: 12px; margin: 0 auto 12px; padding: 12px; border: 1px solid color-mix(in srgb, var(--rf-warning) 50%, var(--rf-border)); border-radius: 10px; background: color-mix(in srgb, var(--rf-warning) 9%, var(--rf-bg-panel)); }
+.approval-banner > div { display: flex; align-items: center; gap: 9px; color: var(--rf-warning); }
+.approval-banner span { display: grid; gap: 2px; }
+.approval-banner strong { color: var(--rf-text); font-size: 11.5px; }
+.approval-banner small { color: var(--rf-text-secondary); font-size: 10px; }
+
+.conversation { display: grid; gap: 9px; margin-bottom: 16px; }
+.message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; }
+.message-avatar { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 9px; background: var(--rf-bg-raised); color: var(--rf-text-muted); font-size: 9px; font-weight: 700; }
+.message[data-role="user"] .message-avatar { background: var(--rf-accent); color: var(--rf-accent-on); }
+.message-body { padding: 10px 12px; border: 1px solid var(--rf-border); border-radius: 2px 10px 10px; background: var(--rf-bg-panel); }
+.message-body header { display: flex; justify-content: space-between; gap: 8px; }
+.message-body strong { color: var(--rf-text); font-size: 10.5px; }
+.message-body time, .message-body small { color: var(--rf-text-muted); font-size: 9px; }
+.message-body p { margin: 5px 0 0; color: var(--rf-text-secondary); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; }
+
+.action-timeline { display: grid; gap: 10px; }
+.timeline-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 5px 0 2px; }
+.timeline-heading h3 { font-size: 15px; }
+.timeline-heading > span { color: var(--rf-text-muted); font-size: 10px; }
+.action-card { padding: 13px; border: 1px solid var(--rf-border); border-radius: 11px; background: var(--rf-bg-panel); box-shadow: var(--rf-shadow-light); }
+.action-card.pending { border-color: color-mix(in srgb, var(--rf-warning) 55%, var(--rf-border)); }
+.action-card.manual { border-left: 3px solid var(--rf-warning); }
+.action-header, .action-name, .action-tags, .action-footer, .approval-buttons { display: flex; align-items: center; }
+.action-header, .action-footer { justify-content: space-between; gap: 10px; }
+.action-name { min-width: 0; gap: 9px; }
+.action-index { display: grid; width: 25px; height: 25px; flex: 0 0 auto; place-items: center; border-radius: 8px; background: var(--rf-bg-raised); color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9px; }
+.action-name > div { display: grid; min-width: 0; gap: 2px; }
+.action-name strong { color: var(--rf-text); font-size: 12px; }
+.action-name small { overflow: hidden; color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.action-tags, .approval-buttons { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.approval-buttons :deep(.el-button + .el-button) { margin-left: 0; }
+.action-explanation { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 11px 0; }
+.action-explanation > div { padding: 9px; border-radius: 8px; background: var(--rf-bg-raised); }
+.action-explanation small { color: var(--rf-text-muted); font-size: 9px; }
+.action-explanation p { margin: 3px 0 0; color: var(--rf-text-secondary); font-size: 10.5px; line-height: 1.5; }
+.action-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-bottom: 9px; color: var(--rf-text-muted); font-size: 9.5px; }
+.action-footer { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--rf-border); }
+.timeline-empty { padding: 22px; border: 1px dashed var(--rf-border-strong); border-radius: 10px; color: var(--rf-text-muted); font-size: 11px; text-align: center; }
+.followup-box { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 13px; padding: 10px; border: 1px solid var(--rf-border); border-radius: 11px; background: var(--rf-bg-panel); }
+.followup-box > svg { color: var(--rf-accent); }
+
+.mission-inspector { border-left: 1px solid var(--rf-border); }
+.inspector-trigger { display: none; }
+.context-manifest { display: grid; gap: 8px; margin: 14px 0; }
+.context-manifest strong { color: var(--rf-text); font-size: 12px; }
+.context-manifest > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.context-details { border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
+.context-details summary { padding: 10px; color: var(--rf-text-secondary); font-size: 11px; cursor: pointer; }
+.context-details pre, .technical-block pre, .report-preview pre { margin: 0; padding: 12px; overflow: auto; color: var(--rf-text-secondary); font-family: var(--rf-font-mono); font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.context-details pre { max-height: 360px; border-top: 1px solid var(--rf-border); }
+.hash-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; }
+.hash-grid span { color: var(--rf-text-muted); font-size: 9px; }
+.hash-grid code { color: var(--rf-text-secondary); font-family: var(--rf-font-mono); }
+.identity-form { margin-top: 14px; }
+.technical-block { margin-top: 12px; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
+.technical-block h4 { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--rf-border); color: var(--rf-text); font-size: 11px; }
+.report-preview { min-height: 280px; max-height: 65vh; overflow: auto; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
+
+@media (max-width: 1260px) {
+  .mission-layout { grid-template-columns: 240px minmax(0, 1fr); }
+  .desktop-inspector { display: none; }
+  .inspector-trigger { display: inline-flex; }
+}
+
+@media (max-width: 780px) {
+  .assessment-page { padding: 12px; overflow: auto; }
+  .mission-layout { display: flex; min-height: 720px; flex-direction: column; overflow: visible; }
+  .mission-sidebar { max-height: 290px; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--rf-border); }
+  .mission-list { display: flex; max-height: 150px; overflow-x: auto; }
+  .mission-item { min-width: 220px; }
+  .workflow-list { display: none; }
+  .mission-main { overflow: visible; }
+  .form-grid.two, .action-explanation, .budget-options, .readiness-grid { grid-template-columns: 1fr; }
+  .mission-command-row, .composer-footer, .approval-banner { align-items: stretch; flex-direction: column; }
+  .followup-box { grid-template-columns: 1fr; }
+  .followup-box > svg { display: none; }
+  .hash-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .mission-sidebar { max-height: 360px; }
+  .mission-list { display: grid; max-height: 230px; overflow-x: hidden; overflow-y: auto; }
+  .mission-item { min-width: 0; }
+  .mission-title-row { align-items: flex-start; flex-direction: column; }
+  .mission-buttons { width: 100%; }
 }
 </style>

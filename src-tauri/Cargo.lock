@@ -3704,6 +3704,7 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "html5ever",
  "http-body-util",
  "hudsucker",
  "hyper-rustls",

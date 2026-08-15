@@ -37,6 +37,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Scope/URL 授权边界直接使用 WHATWG URL + IDNA 规范化，不依赖 reqwest 的传递依赖
 url = "2"
 regex = "1"
+# Standards-compliant HTML tokenization for bounded surface discovery.
+html5ever = "0.38"
 keyring = "4.1.5"
 zeroize = "1.9"
 # 解压响应体（gzip/deflate/br）供展示与分析；转发给浏览器的仍是原始压缩字节

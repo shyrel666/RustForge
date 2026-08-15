@@ -126,6 +126,13 @@ pub(crate) fn auth_secret_redaction_values(header_name: &str, secret: &str) -> V
         candidates.push(url::form_urlencoded::byte_serialize(value.as_bytes()).collect());
         candidates.push(base64::engine::general_purpose::STANDARD.encode(value.as_bytes()));
         candidates.push(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes()));
+        let hex = value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        candidates.push(hex.clone());
+        candidates.push(hex.to_ascii_uppercase());
     }
     candidates.retain(|value| !value.is_empty());
     candidates.sort();
@@ -488,8 +495,8 @@ pub fn preview_contract(
         return Err("请求预算必须在 1..=300 之间".into());
     }
     validate_rate(input.requests_per_second).map_err(|error| error.to_string())?;
-    if !(1..=3).contains(&input.max_rounds) {
-        return Err("AI 规划轮次必须在 1..=3 之间".into());
+    if !(1..=6).contains(&input.max_rounds) {
+        return Err("AI 规划轮次必须在 1..=6 之间".into());
     }
     if !matches!(input.tls_policy.as_str(), "strict" | "ignore_invalid") {
         return Err("TLS 策略只能是 strict 或 ignore_invalid".into());
@@ -702,7 +709,9 @@ pub fn transition_run(
     )
     .map_err(|error| format!("更新评估状态失败: {error}"))?;
     tx.commit().map_err(|error| error.to_string())?;
-    get_run(conn, project_id, run_id)
+    let run = get_run(conn, project_id, run_id)?;
+    super::mission::sync_from_run(conn, run_id, next, stop_reason)?;
+    Ok(run)
 }
 
 /// Close every check that could otherwise remain visually "running" after a
@@ -807,6 +816,14 @@ pub fn recover_interrupted_runs(conn: &mut Connection) -> Result<usize, String> 
         .map_err(|error| error.to_string())?;
     }
     tx.commit().map_err(|error| error.to_string())?;
+    for (run_id, _) in &active {
+        super::mission::sync_from_run(
+            conn,
+            *run_id,
+            AssessmentStatus::Interrupted,
+            Some("application_restarted"),
+        )?;
+    }
     Ok(active.len())
 }
 
@@ -1083,9 +1100,7 @@ fn header_has_value(headers_json: &str, expected_name: &str) -> bool {
         return false;
     };
     let importable = |value: &str| {
-        !value.is_empty()
-            && value.len() <= MAX_AUTH_SECRET_BYTES
-            && !value.contains(['\r', '\n'])
+        !value.is_empty() && value.len() <= MAX_AUTH_SECRET_BYTES && !value.contains(['\r', '\n'])
     };
     match value {
         Value::Array(headers) => headers.iter().any(|header| {
@@ -1663,7 +1678,7 @@ mod tests {
 
     #[test]
     fn auth_candidates_list_only_non_empty_matching_headers_without_values() {
-        let mut conn = database();
+        let conn = database();
         conn.execute(
             "INSERT INTO projects(id, name, scope) VALUES(2, 'other', '[\"other.test\"]')",
             [],

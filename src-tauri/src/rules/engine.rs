@@ -966,6 +966,20 @@ mod tests {
             None,
         );
         let report = evaluate(&view);
+        // 先消费默认预算结果，避免未使用绑定；下面用宽裕预算做稳定断言。
+        let _ = report.timed_out;
+        let PackStatus::Loaded(pack) = builtin_pack() else {
+            panic!("builtin pack disabled")
+        };
+        let report = evaluate_pack_with_limits(
+            pack,
+            &view,
+            EvaluationLimits {
+                max_duration: Duration::from_secs(30),
+            },
+        );
+        assert!(!report.timed_out);
+
         let cookie_hit = hit(&report, "cookie-no-httponly").unwrap();
         assert!(cookie_hit.field_path.contains("set-cookie[1]"));
         assert!(!cookie_hit.evidence.contains("secret"));
@@ -983,6 +997,20 @@ mod tests {
             None,
         );
         let report = evaluate(&view);
+        // 先消费默认预算结果，避免未使用绑定；下面用宽裕预算做稳定断言。
+        let _ = report.timed_out;
+        let PackStatus::Loaded(pack) = builtin_pack() else {
+            panic!("builtin pack disabled")
+        };
+        let report = evaluate_pack_with_limits(
+            pack,
+            &view,
+            EvaluationLimits {
+                max_duration: Duration::from_secs(30),
+            },
+        );
+        assert!(!report.timed_out);
+
         let hits: Vec<&RuleHit<'_>> = report
             .hits
             .iter()

@@ -4,6 +4,7 @@ import {
   createReplaySession,
   deleteReplaySession,
   getReplayRun,
+  getReplaySessionAssessmentHandoff,
   getTrafficDetail,
   listReplayRuns,
   listReplaySessions,
@@ -11,6 +12,7 @@ import {
   selectReplaySession,
   updateReplaySession,
   type ReplayHeader,
+  type AssessmentHandoffReplayDraft,
   type ReplayRun,
   type ReplayRunSummary,
   type ReplaySession,
@@ -24,6 +26,7 @@ import {
 import {
   cloneReplayDraftState,
   draftStateFromRun,
+  draftStateFromAssessmentHandoff,
   draftStateFromTraffic,
   emptyReplayDraftState,
   replayWarningIsConfirmed,
@@ -116,6 +119,7 @@ export const useRepeaterStore = defineStore("repeater", {
       runDetails: {} as Record<string, ReplayRun>,
       pendingSource: null as ReplayDraftState | null,
       resp: null as ReplayRun | null,
+      activeAssessmentHandoff: null as AssessmentHandoffReplayDraft | null,
 
       loadedFrom: null as number | null,
       loadedFromProject: null as number | null,
@@ -195,6 +199,7 @@ export const useRepeaterStore = defineStore("repeater", {
       this.pendingSource = cloneReplayDraftState(source);
       this.applyDraftState(source);
       this.resp = null;
+      this.activeAssessmentHandoff = null;
       this.selectedRunId = null;
       this.error = "";
       this.clearAuthorization();
@@ -265,6 +270,7 @@ export const useRepeaterStore = defineStore("repeater", {
       this.pendingSessionId = null;
       this.selectedRunId = null;
       this.resp = null;
+      this.activeAssessmentHandoff = null;
       this.error = "";
       this.loadingWorkspace = true;
       this.loadingRuns = false;
@@ -388,9 +394,13 @@ export const useRepeaterStore = defineStore("repeater", {
         const selectionPromise = persistSelection
           ? persistSessionSelection(sessionId)
           : Promise.resolve(session);
-        const [{ page, warning }] = await Promise.all([
+        const handoffPromise = getReplaySessionAssessmentHandoff(projectId, sessionId).catch(
+          () => null
+        );
+        const [{ page, warning }, , handoff] = await Promise.all([
           pagePromise,
           selectionPromise,
+          handoffPromise,
         ]);
         let loadWarning = warning;
 
@@ -409,6 +419,9 @@ export const useRepeaterStore = defineStore("repeater", {
 
         let nextDraft =
           this.draftStates[draftKey(projectId, sessionId)] ?? null;
+        if (nextDraft === null && handoff !== null && page.runs.length === 0) {
+          nextDraft = draftStateFromAssessmentHandoff(handoff, projectId);
+        }
         if (nextDraft === null && latest !== null) {
           nextDraft = draftStateFromRun(latest);
         }
@@ -445,6 +458,7 @@ export const useRepeaterStore = defineStore("repeater", {
         this.nextBeforeId = page.next_before_id;
         this.resp = latest;
         this.selectedRunId = latest?.id ?? null;
+        this.activeAssessmentHandoff = handoff;
         this.applyDraftState(nextDraft);
         this.error = loadWarning;
         this.draftStates[draftKey(projectId, sessionId)] =
@@ -796,6 +810,7 @@ export const useRepeaterStore = defineStore("repeater", {
       this.runs = [];
       this.nextBeforeId = null;
       this.resp = null;
+      this.activeAssessmentHandoff = null;
       this.selectedRunId = null;
       this.clearAuthorization();
 
@@ -822,6 +837,7 @@ export const useRepeaterStore = defineStore("repeater", {
       this.selectedRunId = null;
       this.pendingSource = null;
       this.resp = null;
+      this.activeAssessmentHandoff = null;
       this.error = "";
       this.loadingWorkspace = false;
       this.loadingRuns = false;

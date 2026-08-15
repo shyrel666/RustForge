@@ -6,9 +6,14 @@ use crate::ai::redaction::{redact_fallback_text, RedactionManifest};
 use crate::ai::validation::ValidationReport;
 use crate::ai::{analyzer, digest, planner, prompts};
 use crate::assessment::model::{
-    AssessmentAuthCandidate, AssessmentAuthProfile, AssessmentContractInput,
-    AssessmentContractPreview, AssessmentDetail, AssessmentRun, CreateAssessmentAuthProfileInput,
-    ImportAssessmentAuthProfileInput, SetAssessmentAuthProfileInput, StartAssessmentInput,
+    AssessmentAction, AssessmentAuthCandidate, AssessmentAuthProfile, AssessmentContractInput,
+    AssessmentContractPreview, AssessmentDetail, AssessmentManualHandoff, AssessmentMission,
+    AssessmentMissionDetail, AssessmentMissionEvent, AssessmentRun, AssessmentToolPermission,
+    AttachMissionResourceInput, ConfirmMissionContextInput, CreateAssessmentAuthProfileInput,
+    CreateAssessmentMissionInput, CreateMissionHandoffInput, DecideAssessmentActionInput,
+    ImportAssessmentAuthProfileInput, ImportMissionOpenApiInput, LinkMissionHandoffReplayInput,
+    MissionContextPreview, MissionControlInput, SendMissionMessageInput,
+    SetAssessmentAuthProfileInput, SetAssessmentToolPermissionInput, StartAssessmentInput,
 };
 use crate::assessment::planner::PlannerProviderContext;
 use crate::authorization::{
@@ -47,6 +52,47 @@ use zeroize::Zeroizing;
 type CmdResult<T> = Result<T, String>;
 const AI_DATA_POLICY_SETTING: &str = "ai_data_policy";
 const ANALYSIS_AI_TIMEOUT_SECS: u64 = 300;
+
+fn emit_assessment_mission_event(
+    app: &AppHandle,
+    detail: &AssessmentMissionDetail,
+    event_type: &str,
+    message: &str,
+    action_id: Option<i64>,
+) {
+    let mission = &detail.mission;
+    let completed_checks = detail
+        .actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.status.as_str(),
+                "completed" | "rejected" | "cancelled" | "failed" | "result_linked"
+            )
+        })
+        .count() as u32;
+    let _ = app.emit(
+        "assessment:mission-event",
+        AssessmentMissionEvent {
+            project_id: mission.project_id,
+            mission_id: mission.id,
+            run_id: mission.active_run_id,
+            action_id,
+            revision: mission.revision,
+            event_type: event_type.into(),
+            status: mission.status,
+            phase: mission.status.as_str().into(),
+            message: message.into(),
+            request_count: mission.request_count,
+            request_budget: mission.request_budget,
+            completed_checks,
+            total_checks: detail.actions.len() as u32,
+            occurred_at: chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string(),
+        },
+    );
+}
 
 /// 模块内读取单个设置（get_setting 命令的内部复用版）
 fn read_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
@@ -1876,7 +1922,7 @@ pub async fn analyze_traffic(
 
             for hypothesis in &result.hypotheses {
                 let reasoning = format!(
-                    "{}{}\n【证据引用】{}\n【Grounding】{}",
+                    "{}{}\n【证据引用】{}\n【Grounding】{}{}",
                     if hypothesis.param.trim().is_empty() {
                         String::new()
                     } else {
@@ -1889,6 +1935,11 @@ pub async fn analyze_traffic(
                         hypothesis.evidence_refs.join("、")
                     },
                     hypothesis.grounding_status,
+                    if hypothesis.validation_notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n【后端校验】{}", hypothesis.validation_notes.join("；"))
+                    },
                 );
                 let standard_references_json =
                     knowledge::references_to_json(&hypothesis.standard_references)?;
@@ -2287,10 +2338,13 @@ pub fn update_finding_review(
 }
 
 #[tauri::command]
-pub fn delete_finding(state: State<AppState>, id: i64) -> CmdResult<()> {
-    let db = state.db.get().map_err(|e| e.to_string())?;
-    db.execute("DELETE FROM findings WHERE id = ?1", [id])
-        .map_err(|e| e.to_string())?;
+pub fn delete_finding(app: AppHandle, state: State<AppState>, id: i64) -> CmdResult<()> {
+    let mut db = state.db.get().map_err(|e| e.to_string())?;
+    let finding = evidence::service::delete_finding(&mut db, id)?;
+    let _ = app.emit(
+        "finding:deleted",
+        &serde_json::json!({ "id": id, "projectId": finding.project_id }),
+    );
     Ok(())
 }
 
@@ -3605,6 +3659,469 @@ pub fn get_assessment_detail(
     crate::assessment::service::get_detail(&db, project_id, run_id)
 }
 
+// ---------- AI 安全评估 Mission v2 ----------
+
+#[tauri::command]
+pub fn create_assessment_mission(
+    app: AppHandle,
+    state: State<AppState>,
+    input: CreateAssessmentMissionInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    if read_setting(&db, "ai_enabled").as_deref() == Some("false") {
+        return Err("AI 功能已在设置中全局禁用（隐私开关）".into());
+    }
+    let (provider_id, _, mut model, _) =
+        active_ai(&db)?.ok_or("请先在设置页添加并选择一个 AI 供应商")?;
+    if model.trim().is_empty() {
+        model = "deepseek-chat".into();
+    }
+    let detail = crate::assessment::mission::create_mission(
+        &mut db,
+        state.secrets.as_ref(),
+        &input,
+        &provider_id,
+        &model,
+    )?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "mission_created",
+        "任务已创建，正在等待上下文确认",
+        None,
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn list_assessment_missions(
+    state: State<AppState>,
+    project_id: i64,
+) -> CmdResult<Vec<AssessmentMission>> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::mission::list_missions(&db, project_id)
+}
+
+#[tauri::command]
+pub fn get_assessment_mission_detail(
+    state: State<AppState>,
+    project_id: i64,
+    mission_id: i64,
+) -> CmdResult<AssessmentMissionDetail> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::mission::get_detail(&db, project_id, mission_id)
+}
+
+#[tauri::command]
+pub fn preview_assessment_mission_context(
+    state: State<AppState>,
+    project_id: i64,
+    mission_id: i64,
+) -> CmdResult<MissionContextPreview> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::mission::preview_context(&db, project_id, mission_id)
+}
+
+#[tauri::command]
+pub fn confirm_assessment_mission_context(
+    app: AppHandle,
+    state: State<AppState>,
+    input: ConfirmMissionContextInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let resolved = active_ai(&db)?.ok_or("请先在设置页添加并选择一个 AI 供应商")?;
+    let mission = crate::assessment::mission::get_mission(&db, input.project_id, input.mission_id)?;
+    let live_model = if resolved.2.trim().is_empty() {
+        "deepseek-chat"
+    } else {
+        resolved.2.as_str()
+    };
+    if mission.provider_id != resolved.0 || mission.model != live_model {
+        return Err("[PROVIDER_DRIFT] AI provider/model 已变化，请创建新任务或恢复原配置".into());
+    }
+    let detail =
+        crate::assessment::mission::confirm_context(&mut db, state.secrets.as_ref(), &input)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "context_approved",
+        "AI 上下文及披露清单已确认",
+        None,
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn attach_assessment_mission_resource(
+    app: AppHandle,
+    state: State<AppState>,
+    input: AttachMissionResourceInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let detail = crate::assessment::mission::attach_resource(&mut db, &input)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "resource_attached",
+        "项目资源已附加，需重新确认上下文",
+        None,
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn import_assessment_mission_openapi(
+    app: AppHandle,
+    state: State<AppState>,
+    input: ImportMissionOpenApiInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let detail = crate::assessment::mission::import_openapi(&mut db, &input)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "openapi_imported",
+        "OpenAPI 结构摘要已导入，需重新确认上下文",
+        None,
+    );
+    Ok(detail)
+}
+
+/// Opens the native file picker in Rust so the renderer never receives broad
+/// filesystem capabilities. Import still revalidates type, size and structure.
+#[tauri::command]
+pub async fn pick_assessment_openapi_file(app: AppHandle) -> CmdResult<Option<String>> {
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("OpenAPI", &["json", "yaml", "yml"])
+        .blocking_pick_file();
+    selected
+        .map(|file| {
+            file.into_path()
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(|_| "仅支持本机文件路径".to_string())
+        })
+        .transpose()
+}
+
+#[tauri::command]
+pub fn send_assessment_mission_message(
+    app: AppHandle,
+    state: State<AppState>,
+    input: SendMissionMessageInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let detail = crate::assessment::mission::send_message(&mut db, state.secrets.as_ref(), &input)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "mission_steered",
+        "追问已加入任务，将在下一规划点生效",
+        None,
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn decide_assessment_action(
+    app: AppHandle,
+    state: State<AppState>,
+    input: DecideAssessmentActionInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let detail = crate::assessment::mission::decide_action(&mut db, &input)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        if input.approve {
+            "action_approved"
+        } else {
+            "action_rejected"
+        },
+        if input.approve {
+            "工具动作已批准"
+        } else {
+            "工具动作已拒绝，将据此重新规划"
+        },
+        Some(input.action_id),
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn get_assessment_action_detail(
+    state: State<AppState>,
+    project_id: i64,
+    mission_id: i64,
+    action_id: i64,
+) -> CmdResult<AssessmentAction> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::mission::get_action_detail(&db, project_id, mission_id, action_id)
+}
+
+#[tauri::command]
+pub fn set_assessment_tool_permission(
+    state: State<AppState>,
+    input: SetAssessmentToolPermissionInput,
+) -> CmdResult<Vec<AssessmentToolPermission>> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    crate::assessment::mission::set_tool_permission(&mut db, &input)
+}
+
+#[tauri::command]
+pub fn create_assessment_mission_handoff(
+    app: AppHandle,
+    state: State<AppState>,
+    input: CreateMissionHandoffInput,
+) -> CmdResult<AssessmentManualHandoff> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let handoff = crate::assessment::mission::create_handoff(&mut db, &input)?;
+    let detail = crate::assessment::mission::get_detail(&db, input.project_id, input.mission_id)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "manual_handoff_created",
+        "Repeater 人工草稿已创建，尚未发送",
+        Some(input.action_id),
+    );
+    Ok(handoff)
+}
+
+#[tauri::command]
+pub fn link_assessment_mission_handoff_replay(
+    app: AppHandle,
+    state: State<AppState>,
+    input: LinkMissionHandoffReplayInput,
+) -> CmdResult<AssessmentManualHandoff> {
+    let mut db = state.db.get().map_err(|error| error.to_string())?;
+    let handoff = crate::assessment::mission::link_handoff_replay(&mut db, &input)?;
+    let detail = crate::assessment::mission::get_detail(&db, input.project_id, input.mission_id)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "manual_evidence_linked",
+        "手动 ReplayRun 已回传为待复核 Evidence",
+        Some(handoff.action_id),
+    );
+    Ok(handoff)
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssessmentHandoffReplayDraft {
+    pub handoff_id: i64,
+    pub mission_id: i64,
+    pub action_id: i64,
+    pub recipe_id: String,
+    pub recipe_version: String,
+    pub draft: serde_json::Value,
+    pub draft_hash: String,
+    pub status: String,
+}
+
+struct AssessmentHandoffReplayDraftRow {
+    handoff_id: i64,
+    mission_id: i64,
+    action_id: i64,
+    recipe_id: String,
+    recipe_version: String,
+    draft_json: String,
+    draft_hash: String,
+    status: String,
+}
+
+/// Returns only the versioned, non-secret manual draft associated with a
+/// selected Repeater session. Reading the draft performs no authorization check
+/// or network operation; the ordinary Repeater send path remains authoritative.
+#[tauri::command]
+pub fn get_replay_session_assessment_handoff(
+    state: State<AppState>,
+    project_id: i64,
+    session_id: i64,
+) -> CmdResult<Option<AssessmentHandoffReplayDraft>> {
+    use rusqlite::OptionalExtension;
+
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    let row: Option<AssessmentHandoffReplayDraftRow> = db
+        .query_row(
+            "SELECT h.id,m.id,a.id,h.recipe_id,h.recipe_version,
+                    h.draft_json,h.draft_hash,h.status
+             FROM assessment_manual_handoffs h
+             JOIN assessment_actions a ON a.id=h.action_id
+             JOIN assessment_missions m ON m.id=a.mission_id
+             JOIN replay_sessions rs ON rs.id=h.replay_session_id
+             WHERE rs.id=?1 AND rs.project_id=?2 AND rs.owner_kind='manual'
+               AND m.project_id=?2",
+            rusqlite::params![session_id, project_id],
+            |row| {
+                Ok(AssessmentHandoffReplayDraftRow {
+                    handoff_id: row.get(0)?,
+                    mission_id: row.get(1)?,
+                    action_id: row.get(2)?,
+                    recipe_id: row.get(3)?,
+                    recipe_version: row.get(4)?,
+                    draft_json: row.get(5)?,
+                    draft_hash: row.get(6)?,
+                    status: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    row.map(|row| {
+        Ok(AssessmentHandoffReplayDraft {
+            handoff_id: row.handoff_id,
+            mission_id: row.mission_id,
+            action_id: row.action_id,
+            recipe_id: row.recipe_id,
+            recipe_version: row.recipe_version,
+            draft: serde_json::from_str(&row.draft_json)
+                .map_err(|error| format!("人工配方草稿损坏: {error}"))?,
+            draft_hash: row.draft_hash,
+            status: row.status,
+        })
+    })
+    .transpose()
+}
+
+#[tauri::command]
+pub fn stop_assessment_mission(
+    app: AppHandle,
+    state: State<AppState>,
+    input: MissionControlInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let (detail, run_id) = {
+        let mut db = state.db.get().map_err(|error| error.to_string())?;
+        crate::assessment::mission::request_stop(&mut db, &input)?
+    };
+    if let Some(run_id) = run_id {
+        state.assessments.cancel(input.project_id, run_id)?;
+    }
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "mission_stop_requested",
+        "停止请求已记录，部分结果将保留",
+        None,
+    );
+    Ok(detail)
+}
+
+#[tauri::command]
+pub async fn start_assessment_mission(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: MissionControlInput,
+) -> CmdResult<AssessmentMissionDetail> {
+    let (client, provider, preview, run) = {
+        let mut db = state.db.get().map_err(|error| error.to_string())?;
+        let resolved = resolved_ai(&db, state.secrets.as_ref())?;
+        let mission =
+            crate::assessment::mission::get_mission(&db, input.project_id, input.mission_id)?;
+        if mission.provider_id != resolved.provider_id || mission.model != resolved.model {
+            return Err("[PROVIDER_DRIFT] AI provider/model 已变化，请重新确认上下文".into());
+        }
+        let preview =
+            crate::assessment::mission::prepare_start(&db, state.secrets.as_ref(), &input)?;
+        let globally_active: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM assessment_runs
+                 WHERE status IN ('queued','discovering','planning','executing','verifying'))",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if globally_active {
+            // The mission remains durably queued and consumes no network slot.
+            let detail =
+                crate::assessment::mission::get_detail(&db, input.project_id, input.mission_id)?;
+            emit_assessment_mission_event(
+                &app,
+                &detail,
+                "mission_queued",
+                "已有网络任务执行中，本任务已进入可见队列",
+                None,
+            );
+            return Ok(detail);
+        }
+        let client = OpenAiClient::new_with_timeout(
+            &resolved.base_url,
+            resolved.api_key,
+            &resolved.model,
+            std::time::Duration::from_secs(300),
+        )?;
+        let provider = PlannerProviderContext {
+            provider_id: resolved.provider_id,
+            provider_base_url: resolved.base_url,
+            model: resolved.model,
+            supports_json_schema: resolved.supports_json_schema,
+        };
+        let run = crate::assessment::service::create_run(&mut db, &preview)?;
+        crate::assessment::mission::link_run(&mut db, input.project_id, input.mission_id, run.id)?;
+        (client, provider, preview, run)
+    };
+
+    let cancel = match state.assessments.claim(preview.project_id, run.id) {
+        Ok(cancel) => cancel,
+        Err(error) => {
+            if let Ok(mut db) = state.db.get() {
+                let _ = crate::assessment::service::transition_run(
+                    &mut db,
+                    preview.project_id,
+                    run.id,
+                    crate::assessment::model::AssessmentStatus::Failed,
+                    Some(&error),
+                );
+            }
+            return Err(error);
+        }
+    };
+    let pool = state.db.clone();
+    let secrets = state.secrets.clone();
+    let manager = state.assessments.clone();
+    let background_app = app.clone();
+    let finalize_secrets = secrets.clone();
+    let project_id = preview.project_id;
+    let run_id = run.id;
+    let guard = crate::assessment::AssessmentRunGuard::new(manager, run_id);
+    tauri::async_runtime::spawn(async move {
+        let result =
+            crate::assessment::runner::run(crate::assessment::runner::AssessmentRunContext {
+                pool: pool.clone(),
+                secrets,
+                app: background_app.clone(),
+                project_id,
+                run_id,
+                client,
+                provider,
+                cancel,
+            })
+            .await;
+        if let Err(error) = result {
+            crate::assessment::runner::finalize_error(
+                &background_app,
+                &pool,
+                &finalize_secrets,
+                project_id,
+                run_id,
+                &error,
+            );
+        }
+        drop(guard);
+    });
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    let detail = crate::assessment::mission::get_detail(&db, input.project_id, input.mission_id)?;
+    emit_assessment_mission_event(
+        &app,
+        &detail,
+        "mission_started",
+        "任务已进入串行执行器",
+        None,
+    );
+    Ok(detail)
+}
+
 // ---------- 证据化报告 ----------
 
 /// 生成默认脱敏的 Markdown 报告文本（供前端预览）。
@@ -3616,6 +4133,18 @@ pub fn build_report(
 ) -> CmdResult<String> {
     let db = state.db.get().map_err(|e| e.to_string())?;
     report::build_markdown_for_assessment(&db, project_id, assessment_run_id)
+}
+
+/// Goal-driven mission report. This path is always redacted and emits Schema
+/// v4; legacy missions are explicitly marked instead of being reactivated.
+#[tauri::command]
+pub fn build_assessment_mission_report(
+    state: State<AppState>,
+    project_id: i64,
+    mission_id: i64,
+) -> CmdResult<String> {
+    let db = state.db.get().map_err(|error| error.to_string())?;
+    report::build_mission_report_markdown(&db, project_id, mission_id)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3687,6 +4216,33 @@ pub async fn export_report(
         markdown_path: markdown_path.to_string_lossy().into_owned(),
         json_path: json_path.to_string_lossy().into_owned(),
         contains_sensitive_evidence: bundle.contains_sensitive_evidence,
+    })
+}
+
+#[tauri::command]
+pub async fn export_assessment_mission_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: i64,
+    mission_id: i64,
+) -> CmdResult<ReportExportResult> {
+    let bundle = {
+        let db = state.db.get().map_err(|error| error.to_string())?;
+        report::build_mission_report_bundle(&db, project_id, mission_id)?
+    };
+    let dest_dir = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let safe_project = report::safe_file_component(&bundle.project_name, project_id);
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+    let basename = format!("RustForge-Mission-v4-{safe_project}-{project_id}-{mission_id}-{stamp}");
+    let (markdown_path, json_path) =
+        write_report_pair(&dest_dir, &basename, &bundle.markdown, &bundle.json)?;
+    Ok(ReportExportResult {
+        markdown_path: markdown_path.to_string_lossy().into_owned(),
+        json_path: json_path.to_string_lossy().into_owned(),
+        contains_sensitive_evidence: false,
     })
 }
 

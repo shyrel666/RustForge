@@ -1429,6 +1429,407 @@ export const listAssessmentRuns = (projectId: number) =>
 export const getAssessmentDetail = (projectId: number, runId: number) =>
   invoke<AssessmentDetail>("get_assessment_detail", { projectId, runId });
 
+// ---------- AI 安全评估 Mission v2 ----------
+
+export type AssessmentMissionStatus =
+  | "draft"
+  | "awaiting_context_approval"
+  | "queued"
+  | "discovering"
+  | "planning"
+  | "awaiting_action_approval"
+  | "executing"
+  | "verifying"
+  | "awaiting_manual_handoff"
+  | "completed"
+  | "stopped"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
+
+export type AssessmentAutonomyMode = "manual" | "smart" | "automatic";
+export type AssessmentBudgetProfile = "quick" | "standard" | "deep";
+export type AssessmentToolPermissionDecision = "disabled" | "ask" | "execute";
+
+export interface MissionToolDescriptor {
+  id: string;
+  version: string;
+  displayName: string;
+  description: string;
+  executionKind: "observe" | "safe_probe" | "manual_recipe";
+  riskLevel: string;
+  parameterSchema: unknown;
+  allowedIdentityModes: string[];
+  requestCost: number;
+  defaultPermission: AssessmentToolPermissionDecision;
+  effectivePermission: AssessmentToolPermissionDecision;
+  canAutoConfirm: boolean;
+}
+
+export interface AssessmentMission {
+  id: number;
+  projectId: number;
+  title: string;
+  goal: string;
+  startUrl: string;
+  exactOrigin: string;
+  status: AssessmentMissionStatus;
+  autonomyMode: AssessmentAutonomyMode;
+  budgetProfile: AssessmentBudgetProfile;
+  requestBudget: number;
+  requestCount: number;
+  maxPlanningCycles: number;
+  completedCycles: number;
+  requestsPerSecond: number;
+  identityAProfileId: number | null;
+  identityBProfileId: number | null;
+  providerId: string;
+  model: string;
+  tlsPolicy: TlsPolicy;
+  includeRecentTraffic: boolean;
+  contractHash: string;
+  toolRegistryHash: string;
+  permissionHash: string;
+  contextHash: string | null;
+  contextApprovedHash: string | null;
+  activeRunId: number | null;
+  legacyRunId: number | null;
+  legacy: boolean;
+  revision: number;
+  pendingSteering: boolean;
+  stopReason: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface AssessmentMissionMessage {
+  id: number;
+  missionId: number;
+  role: "user" | "assistant" | "system" | "action";
+  messageKind: string;
+  content: string;
+  contentHash: string;
+  oldValue: string | null;
+  newValue: string | null;
+  details: unknown;
+  redactionManifest: string[];
+  revision: number;
+  createdAt: string;
+}
+
+export interface AssessmentWorkstream {
+  id: number;
+  missionId: number;
+  parentId: number | null;
+  stableKey: string;
+  title: string;
+  objective: string;
+  status: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssessmentAction {
+  id: number;
+  missionId: number;
+  workstreamId: number | null;
+  toolId: string;
+  toolVersion: string;
+  executionKind: "observe" | "safe_probe" | "manual_recipe";
+  riskLevel: string;
+  surfaceId: string | null;
+  identityMode: string;
+  parameters: unknown;
+  rationale: string;
+  expectedSignal: string;
+  requestCost: number;
+  permissionSnapshot: AssessmentToolPermissionDecision;
+  permissionHash: string;
+  approvalStatus: string;
+  approvalSource: string;
+  status: string;
+  policyReason: string;
+  redactedRequest: unknown | null;
+  requestHash: string | null;
+  redactedResponse: unknown | null;
+  responseHash: string | null;
+  result: unknown | null;
+  resultHash: string | null;
+  revision: number;
+  createdAt: string;
+  approvedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface AssessmentMissionResource {
+  id: number;
+  missionId: number;
+  resourceType: "traffic" | "finding" | "assessment_run" | "openapi";
+  sourceId: number | null;
+  displayName: string;
+  mediaType: string;
+  summary: unknown;
+  contentHash: string;
+  createdAt: string;
+}
+
+export interface AssessmentSurface {
+  id: number;
+  runId: number;
+  surfaceId: string;
+  surfaceKind: string;
+  method: string;
+  pathShape: string;
+  queryParameterNames: string[];
+  formFields: unknown[];
+  contentTypes: string[];
+  identityVisibility: unknown;
+  responseStructureHash: string | null;
+  sourceKinds: string[];
+  safeToRequest: boolean;
+  concreteCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssessmentToolPermission {
+  projectId: number;
+  toolId: string;
+  decision: AssessmentToolPermissionDecision;
+  revision: number;
+  updatedAt: string;
+}
+
+export interface AssessmentManualHandoff {
+  id: number;
+  actionId: number;
+  recipeId: string;
+  recipeVersion: string;
+  draft: unknown;
+  draftHash: string;
+  replaySessionId: number | null;
+  replayRunId: number | null;
+  evidenceId: number | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssessmentHandoffReplayDraft {
+  handoffId: number;
+  missionId: number;
+  actionId: number;
+  recipeId: string;
+  recipeVersion: string;
+  draft: {
+    sendAutomatically?: boolean;
+    requiresUserClick?: boolean;
+    request?: {
+      method: string;
+      url: string;
+      headers: ReplayHeader[];
+      bodyText: string | null;
+      bodyBase64: string | null;
+    };
+    proposedDifference?: {
+      field?: string | null;
+      reviewMarker?: string;
+      instructions?: string;
+    };
+    [key: string]: unknown;
+  };
+  draftHash: string;
+  status: string;
+}
+
+export interface MissionCoverageSummary {
+  confirmed: number;
+  suspected: number;
+  notObserved: number;
+  coverageGap: number;
+}
+
+export interface AssessmentMissionDetail {
+  mission: AssessmentMission;
+  messages: AssessmentMissionMessage[];
+  workstreams: AssessmentWorkstream[];
+  actions: AssessmentAction[];
+  resources: AssessmentMissionResource[];
+  surfaces: AssessmentSurface[];
+  toolPermissions: AssessmentToolPermission[];
+  handoffs: AssessmentManualHandoff[];
+  coverage: MissionCoverageSummary;
+}
+
+export interface MissionContextPreview {
+  projectId: number;
+  missionId: number;
+  revision: number;
+  contextHash: string;
+  contractHash: string;
+  toolRegistryHash: string;
+  permissionHash: string;
+  disclosureManifest: string[];
+  contextSummary: unknown;
+  tools: MissionToolDescriptor[];
+  requiresApproval: boolean;
+  approved: boolean;
+}
+
+export interface AssessmentMissionEvent {
+  projectId: number;
+  missionId: number;
+  runId: number | null;
+  actionId: number | null;
+  revision: number;
+  eventType: string;
+  status: AssessmentMissionStatus;
+  phase: string;
+  message: string;
+  requestCount: number;
+  requestBudget: number;
+  completedChecks: number;
+  totalChecks: number;
+  occurredAt: string;
+}
+
+export interface CreateAssessmentMissionInput {
+  projectId: number;
+  title?: string | null;
+  goal: string;
+  startUrl: string;
+  excludedPaths?: string[];
+  tlsPolicy?: TlsPolicy;
+  identityAProfileId?: number | null;
+  identityBProfileId?: number | null;
+  includeRecentTraffic?: boolean;
+  autonomyMode?: AssessmentAutonomyMode;
+  budgetProfile?: AssessmentBudgetProfile;
+  writtenAuthorizationConfirmed: boolean;
+}
+
+export const createAssessmentMission = (input: CreateAssessmentMissionInput) =>
+  invoke<AssessmentMissionDetail>("create_assessment_mission", { input });
+
+export const listAssessmentMissions = (projectId: number) =>
+  invoke<AssessmentMission[]>("list_assessment_missions", { projectId });
+
+export const getAssessmentMissionDetail = (projectId: number, missionId: number) =>
+  invoke<AssessmentMissionDetail>("get_assessment_mission_detail", {
+    projectId,
+    missionId,
+  });
+
+export const previewAssessmentMissionContext = (
+  projectId: number,
+  missionId: number
+) =>
+  invoke<MissionContextPreview>("preview_assessment_mission_context", {
+    projectId,
+    missionId,
+  });
+
+export const confirmAssessmentMissionContext = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+  contextHash: string;
+}) =>
+  invoke<AssessmentMissionDetail>("confirm_assessment_mission_context", { input });
+
+export const attachAssessmentMissionResource = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+  resourceType: "traffic" | "finding" | "assessment_run";
+  sourceId: number;
+}) => invoke<AssessmentMissionDetail>("attach_assessment_mission_resource", { input });
+
+export const pickAssessmentOpenApiFile = () =>
+  invoke<string | null>("pick_assessment_openapi_file");
+
+export const importAssessmentMissionOpenApi = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+  path: string;
+}) => invoke<AssessmentMissionDetail>("import_assessment_mission_openapi", { input });
+
+export const sendAssessmentMissionMessage = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+  content: string;
+}) => invoke<AssessmentMissionDetail>("send_assessment_mission_message", { input });
+
+export const decideAssessmentAction = (input: {
+  projectId: number;
+  missionId: number;
+  actionId: number;
+  expectedMissionRevision: number;
+  expectedActionRevision: number;
+  approve: boolean;
+  applyToSameTool?: boolean;
+}) => invoke<AssessmentMissionDetail>("decide_assessment_action", { input });
+
+export const getAssessmentActionDetail = (
+  projectId: number,
+  missionId: number,
+  actionId: number
+) =>
+  invoke<AssessmentAction>("get_assessment_action_detail", {
+    projectId,
+    missionId,
+    actionId,
+  });
+
+export const setAssessmentToolPermission = (input: {
+  projectId: number;
+  toolId: string;
+  decision: AssessmentToolPermissionDecision;
+  expectedRevision?: number | null;
+}) => invoke<AssessmentToolPermission[]>("set_assessment_tool_permission", { input });
+
+export const createAssessmentMissionHandoff = (input: {
+  projectId: number;
+  missionId: number;
+  actionId: number;
+  expectedActionRevision: number;
+}) => invoke<AssessmentManualHandoff>("create_assessment_mission_handoff", { input });
+
+export const linkAssessmentMissionHandoffReplay = (input: {
+  projectId: number;
+  missionId: number;
+  handoffId: number;
+  replayRunId: number;
+}) =>
+  invoke<AssessmentManualHandoff>("link_assessment_mission_handoff_replay", { input });
+
+export const getReplaySessionAssessmentHandoff = (
+  projectId: number,
+  sessionId: number
+) =>
+  invoke<AssessmentHandoffReplayDraft | null>(
+    "get_replay_session_assessment_handoff",
+    { projectId, sessionId }
+  );
+
+export const startAssessmentMission = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+}) => invoke<AssessmentMissionDetail>("start_assessment_mission", { input });
+
+export const stopAssessmentMission = (input: {
+  projectId: number;
+  missionId: number;
+  expectedRevision: number;
+}) => invoke<AssessmentMissionDetail>("stop_assessment_mission", { input });
+
 // ---------- 证据化报告 ----------
 
 /** 生成 Markdown 报告文本（预览用） */
@@ -1436,6 +1837,9 @@ export const buildReport = (
   projectId: number,
   assessmentRunId: number | null = null
 ) => invoke<string>("build_report", { projectId, assessmentRunId });
+
+export const buildAssessmentMissionReport = (projectId: number, missionId: number) =>
+  invoke<string>("build_assessment_mission_report", { projectId, missionId });
 
 export interface ReportExportResult {
   markdown_path: string;
@@ -1453,6 +1857,12 @@ export const exportReport = (
     projectId,
     includeSensitiveEvidence,
     assessmentRunId,
+  });
+
+export const exportAssessmentMissionReport = (projectId: number, missionId: number) =>
+  invoke<ReportExportResult>("export_assessment_mission_report", {
+    projectId,
+    missionId,
   });
 
 // ---------- 用量统计 & 计数（Phase 5） ----------

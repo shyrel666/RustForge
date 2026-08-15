@@ -8,6 +8,10 @@ use crate::secrets::{redact_sensitive, SecretString};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+/// AI 分析/规划响应体上限。合法 schema 输出远小于该值；设上限是为了防止
+/// 异常供应商或网关返回超大错误页/流式内容时耗尽内存。
+pub const MAX_LLM_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// LLM 调用的 token 用量（OpenAI 兼容接口的 usage 字段；缺失时为 0）
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Usage {
@@ -182,14 +186,37 @@ impl OpenAiClient {
             })?;
 
         let status = resp.status();
-        let text = Zeroizing::new(resp.text().await.map_err(|error| {
+
+        if resp
+            .content_length()
+            .is_some_and(|length| length > MAX_LLM_RESPONSE_BYTES as u64)
+        {
+            return Err(CallError::Fatal(format!(
+                "LLM 响应声明长度超过 {MAX_LLM_RESPONSE_BYTES} 字节，已拒绝读取"
+            )));
+        }
+
+        let bytes = resp.bytes().await.map_err(|error| {
             CallError::Fatal(redact_sensitive(
                 &format!(
                     "读取 LLM 响应失败: {error}；服务端可能已经生成并计费，为避免重复计费未自动重试"
                 ),
                 &[self.api_key.expose()],
             ))
+        })?;
+
+        if bytes.len() > MAX_LLM_RESPONSE_BYTES {
+            return Err(CallError::Fatal(format!(
+                "LLM 响应超过 {MAX_LLM_RESPONSE_BYTES} 字节，已拒绝读取"
+            )));
+        }
+        let text = Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|error| {
+            CallError::Fatal(redact_sensitive(
+                &format!("读取 LLM 响应失败: 响应不是有效 UTF-8: {error}"),
+                &[self.api_key.expose()],
+            ))
         })?);
+
         if !status.is_success() {
             // 把服务端错误信息透传给用户（如余额不足/模型名错误）
             let snippet: String = text.chars().take(300).collect();
@@ -331,5 +358,14 @@ mod tests {
         assert_eq!(total.prompt_tokens, 150);
         assert_eq!(total.cached_tokens, 120);
         assert_eq!(total.total_tokens, 160);
+    }
+
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn llm_response_size_cap_is_large_enough_for_schema_but_bounded() {
+        // Max expected analysis JSON is well below this cap; the cap is an
+        // operational guard for malformed or streaming-compatible gateways.
+        assert!(MAX_LLM_RESPONSE_BYTES >= 64 * 1024);
+        assert!(MAX_LLM_RESPONSE_BYTES <= 8 * 1024 * 1024);
     }
 }

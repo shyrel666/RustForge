@@ -418,6 +418,14 @@ impl AssessmentExecutor {
             ],
         )
         .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE assessment_missions
+             SET request_count=MIN(request_budget, ?2),
+                 updated_at=strftime('%Y-%m-%d %H:%M:%f','now','localtime')
+             WHERE active_run_id=?1 AND legacy=0",
+            rusqlite::params![self.run_id, self.budget.used()],
+        )
+        .map_err(|error| error.to_string())?;
         service::append_event(
             &conn,
             self.run_id,
@@ -577,6 +585,33 @@ mod tests {
         let pool = open_pool(&dir.path().join("rate.db")).unwrap();
         let url = format!("http://{address}/health");
         let (mut executor, _cancel_tx) = executor_for(&pool, &url, 2.0);
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO assessment_missions(
+                     project_id, title, goal, start_url, exact_origin, status,
+                     budget_profile, request_budget, max_planning_cycles,
+                     provider_id, model, contract_hash, tool_registry_hash,
+                     permission_hash, active_run_id
+                 ) VALUES(?1,'counter mission','counter mission',?2,?3,'discovering',
+                          'quick',40,2,'provider','model',?4,?4,?4,?5)",
+                rusqlite::params![
+                    executor.contract().project_id,
+                    executor.contract().normalized_start_url,
+                    executor.contract().exact_origin,
+                    "d".repeat(64),
+                    executor.run_id(),
+                ],
+            )
+            .unwrap();
+            let mission_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO assessment_mission_runs(mission_id,run_id,cycle)
+                 VALUES(?1,?2,1)",
+                rusqlite::params![mission_id, executor.run_id()],
+            )
+            .unwrap();
+        }
         let mut conditions = Vec::new();
         for index in 0..3 {
             let (_, condition) = executor
@@ -612,6 +647,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(persisted, 3);
+        let mission_persisted: u32 = conn
+            .query_row(
+                "SELECT request_count FROM assessment_missions
+                 WHERE active_run_id=?1",
+                [executor.run_id()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mission_persisted, 3);
     }
 
     #[tokio::test]

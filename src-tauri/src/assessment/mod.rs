@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod discovery;
 pub mod executor;
 pub mod manager;
+pub mod mission;
 pub mod model;
 pub mod outcome;
 pub mod planner;

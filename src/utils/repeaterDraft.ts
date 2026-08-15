@@ -1,4 +1,5 @@
 import type {
+  AssessmentHandoffReplayDraft,
   ReplayHeader,
   ReplayRun,
   ReplayRunSummary,
@@ -148,6 +149,36 @@ export function draftStateFromRun(run: ReplayRun): ReplayDraftState {
     decodeStatus: run.req_decode_status,
     bodyTruncated: run.req_wire_truncated || run.request_input.truncated,
     replayWarning,
+  };
+}
+
+export function draftStateFromAssessmentHandoff(
+  handoff: AssessmentHandoffReplayDraft,
+  projectId: number
+): ReplayDraftState {
+  const request = handoff.draft.request;
+  if (!request || !request.url || !request.method) {
+    const empty = emptyReplayDraftState();
+    empty.sourceProjectId = projectId;
+    empty.decodeStatus = "assessment_manual_recipe_invalid";
+    empty.replayWarning = "人工配方草稿缺少请求结构，已拒绝自动填充；请返回任务重新创建。";
+    return empty;
+  }
+  const bodyBase64 = request.bodyBase64;
+  return {
+    draft: {
+      method: request.method,
+      url: request.url,
+      headersRaw: headersToRaw(request.headers ?? []),
+      body: bodyBase64 ?? request.bodyText ?? "",
+      bodyEncoding: bodyBase64 !== null ? "base64" : "text",
+    },
+    sourceTrafficId: null,
+    sourceProjectId: projectId,
+    decodeStatus: "assessment_manual_recipe",
+    bodyTruncated: false,
+    replayWarning:
+      "这是 AI 安全评估生成的版本化人工配方草稿。请先核对 Scope、身份与差异，再亲自确认发送。",
   };
 }
 

@@ -456,6 +456,20 @@ pub fn update_finding_review(
     load_finding(conn, finding_id)
 }
 
+/// 删除未确认的 Finding。confirmed 结论是已验证的不可变审计事实，禁止无痕删除；
+/// pending/rejected 等假设项可在事务内清理。返回被删除的 Finding 供命令层发事件。
+pub fn delete_finding(conn: &mut Connection, finding_id: i64) -> Result<Finding, String> {
+    let finding = load_finding(conn, finding_id)?;
+    if finding.status == "confirmed" {
+        return Err("已确认的发现不可删除，请先撤销证据或调整状态".into());
+    }
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    tx.execute("DELETE FROM findings WHERE id = ?1", [finding_id])
+        .map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(finding)
+}
+
 fn ensure_finding_exists(conn: &Connection, finding_id: i64) -> Result<(), String> {
     let exists: bool = conn
         .query_row(
@@ -1102,6 +1116,49 @@ mod tests {
         let finding =
             update_finding_status(&mut conn, finding_id, "confirmed", None, "analyst").unwrap();
         assert_eq!(finding.status, "confirmed");
+    }
+
+    #[test]
+    fn delete_finding_removes_unconfirmed_and_guards_confirmed() {
+        let mut conn = database();
+        let (project_id, traffic_id, finding_id) = fixture(&conn);
+
+        let deleted = delete_finding(&mut conn, finding_id).unwrap();
+        assert_eq!(deleted.id, finding_id);
+        assert!(load_finding(&conn, finding_id).is_err());
+
+        conn.execute(
+            "INSERT INTO findings(project_id, traffic_id, source, title, severity, confidence)
+             VALUES(?1,?2,'rule','Second','high',80)",
+            rusqlite::params![project_id, traffic_id],
+        )
+        .unwrap();
+        let confirmed_id = conn.last_insert_rowid();
+        let evidence = create_finding_evidence(
+            &mut conn,
+            confirmed_id,
+            EvidenceSourceType::Traffic,
+            traffic_id,
+            "确认用证据",
+            "analyst",
+        )
+        .unwrap();
+        set_finding_evidence_accepted(
+            &mut conn,
+            confirmed_id,
+            evidence.id,
+            true,
+            "已核对",
+            "analyst",
+        )
+        .unwrap();
+        update_finding_status(&mut conn, confirmed_id, "confirmed", None, "analyst").unwrap();
+
+        let error = delete_finding(&mut conn, confirmed_id).unwrap_err();
+        assert!(error.contains("已确认"), "got: {error}");
+        assert!(load_finding(&conn, confirmed_id).is_ok());
+
+        assert!(delete_finding(&mut conn, 999_999).is_err());
     }
 
     #[test]

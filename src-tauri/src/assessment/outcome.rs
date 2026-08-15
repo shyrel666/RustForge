@@ -621,8 +621,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            error.contains("未与本 check 关联")
-                || error.contains("same-check verification replay"),
+            error.contains("未与本 check 关联") || error.contains("same-check verification replay"),
             "unexpected error: {error}"
         );
         let verifications: i64 = fixture

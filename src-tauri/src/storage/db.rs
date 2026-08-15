@@ -1,6 +1,6 @@
 use super::migrations;
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 测试和离线构建报告使用的单连接数据库句柄。
 pub struct Db {
@@ -21,7 +21,7 @@ impl Db {
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut conn = Connection::open(path).map_err(|e| e.to_string())?;
         conn.execute_batch(PRAGMAS).map_err(|e| e.to_string())?;
-        migrations::migrate(&mut conn).map_err(|e| e.to_string())?;
+        migrate_with_backup(&mut conn, path)?;
         Ok(Self { conn })
     }
 }
@@ -40,7 +40,7 @@ pub fn open_pool(path: &Path) -> Result<Pool, String> {
     migration_conn
         .execute_batch(PRAGMAS)
         .map_err(|e| format!("初始化数据库参数失败: {e}"))?;
-    migrations::migrate(&mut migration_conn).map_err(|e| format!("迁移数据库失败: {e}"))?;
+    migrate_with_backup(&mut migration_conn, path)?;
     drop(migration_conn);
 
     let manager =
@@ -58,6 +58,53 @@ pub fn open_pool(path: &Path) -> Result<Pool, String> {
         ));
     }
     Ok(pool)
+}
+
+/// Released databases are snapshotted with SQLite itself immediately before an
+/// upgrade. `VACUUM INTO` includes committed WAL pages and avoids a torn
+/// filesystem copy while the connection is open. Fresh databases and already
+/// current schemas do not create a backup.
+fn migrate_with_backup(conn: &mut Connection, path: &Path) -> Result<(), String> {
+    let from_version =
+        migrations::schema_version(conn).map_err(|error| format!("读取数据库版本失败: {error}"))?;
+    if from_version > 0
+        && from_version < migrations::LATEST_SCHEMA_VERSION
+        && path.exists()
+        && path.is_file()
+    {
+        let backup_path = next_migration_backup_path(path, from_version)?;
+        let backup_text = backup_path
+            .to_str()
+            .ok_or_else(|| "数据库备份路径不是有效 Unicode".to_string())?;
+        conn.execute("VACUUM INTO ?1", [backup_text])
+            .map_err(|error| format!("创建迁移前备份失败: {error}"))?;
+    }
+    migrations::migrate(conn).map_err(|error| format!("迁移数据库失败: {error}"))?;
+    Ok(())
+}
+
+fn next_migration_backup_path(path: &Path, from_version: u32) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "数据库文件名不是有效 Unicode".to_string())?;
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+    let base = format!(
+        "{file_name}.pre-v{from_version}-to-v{}-{timestamp}",
+        migrations::LATEST_SCHEMA_VERSION
+    );
+    for suffix in 0..1000_u16 {
+        let name = if suffix == 0 {
+            format!("{base}.bak")
+        } else {
+            format!("{base}-{suffix}.bak")
+        };
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("无法分配迁移前备份文件名".to_string())
 }
 
 #[cfg(test)]
@@ -193,5 +240,50 @@ mod tests {
                 .revision,
             revision
         );
+    }
+
+    #[test]
+    fn released_schema_is_backed_up_before_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upgrade.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(PRAGMAS).unwrap();
+            conn.execute_batch(super::migrations::SCHEMA_V1).unwrap();
+            conn.execute_batch(super::migrations::SCHEMA_V2).unwrap();
+            conn.execute_batch(super::migrations::SCHEMA_V3).unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES('marker', 'before')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let upgraded = Db::open(&path).unwrap();
+        assert_eq!(
+            super::migrations::schema_version(&upgraded.conn).unwrap(),
+            super::migrations::LATEST_SCHEMA_VERSION
+        );
+        let backup_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("upgrade.db.pre-v3-to-v4-") && name.ends_with(".bak")
+                    })
+            })
+            .expect("migration backup");
+        let backup = Connection::open(&backup_path).unwrap();
+        let marker: String = backup
+            .query_row("SELECT value FROM settings WHERE key='marker'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker, "before");
     }
 }

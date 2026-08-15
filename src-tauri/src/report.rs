@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const REPORT_SCHEMA_VERSION: u32 = 3;
+pub const MISSION_REPORT_SCHEMA_VERSION: u32 = 4;
 const RAW_FIELD_MAX_BYTES: usize = 8 * 1024;
 const RAW_HEADER_MAX_BYTES: usize = 4 * 1024;
 
@@ -43,6 +44,29 @@ pub struct ReportBundle {
     pub json: String,
     pub project_name: String,
     pub contains_sensitive_evidence: bool,
+}
+
+/// Goal-driven mission report. Values are deliberately structural/redacted so
+/// the report can carry the full orchestration audit without exporting live
+/// identity material or raw target bodies.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionReportDocumentV4 {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub legacy: bool,
+    pub project: Value,
+    pub mission: Value,
+    pub resources: Vec<Value>,
+    pub workstreams: Vec<Value>,
+    pub tool_manifest: Value,
+    pub approval_trace: Vec<Value>,
+    pub actions: Vec<Value>,
+    pub manual_handoffs: Vec<Value>,
+    pub costs: Value,
+    pub coverage_matrix: Value,
+    pub findings: Vec<Value>,
+    pub evidence: Vec<Value>,
+    pub surfaces: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -441,6 +465,722 @@ pub fn build_markdown_for_assessment(
         assessment_run_id,
     )?
     .markdown)
+}
+
+/// Build the v4 goal-driven mission report. Legacy missions are wrapped with
+/// `legacy: true`; the existing v3 run report entry points remain unchanged.
+pub fn build_mission_report_bundle(
+    conn: &Connection,
+    project_id: i64,
+    mission_id: i64,
+) -> Result<ReportBundle, String> {
+    let generated_at = chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let document = build_mission_report_document_at(conn, project_id, mission_id, &generated_at)?;
+    let project_name = document.project["name"]
+        .as_str()
+        .unwrap_or("RustForge")
+        .to_string();
+    let markdown = render_mission_markdown(&document);
+    let json = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("序列化 Mission Report v4 失败: {error}"))?;
+    Ok(ReportBundle {
+        markdown,
+        json,
+        project_name,
+        contains_sensitive_evidence: false,
+    })
+}
+
+pub fn build_mission_report_markdown(
+    conn: &Connection,
+    project_id: i64,
+    mission_id: i64,
+) -> Result<String, String> {
+    Ok(build_mission_report_bundle(conn, project_id, mission_id)?.markdown)
+}
+
+fn build_mission_report_document_at(
+    conn: &Connection,
+    project_id: i64,
+    mission_id: i64,
+    generated_at: &str,
+) -> Result<MissionReportDocumentV4, String> {
+    let detail = crate::assessment::mission::get_detail(conn, project_id, mission_id)?;
+    let mission = &detail.mission;
+    let (project_name, target_host, scope_json, project_created_at): (
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT name,target_host,scope,created_at FROM projects WHERE id=?1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|_| format!("项目 #{project_id} 不存在"))?;
+    let scope: Vec<String> = serde_json::from_str(&scope_json)
+        .map_err(|error| format!("项目 Scope 数据损坏: {error}"))?;
+
+    let mut identity_statement = conn
+        .prepare(
+            "SELECT id,label,header_name,secret_revision
+             FROM assessment_auth_profiles
+             WHERE project_id=?1 AND id IN (?2,?3)
+             ORDER BY id",
+        )
+        .map_err(|error| error.to_string())?;
+    let identities = identity_statement
+        .query_map(
+            rusqlite::params![
+                project_id,
+                mission.identity_a_profile_id.unwrap_or(-1),
+                mission.identity_b_profile_id.unwrap_or(-1)
+            ],
+            |row| {
+                Ok(json!({
+                    "profileId": row.get::<_, i64>(0)?,
+                    "label": row.get::<_, String>(1)?,
+                    "headerName": row.get::<_, String>(2)?,
+                    "secretRevision": row.get::<_, i64>(3)?,
+                    "secretIncluded": false,
+                }))
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let context = if mission.legacy {
+        None
+    } else {
+        Some(crate::assessment::mission::preview_context(
+            conn, project_id, mission_id,
+        )?)
+    };
+    let enabled_tool_ids = context
+        .as_ref()
+        .map(|preview| {
+            preview
+                .tools
+                .iter()
+                .map(|tool| tool.id.as_str())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let disabled_tools = crate::assessment::catalog::TOOL_SPECS
+        .iter()
+        .filter(|tool| !enabled_tool_ids.contains(tool.id))
+        .map(|tool| json!({"id": tool.id, "version": tool.version, "decision": "disabled"}))
+        .collect::<Vec<_>>();
+
+    let resources = detail
+        .resources
+        .iter()
+        .map(|resource| {
+            sanitize_json_for_mission_report(
+                json!({
+                    "id": resource.id,
+                    "type": resource.resource_type,
+                    "sourceId": resource.source_id,
+                    "displayName": resource.display_name,
+                    "mediaType": resource.media_type,
+                    "summary": resource.summary,
+                    "contentHash": resource.content_hash,
+                    "createdAt": resource.created_at,
+                }),
+                "mission.resource",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut linked_checks = HashMap::<i64, i64>::new();
+    let mut link_statement = conn
+        .prepare(
+            "SELECT ac.action_id,COUNT(*)
+             FROM assessment_action_checks ac
+             JOIN assessment_actions a ON a.id=ac.action_id
+             WHERE a.mission_id=?1 GROUP BY ac.action_id",
+        )
+        .map_err(|error| error.to_string())?;
+    for row in link_statement
+        .query_map([mission_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| error.to_string())?
+    {
+        let (action_id, count) = row.map_err(|error| error.to_string())?;
+        linked_checks.insert(action_id, count);
+    }
+
+    let workstreams = detail
+        .workstreams
+        .iter()
+        .map(|stream| {
+            json!({
+                "id": stream.id,
+                "parentId": stream.parent_id,
+                "stableKey": stream.stable_key,
+                "title": stream.title,
+                "objective": stream.objective,
+                "status": stream.status,
+                "sortOrder": stream.sort_order,
+                "actionCount": detail.actions.iter().filter(|action| action.workstream_id == Some(stream.id)).count(),
+                "createdAt": stream.created_at,
+                "updatedAt": stream.updated_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let actions = detail
+        .actions
+        .iter()
+        .map(|action| {
+            sanitize_json_for_mission_report(
+                json!({
+                    "id": action.id,
+                    "workstreamId": action.workstream_id,
+                    "tool": {"id": action.tool_id, "version": action.tool_version},
+                    "executionKind": action.execution_kind,
+                    "riskLevel": action.risk_level,
+                    "surfaceId": action.surface_id,
+                    "identityMode": action.identity_mode,
+                    "parameters": action.parameters,
+                    "rationale": action.rationale,
+                    "expectedSignal": action.expected_signal,
+                    "requestCost": action.request_cost,
+                    "permissionSnapshot": action.permission_snapshot,
+                    "permissionHash": action.permission_hash,
+                    "approval": {
+                        "status": action.approval_status,
+                        "source": action.approval_source,
+                        "approvedAt": action.approved_at,
+                    },
+                    "status": action.status,
+                    "policyReason": action.policy_reason,
+                    "redactedRequest": action.redacted_request,
+                    "requestHash": action.request_hash,
+                    "redactedResponse": action.redacted_response,
+                    "responseHash": action.response_hash,
+                    "result": action.result,
+                    "resultHash": action.result_hash,
+                    "linkedCheckCount": linked_checks.get(&action.id).copied().unwrap_or(0),
+                    "createdAt": action.created_at,
+                    "startedAt": action.started_at,
+                    "completedAt": action.completed_at,
+                }),
+                "mission.action",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let approval_trace = detail
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == "system"
+                || matches!(
+                    message.message_kind.as_str(),
+                    "goal" | "follow_up" | "approval"
+                )
+        })
+        .map(|message| {
+            sanitize_json_for_mission_report(
+                json!({
+                    "id": message.id,
+                    "role": message.role,
+                    "kind": message.message_kind,
+                    "content": message.content,
+                    "contentHash": message.content_hash,
+                    "oldValue": message.old_value,
+                    "newValue": message.new_value,
+                    "details": message.details,
+                    "redactionManifest": message.redaction_manifest,
+                    "revision": message.revision,
+                    "createdAt": message.created_at,
+                }),
+                "mission.approvalTrace",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let manual_handoffs = detail
+        .handoffs
+        .iter()
+        .map(|handoff| {
+            sanitize_json_for_mission_report(
+                json!({
+                    "id": handoff.id,
+                    "actionId": handoff.action_id,
+                    "recipe": {"id": handoff.recipe_id, "version": handoff.recipe_version},
+                    "draft": handoff.draft,
+                    "draftHash": handoff.draft_hash,
+                    "replaySessionId": handoff.replay_session_id,
+                    "replayRunId": handoff.replay_run_id,
+                    "evidenceId": handoff.evidence_id,
+                    "status": handoff.status,
+                    "createdAt": handoff.created_at,
+                    "updatedAt": handoff.updated_at,
+                }),
+                "mission.manualHandoff",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let token_costs: (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(ar.prompt_tokens),0),
+                    COALESCE(SUM(ar.cached_tokens),0),
+                    COALESCE(SUM(ar.completion_tokens),0),
+                    COALESCE(SUM(ar.total_tokens),0)
+             FROM assessment_rounds round_row
+             JOIN assessment_mission_runs mr ON mr.run_id=round_row.run_id
+             JOIN analysis_runs ar ON ar.id=round_row.analysis_run_id
+             WHERE mr.mission_id=?1",
+            [mission_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let planned_request_cost = detail
+        .actions
+        .iter()
+        .map(|action| action.request_cost as u64)
+        .sum::<u64>();
+    let check_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assessment_checks c
+             JOIN assessment_mission_runs mr ON mr.run_id=c.run_id
+             WHERE mr.mission_id=?1",
+            [mission_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let findings = load_mission_findings(conn, mission_id)?;
+    let evidence = load_mission_evidence(conn, project_id, mission_id)?;
+    let surfaces = detail
+        .surfaces
+        .iter()
+        .map(|surface| {
+            json!({
+                "surfaceId": surface.surface_id,
+                "kind": surface.surface_kind,
+                "method": surface.method,
+                "pathShape": surface.path_shape,
+                "queryParameterNames": surface.query_parameter_names,
+                "formFields": surface.form_fields,
+                "contentTypes": surface.content_types,
+                "identityVisibility": surface.identity_visibility,
+                "responseStructureHash": surface.response_structure_hash,
+                "sources": surface.source_kinds,
+                "safeToRequest": surface.safe_to_request,
+                "concreteCount": surface.concrete_count,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(MissionReportDocumentV4 {
+        schema_version: MISSION_REPORT_SCHEMA_VERSION,
+        generated_at: generated_at.into(),
+        legacy: mission.legacy,
+        project: json!({
+            "id": project_id,
+            "name": project_name,
+            "targetHost": sanitize_text(&target_host, "mission.project.targetHost"),
+            "authorizedScope": scope,
+            "createdAt": project_created_at,
+        }),
+        mission: sanitize_json_for_mission_report(
+            json!({
+                "id": mission.id,
+                "title": mission.title,
+                "goal": mission.goal,
+                "startUrl": redact_report_url(&mission.start_url),
+                "exactOrigin": mission.exact_origin,
+                "status": mission.status,
+                "autonomyMode": mission.autonomy_mode,
+                "budgetProfile": mission.budget_profile,
+                "identityProfiles": identities,
+                "providerId": mission.provider_id,
+                "model": mission.model,
+                "tlsPolicy": mission.tls_policy,
+                "includeRecentTraffic": mission.include_recent_traffic,
+                "contractHash": mission.contract_hash,
+                "toolRegistryHash": mission.tool_registry_hash,
+                "permissionHash": mission.permission_hash,
+                "contextHash": mission.context_hash,
+                "contextApprovedHash": mission.context_approved_hash,
+                "activeRunId": mission.active_run_id,
+                "legacyRunId": mission.legacy_run_id,
+                "revision": mission.revision,
+                "stopReason": mission.stop_reason,
+                "createdAt": mission.created_at,
+                "startedAt": mission.started_at,
+                "endedAt": mission.ended_at,
+            }),
+            "mission",
+        ),
+        resources,
+        workstreams,
+        tool_manifest: json!({
+            "registryVersion": crate::assessment::catalog::TOOL_REGISTRY_VERSION,
+            "registryHash": crate::assessment::catalog::registry_hash(),
+            "permissionHash": context.as_ref().map(|preview| preview.permission_hash.as_str()).unwrap_or(&mission.permission_hash),
+            "enabledTools": context.as_ref().map(|preview| serde_json::to_value(&preview.tools).unwrap_or_else(|_| json!([]))).unwrap_or_else(|| json!([])),
+            "disabledTools": disabled_tools,
+            "projectOverrides": detail.tool_permissions,
+            "manualRecipesAutoSend": false,
+        }),
+        approval_trace,
+        actions,
+        manual_handoffs,
+        costs: json!({
+            "requestBudget": mission.request_budget,
+            "requestCount": mission.request_count,
+            "plannedRequestCost": planned_request_cost,
+            "requestsPerSecond": mission.requests_per_second,
+            "singleConcurrency": true,
+            "planningCycles": {"completed": mission.completed_cycles, "maximum": mission.max_planning_cycles},
+            "materializedChecks": check_count,
+            "aiTokens": {"prompt": token_costs.0, "cached": token_costs.1, "completion": token_costs.2, "total": token_costs.3},
+        }),
+        coverage_matrix: json!({
+            "confirmed": detail.coverage.confirmed,
+            "suspected": detail.coverage.suspected,
+            "notObserved": detail.coverage.not_observed,
+            "coverageGap": detail.coverage.coverage_gap,
+            "surfaceCount": detail.surfaces.len(),
+            "workstreamCount": detail.workstreams.len(),
+        }),
+        findings,
+        evidence,
+        surfaces,
+    })
+}
+
+fn load_mission_findings(conn: &Connection, mission_id: i64) -> Result<Vec<Value>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT f.id,f.title,f.vuln_type,f.severity,f.confidence,
+                    f.status,f.reasoning,f.verify_steps,f.analyst_notes,
+                    f.created_at,f.updated_at
+             FROM findings f
+             JOIN assessment_finding_links finding_link ON finding_link.finding_id=f.id
+             JOIN assessment_verifications v ON v.id=finding_link.verification_id
+             JOIN assessment_checks c ON c.id=v.check_id
+             JOIN assessment_mission_runs mr ON mr.run_id=c.run_id
+             WHERE mr.mission_id=?1 ORDER BY f.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let findings = statement
+        .query_map([mission_id], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "vulnerabilityType": row.get::<_, String>(2)?,
+                "severity": row.get::<_, String>(3)?,
+                "confidence": row.get::<_, i64>(4)?,
+                "status": row.get::<_, String>(5)?,
+                "reasoning": row.get::<_, String>(6)?,
+                "verificationSteps": row.get::<_, String>(7)?,
+                "analystNotes": row.get::<_, String>(8)?,
+                "createdAt": row.get::<_, String>(9)?,
+                "updatedAt": row.get::<_, String>(10)?,
+            }))
+        })
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            row.map(|value| sanitize_json_for_mission_report(value, "mission.finding"))
+                .map_err(|error| error.to_string())
+        })
+        .collect();
+    findings
+}
+
+fn load_mission_evidence(
+    conn: &Connection,
+    project_id: i64,
+    mission_id: i64,
+) -> Result<Vec<Value>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT e.id,e.source_type,e.source_id,e.observation,e.redacted_snapshot,
+                    e.content_hash,e.qualifies_for_confirmation,e.created_by,e.created_at,
+                    MAX(COALESCE(fe.accepted,0))
+             FROM evidence e
+             LEFT JOIN finding_evidence fe ON fe.evidence_id=e.id
+             LEFT JOIN assessment_verifications v ON v.id=fe.verification_id
+             LEFT JOIN assessment_checks c ON c.id=v.check_id
+             LEFT JOIN assessment_mission_runs mr ON mr.run_id=c.run_id
+             WHERE e.project_id=?1 AND (
+                 mr.mission_id=?2 OR e.id IN (
+                     SELECT h.evidence_id FROM assessment_manual_handoffs h
+                     JOIN assessment_actions a ON a.id=h.action_id
+                     WHERE a.mission_id=?2 AND h.evidence_id IS NOT NULL
+                 )
+             )
+             GROUP BY e.id ORDER BY e.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params![project_id, mission_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, bool>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, bool>(9)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut evidence = Vec::new();
+    for row in rows {
+        let row = row.map_err(|error| error.to_string())?;
+        let snapshot: Value = serde_json::from_str(&row.4)
+            .map_err(|error| format!("Evidence #{} 快照损坏: {error}", row.0))?;
+        let canonical = serde_json::to_string(&snapshot).map_err(|error| error.to_string())?;
+        if sha256(canonical.as_bytes()) != row.5 {
+            return Err(format!("Evidence #{} 快照 hash 校验失败", row.0));
+        }
+        evidence.push(sanitize_json_for_mission_report(
+            json!({
+                "id": row.0,
+                "sourceType": row.1,
+                "sourceId": row.2,
+                "observation": row.3,
+                "redactedSnapshot": snapshot,
+                "contentHash": row.5,
+                "snapshotHashVerified": true,
+                "qualifiesForConfirmation": row.6,
+                "createdBy": row.7,
+                "createdAt": row.8,
+                "accepted": row.9,
+            }),
+            "mission.evidence",
+        ));
+    }
+    Ok(evidence)
+}
+
+fn sanitize_json_for_mission_report(value: Value, location: &str) -> Value {
+    fn walk(value: Value, location: &str, key: Option<&str>) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(child_key, child)| {
+                        let child_location = format!("{location}.{child_key}");
+                        let sanitized = walk(child, &child_location, Some(&child_key));
+                        (child_key, sanitized)
+                    })
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, child)| walk(child, &format!("{location}[{index}]"), key))
+                    .collect(),
+            ),
+            Value::String(text) => {
+                let normalized_key = key.unwrap_or_default().to_ascii_lowercase();
+                if [
+                    "authorization",
+                    "cookie",
+                    "set-cookie",
+                    "x-api-key",
+                    "x-auth-token",
+                    "secret",
+                    "apikey",
+                    "api_key",
+                    "access_token",
+                    "refresh_token",
+                ]
+                .contains(&normalized_key.as_str())
+                {
+                    Value::String("[REDACTED]".into())
+                } else if normalized_key.ends_with("url") {
+                    Value::String(redact_report_url(&text))
+                } else {
+                    Value::String(sanitize_text(&text, location))
+                }
+            }
+            other => other,
+        }
+    }
+    walk(value, location, None)
+}
+
+fn render_mission_markdown(document: &MissionReportDocumentV4) -> String {
+    use std::fmt::Write as _;
+
+    let mission = &document.mission;
+    let coverage = &document.coverage_matrix;
+    let costs = &document.costs;
+    let mut output = String::new();
+    let _ = writeln!(output, "# RustForge AI 安全评估报告\n");
+    let _ = writeln!(
+        output,
+        "> Report Schema v{} · {} · 默认仅含脱敏、不可变证据\n",
+        document.schema_version,
+        if document.legacy {
+            "LEGACY 只读运行"
+        } else {
+            "Mission v2"
+        }
+    );
+    let _ = writeln!(output, "## 任务目标\n");
+    let _ = writeln!(
+        output,
+        "- 项目：{} (# {})",
+        markdown_cell(document.project["name"].as_str().unwrap_or("—")),
+        document.project["id"]
+    );
+    let _ = writeln!(
+        output,
+        "- 任务：{} (# {})",
+        markdown_cell(mission["title"].as_str().unwrap_or("—")),
+        mission["id"]
+    );
+    let _ = writeln!(output, "- 状态：{}", mission["status"]);
+    let _ = writeln!(
+        output,
+        "- 起始 surface：{}",
+        markdown_cell(mission["startUrl"].as_str().unwrap_or("—"))
+    );
+    let _ = writeln!(
+        output,
+        "\n{}\n",
+        mission["goal"].as_str().unwrap_or("未记录目标")
+    );
+
+    let _ = writeln!(output, "## 结论与覆盖\n");
+    let _ = writeln!(
+        output,
+        "| confirmed | suspected | not observed | coverage gap | surfaces |"
+    );
+    let _ = writeln!(output, "|---:|---:|---:|---:|---:|");
+    let _ = writeln!(
+        output,
+        "| {} | {} | {} | {} | {} |\n",
+        coverage["confirmed"],
+        coverage["suspected"],
+        coverage["notObserved"],
+        coverage["coverageGap"],
+        coverage["surfaceCount"]
+    );
+
+    let _ = writeln!(output, "## 成本与硬边界\n");
+    let _ = writeln!(
+        output,
+        "- 目标请求：{} / {}（计划成本 {}）",
+        costs["requestCount"], costs["requestBudget"], costs["plannedRequestCost"]
+    );
+    let _ = writeln!(
+        output,
+        "- 速率：{} RPS；单请求并发：是",
+        costs["requestsPerSecond"]
+    );
+    let _ = writeln!(output, "- AI Token：{}\n", costs["aiTokens"]["total"]);
+
+    let _ = writeln!(output, "## 工作流\n");
+    for stream in &document.workstreams {
+        let _ = writeln!(
+            output,
+            "- **{}** — {}（{} 个动作，状态 {}）",
+            markdown_cell(stream["title"].as_str().unwrap_or("—")),
+            markdown_cell(stream["objective"].as_str().unwrap_or("—")),
+            stream["actionCount"],
+            stream["status"]
+        );
+    }
+    if document.workstreams.is_empty() {
+        let _ = writeln!(output, "- 无 v2 工作流（legacy 或尚未确认上下文）");
+    }
+
+    let _ = writeln!(output, "\n## 工具动作与审批\n");
+    let _ = writeln!(
+        output,
+        "| ID | 工具 | 风险 | 权限/审批 | 状态 | 请求成本 | 结果 hash |"
+    );
+    let _ = writeln!(output, "|---:|---|---|---|---|---:|---|");
+    for action in &document.actions {
+        let _ = writeln!(
+            output,
+            "| {} | {}@{} | {} | {} / {} | {} | {} | {} |",
+            action["id"],
+            markdown_cell(action["tool"]["id"].as_str().unwrap_or("—")),
+            markdown_cell(action["tool"]["version"].as_str().unwrap_or("—")),
+            markdown_cell(action["riskLevel"].as_str().unwrap_or("—")),
+            markdown_cell(action["permissionSnapshot"].as_str().unwrap_or("—")),
+            markdown_cell(action["approval"]["status"].as_str().unwrap_or("—")),
+            markdown_cell(action["status"].as_str().unwrap_or("—")),
+            action["requestCost"],
+            markdown_cell(action["resultHash"].as_str().unwrap_or("—")),
+        );
+    }
+
+    let _ = writeln!(output, "\n## 人工接力\n");
+    if document.manual_handoffs.is_empty() {
+        let _ = writeln!(output, "- 无人工接力记录");
+    }
+    for handoff in &document.manual_handoffs {
+        let _ = writeln!(
+            output,
+            "- Handoff #{} · {}@{} · 状态 {} · ReplayRun {} · Evidence {}（默认未接受）",
+            handoff["id"],
+            markdown_cell(handoff["recipe"]["id"].as_str().unwrap_or("—")),
+            markdown_cell(handoff["recipe"]["version"].as_str().unwrap_or("—")),
+            handoff["status"],
+            handoff["replayRunId"],
+            handoff["evidenceId"],
+        );
+    }
+
+    let _ = writeln!(output, "\n## Findings / Evidence\n");
+    let _ = writeln!(
+        output,
+        "- 关联 Findings：{}；关联 Evidence：{}",
+        document.findings.len(),
+        document.evidence.len()
+    );
+    for finding in &document.findings {
+        let _ = writeln!(
+            output,
+            "- Finding #{} · **{}** · {} / {}",
+            finding["id"],
+            markdown_cell(finding["title"].as_str().unwrap_or("—")),
+            finding["severity"],
+            finding["status"]
+        );
+    }
+
+    let _ = writeln!(output, "\n## 可追溯性\n");
+    let _ = writeln!(output, "- contract hash：{}", mission["contractHash"]);
+    let _ = writeln!(
+        output,
+        "- tool registry hash：{}",
+        mission["toolRegistryHash"]
+    );
+    let _ = writeln!(output, "- permission hash：{}", mission["permissionHash"]);
+    let _ = writeln!(output, "- context hash：{}", mission["contextHash"]);
+    let _ = writeln!(
+        output,
+        "- 审批事件：{}；资源附件：{}；人工配方自动发送：否",
+        document.approval_trace.len(),
+        document.resources.len()
+    );
+    output
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ")
+        .trim()
+        .to_string()
 }
 
 /// Build the default redacted structured JSON backup.

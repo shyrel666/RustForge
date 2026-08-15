@@ -1,8 +1,8 @@
 # RustForge 安全边界与失败策略
 
-> 实现核查日期：2026-08-01；适用范围：当前 Tauri/Vue 桌面应用与 SQLite v3 基线。
+> 实现核查日期：2026-08-03；适用范围：当前 Tauri/Vue 桌面应用与 SQLite v4 / Assessment Mission v2 基线。
 
-RustForge 的核心边界不是“模型足够谨慎”，而是后端运行契约、双策略授权、固定模板、大小/速率预算、结构校验、确定性验证器和事务约束共同形成的可测试系统。本文记录当前代码强制的边界、跨边界数据和失败方式。
+RustForge 的核心边界不是“模型足够谨慎”，而是后端 mission 契约、ToolSpec registry、权限/审批状态机、`AssessmentPolicy + ScopePolicy`、大小/速率预算、结构校验、确定性验证器和事务约束共同形成的可测试系统。本文记录当前代码强制的边界、跨边界数据和失败方式。
 
 ## 信任分区
 
@@ -11,7 +11,7 @@ flowchart LR
     User["用户\n书面授权与人工决策"]
     Renderer["Vue renderer\n不可信 IPC 调用方"]
     Backend["Rust 后端\n授权/校验/事务边界"]
-    DB["SQLite v3\n约束与审计"]
+    DB["SQLite v4\n约束、等待状态与审计"]
     Target["目标 HTTP 数据\n完全不可信"]
     Provider["外部 AI provider\n不可信输出/数据接收方"]
     OSSecrets["系统凭据库"]
@@ -65,23 +65,25 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 |---|---|---|
 | 代理转发 | 用户在外部浏览器发起 | Scope 只控制 MITM/记录；正文流式转发 |
 | Repeater | 用户每次明确点击发送 | 后端 Scope、持久化 attempt、30 秒超时、无自动重定向 |
-| Assessment | 用户确认一次契约后由后台 runner 执行 | `AssessmentPolicy + ScopePolicy`、固定模板、单并发、attempt 先落库、预算/速率/取消、无自动重定向 |
+| Assessment Mission | 用户确认上下文；action 按后端权限自动或逐项获批 | ToolSpec/权限 hash、`AssessmentPolicy + ScopePolicy`、单并发、attempt 先落库、预算/速率/取消、无自动重定向 |
+| 人工 handoff | 后端只生成 Repeater 草稿；用户在 Repeater 点击发送 | `manual` session、同项目 handoff、普通 Repeater Scope 复核；创建/打开/回传 API 均不发送 |
 | AI `/models` | 用户在 provider 设置中测试/刷新 | 已保存 Key 由后端从凭据库读取；未保存 Key 只经专用 IPC 用于当次请求且不落库；Base URL 必须是无 userinfo/query/fragment 的 HTTP(S) URL |
 | AI chat | 用户确认最终上下文后触发分析/计划 | preview hash 重建比对、脱敏、硬上限、输出校验 |
 | updater check | 应用一次静默检查或用户手动检查 | 固定 HTTPS endpoint、签名验证；它不是目标测试请求 |
 | 外部链接 | 用户点击 | 只允许 HTTP(S)，拒绝空白/控制字符/引号，直接调用系统 opener 而不经过 shell |
 
-规则、Finding、Evidence 到达和旧测试计划状态变化都不能触发目标网络请求。Assessment 只有在用户确认契约并调用 `start_assessment` 后启动；AI 选择模板不能绕过后端策略，也不能直接调用 Repeater API。
+规则、Finding、Evidence 到达、附件导入、消息、等待态恢复和旧测试计划状态变化都不能触发目标网络请求。Mission 只有在 context hash 被确认、动作权限满足并调用开始/恢复后，才可进入串行 runner；AI 选择工具不能绕过后端策略，也不能调用 Repeater 发送 API。
 
 ### Assessment 请求安全不变量
 
-- preview hash 绑定项目与规范化 Scope、起始 URL 和精确 origin、TLS、排除路径、预算/速率、身份 profile 与秘密修订、资源归属、AI provider/model、脱敏策略、三轮上限以及模板 registry 版本/content hash；启动和每次请求前都会重建关键漂移项。
-- 全局最多一个活动评估，请求并发固定为 1。默认 1 请求/秒、120 次；硬上限 2 请求/秒、300 次。发现最多使用 `min(40, request_budget / 3)`，为验证保留预算。
+- contract/context hash 绑定项目与规范化 Scope、起始 URL 和精确 origin、TLS、预算档位/速率、身份 profile 与秘密修订、项目资源摘要、AI provider/model、脱敏披露、ToolSpec registry 和工具权限快照；确认、启动、审批和执行时重建关键漂移项。
+- 全局最多一个网络活动 mission，请求并发固定为 1。快速/标准/深入分别是 40/120/300 请求与 2/4/6 次规划；硬上限 2 RPS、300 请求。
 - 只允许无正文的 `GET / HEAD / OPTIONS`，禁止 Host/长度/连接/升级/代理鉴权/方法覆盖 Header；危险路径段和 `_method`、破坏性 `action/do` 参数会重复 URL 解码后检查。
 - 只访问精确 origin。3xx 不跟随；同源 Location 作为新候选重新校验，跨源只形成 coverage gap。
 - 429 立即停止；连续三个 5xx/超时停止；Scope、身份、AI 或 registry 漂移以及用户取消都会停止，目标请求不自动重试。
 - 每响应最多读取 1 MiB、每轮最多 20 MiB；超限停止读取并标记不完整，不完整响应没有自动确认资格。
-- 启动时活动 run 转为 `interrupted`，所有开放 check 写明失败/中断；绝不自动恢复可能产生网络副作用的动作。
+- `disabled`、拒绝、待审批、过期 revision、伪造 tool/resource/surface/参数和 manual recipe 都在 socket 创建前返回或持久等待。
+- 启动时只有 `discovering/planning/executing/verifying` mission/run 转为 `interrupted`；上下文、动作、人工 handoff 等等待态原样恢复并释放执行器。
 
 “非破坏”描述的是客户端不提供状态变更方法、正文、攻击脚本、任意 payload、浏览器执行或暴力能力；目标若错误地让 GET 改变状态仍是残余风险，不能由客户端证明为零。
 
@@ -111,6 +113,7 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 - profile 元数据、Header 名称与秘密修订保存在 SQLite；值只存 `SecretStore`，renderer 只能读取 `has_secret`。
 - 仅允许 `Authorization / Cookie / X-API-Key / X-Auth-Token`，总大小不超过 16 KiB。A/B 必须是不同 profile，运行前以内存常量数据比较拒绝完全相同的秘密。
 - live 请求使用真实 Header；审计请求、request hash、ReplayRun、事件、错误、AI prompt 和报告只使用 `[AUTH_PROFILE:<id>]` 与修订号。响应中出现的已知 secret、裸 bearer/cookie 值及常见编码形式也会遮盖。
+- mission 的 goal/message、resource summary、action detail、surface、事件和 Report v4 同样不得出现真实身份值；敏感扫描同时覆盖原文、URL 编码、Base64 和十六进制变体。
 - 不提交登录表单、不保存用户名/密码、不自动更新 Cookie。profile/项目删除对 SQLite 与系统凭据库执行补偿式清理，凭据写入失败则回滚元数据。
 
 ### MITM CA
@@ -151,13 +154,22 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 
 失败策略：上下文 hash 漂移、Schema/引用无效或校验失败时停止建 Finding，不降低脱敏或伪装为成功。
 
-### Assessment 规划 DSL
+### Mission 上下文与规划 DSL
 
-- 最多三轮、每轮最多 12 个 check；模型输出只有 `template_id / endpoint_id / parameter_name / identity_mode / rationale`。
-- endpoint 是后端生成的不透明 ID；parameter 必须来自端点清单。模型看不到 query 值、凭据、正文或原始响应，只看到路径、参数名、状态、Content-Type、鉴权存在性和被动标签。
-- 模型不能输出 URL、HTTP 方法、Header、正文、payload、shell、SQL、JavaScript、状态或漏洞结论。未知字段、伪造 endpoint/template、重复 check、参数不匹配或超预算都会成为 policy-rejected 记录且不建 socket。
-- HTTP 派生数据位于转义后的 `UNTRUSTED_HTTP_DATA`；供应商支持时使用 JSON Schema，失败后只固定重试一次。每轮输入、脱敏 manifest、usage 和输出 hash 写入 `analysis_runs`。
+- 首次模型调用前展示最终结构化上下文和 disclosure manifest；新增数据类别、附件或 provider/策略/registry/权限漂移后，旧确认失效并重新等待。
+- 最多 2/4/6 个规划周期；模型输出只有 workstream、`tool_id / surface_id / resource_id / parameter_name / identity_mode / rationale / expected_signal`。
+- surface/resource 是后端生成的不透明 ID；parameter 必须来自登记清单。禁用工具不进入上下文。模型看不到 query 值、凭据或可编辑请求，只看到脱敏路径形状、字段/key path、状态、类型、身份可见性和被动标签。
+- 模型不能输出 URL、HTTP 方法、Header、正文、payload、shell、SQL、JavaScript、状态或漏洞结论。未知字段、伪造 tool/surface/resource、重复 action、参数不匹配或超预算都会成为 policy-rejected 记录且不建 socket。
+- ToolSpec、参数 Schema、身份要求、风险、请求成本和默认权限由后端 registry 固定；模型不能判断或提升权限。HTTP 派生数据位于转义后的 `UNTRUSTED_HTTP_DATA`；固定 planner fixture 不需要外部 API key。
 - 轮间只返回验证器结论码与剩余覆盖；最终报告由本地结构化数据生成，模型不能改写事实结论。
+
+### 人工配方不变量
+
+- `manual_recipe` 的最高权限语义是“允许创建草稿”，从不等于自动发送；手动、智能、自动三种模式都不能改变这一点。
+- 用户审批只把人工工具加入当前 mission 的 planner allowlist；模型选中的 `surface_id / parameter_name / identity_mode` 必须再次命中当前 run 的后端清单，动作才会进入 `manual_ready`。伪造、未获批或已消费的选择只产生 coverage gap，零 socket。
+- draft 只含版本固定的非秘密差异和 `sendAutomatically = false / requiresUserClick = true`，创建时不存在 replay attempt/run。
+- 只有绑定 handoff 的同项目 `owner_kind = manual` session 可读取草稿；发送仍走普通 Repeater 路径并在建连前重查 Scope。
+- 只有同 handoff/session 的 ReplayRun 可回传，且只产生未接受 Evidence；不会自动 confirmed Finding。
 
 ## 边界六：声明式规则
 
@@ -195,9 +207,9 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 
 ## 边界九：报告与文件输出
 
-- Evidence Report Schema v3 默认只读取不可变脱敏 Evidence 并重算 hash；confirmed 缺少合格 Evidence 时拒绝整份报告。
-- 报告分 `confirmed_findings / suspected_findings / not_observed_checks / coverage_gaps`，并包含 run 契约、registry、AI rounds、预算、身份标签、停止原因和时间线。
-- 可指定 `assessment_run_id` 生成单次报告；未指定时汇总项目 Finding 并附最近终态评估覆盖。旧 task node 只作为 `legacy_plan_summary`，不表示已执行。
+- Mission Report Schema v4 默认且仅读取脱敏 mission/action/resource/handoff 与 hash 校验过的不可变 Evidence；confirmed 缺少合格 Evidence 时拒绝整份报告。
+- 报告分 `confirmed / suspected / not_observed / coverage_gap`，并包含目标、附件摘要、工作流、ToolSpec/权限 manifest、审批轨迹、动作结果、人工接力、请求/Token 成本和覆盖矩阵。
+- 旧 `assessment_run_id` API 继续生成 Schema v3；旧 run 的 mission wrapper 明确 `legacy = true`。旧 task node 不进入 v2 执行结果。
 - 同一结构化 document 生成 Markdown 与 JSON，避免两个格式语义漂移。
 - 用户文本、行首 Markdown、动态代码围栏、URL 和文件组件均转义/规范化。
 - 使用 `create_new` 和冲突后缀，不覆盖旧文件；任一写入失败会清理本次文件对。
@@ -208,7 +220,7 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 ## 边界十：renderer 与桌面运行时
 
 - 生产 CSP 的 `connect-src` 只允许 Tauri IPC；开发模式只额外允许本机 Vite/HMR。
-- 项目切换使旧 Promise/代际 ownership 失效；Findings、Assessment、报告、规则诊断和 Repeater 不接纳旧项目延迟结果。Assessment 事件还同时校验 `project_id + selected run_id` 并去重，遗漏事件从持久化 detail 恢复。
+- 项目切换使旧 Promise/代际 ownership 失效；Findings、Mission、报告、规则诊断和 Repeater 不接纳旧项目延迟结果。Mission 事件校验 `projectId + missionId + runId + revision` 并去重，遗漏事件从持久化 detail 恢复。
 - Repeater 在第一次 `await` 前同步取得唯一发送令牌，快速双击/Enter 不产生两个网络副作用。
 - 前端所有确认仅是交互层；后端仍执行 Scope、项目、hash、关系和状态检查。
 
@@ -220,10 +232,12 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 | Capture | chunked、错误长度、压缩炸弹、流取消、重复 Header、峰值内存 |
 | Secrets/CA | 凭据不回前端、日志过滤、ACL/权限、原子写、只导出证书 |
 | AI | 结构化脱敏、提示注入语料、preview hash TOCTOU、invalid run 不建 Finding |
-| Assessment policy | 伪造模板/endpoint、POST/body、危险路径、跨 origin、Scope 外、预算超限均无 socket |
+| Mission/ToolSpec policy | disabled/拒绝/待审批/manual recipe、伪造工具/resource/surface/参数、过期 revision、POST/body、危险路径、跨 origin、Scope 外和漂移均无 socket |
 | Assessment network | 无重定向、速率、429/三次 5xx 停止、字节上限、取消、启动中断恢复 |
-| Assessment secrets | SQLite/Replay/AI/事件/错误/报告无 A/B 值，凭据库失败补偿 |
-| Verifiers | 六模板正反例、截断、动态响应与误报边界 |
+| Assessment secrets | SQLite/消息/action/resource/Replay/AI/事件/报告无 A/B 值及常见编码变体，凭据库失败补偿 |
+| Discovery/surface | HTML/form/static route/JSON/OpenAPI/redirect/A-B；跨 origin、POST 和危险路径请求为零 |
+| Verifiers | 既有与新增工具正反例；截断、动态、不完整或语义不足不得 confirmed |
+| Approval/handoff | 三模式、工具覆盖、拒绝重规划、排队/停止/重启/并发；草稿零发送、同 handoff 回传、Evidence 默认未接受 |
 | Rules | 恶意 regex/深度/候选、超时、队列满、截断置信度、shadow 评测 |
 | Evidence | 跨项目、来源资格、事件、最后合格证据、不可变 snapshot/hash |
 | Plan | proposal 幂等、人工锁、并发 revision、依赖环、阻塞祖先 |
@@ -231,11 +245,11 @@ Scope 只表达 host。Assessment 的单次契约额外固定端口/origin、路
 
 ## 当前明确不覆盖
 
-- 任意无人值守扫描、自动利用、自动 PoC、自动修复或模型驱动 shell；Assessment 仅执行内置只读模板。
+- 任意 Shell、浏览器利用、自动利用、自动 PoC、自动修复、多 Agent 或并行目标请求；Mission 仅执行 registry 中非破坏工具。
 - SQL/命令注入、目录穿越、SSRF、上传、爆破、DoS、POST/form 业务逻辑和浏览器脚本验证。
 - WebSocket 消息历史、SSE、gRPC、GraphQL 和完整 HTTP/2 语义。
 - 第三方规则/插件市场、任意脚本和在线自动更新规则。
 - 源码调用链分析；Vulnhuntr 类思路只属于未来独立源码辅助模式。
-- 数据库 v3 具备 v2→v3 真实迁移；面向公开发布的长期备份/降级策略仍需独立设计。
+- 数据库 v4 具备 v3→v4 事务迁移和迁移前备份；不提供自动降级到旧 schema。
 
 新增任何网络、文件、进程或插件能力前，必须先在本文登记信任区、授权点、审计实体、预算、失败策略和测试，再进入实现。

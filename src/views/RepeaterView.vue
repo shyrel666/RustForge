@@ -475,6 +475,25 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
+      <section
+        v-if="rep.activeAssessmentHandoff"
+        class="assessment-handoff-banner"
+        aria-live="polite"
+      >
+        <div>
+          <el-tag size="small" type="warning">人工接力</el-tag>
+          <strong>
+            Mission #{{ rep.activeAssessmentHandoff.missionId }} ·
+            {{ rep.activeAssessmentHandoff.recipeId }}@{{ rep.activeAssessmentHandoff.recipeVersion }}
+          </strong>
+        </div>
+        <p>
+          {{ rep.activeAssessmentHandoff.draft.proposedDifference?.instructions }}
+          当前编辑器已载入后端版本化草稿；RustForge 不会替你点击发送。
+        </p>
+        <code>draft sha256: {{ rep.activeAssessmentHandoff.draftHash }}</code>
+      </section>
+
       <div class="rf-toolbar">
         <div class="rf-toolbar-group request-bar">
           <el-select v-model="rep.draft.method" class="method" size="default">
@@ -790,6 +809,35 @@ onBeforeUnmount(() => {
 }
 .tls-select {
   width: 210px;
+}
+.assessment-handoff-banner {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--rf-warning) 55%, var(--rf-border));
+  border-radius: var(--rf-radius-control);
+  background: color-mix(in srgb, var(--rf-warning) 9%, var(--rf-bg-panel));
+}
+.assessment-handoff-banner > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.assessment-handoff-banner strong {
+  color: var(--rf-text);
+  font-size: 12px;
+}
+.assessment-handoff-banner p {
+  margin: 0;
+  color: var(--rf-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.assessment-handoff-banner code {
+  color: var(--rf-text-muted);
+  font-family: var(--rf-font-mono);
+  font-size: 9px;
 }
 .request-bar {
   flex: 1;

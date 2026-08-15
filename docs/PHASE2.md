@@ -12,7 +12,7 @@
 
 ## AI 上下文防火墙
 
-`src-tauri/src/ai/context.rs`、`redaction.rs` 和 `validation.rs` 共同定义实际发送边界：
+`src-tauri/src/ai/context.rs`、`redaction.rs` 和 `validation_calibrated.rs`（经 `ai/mod.rs` 以 `validation` 导出）共同定义实际发送边界：
 
 - 默认遮盖 URL 查询值、Authorization/Cookie/Set-Cookie 等敏感 Header、JSON/表单/multipart 中的秘密字段、常见凭据格式和高熵值。
 - 默认不发送已截断、二进制或解码异常正文；这三个放宽开关相互独立。
@@ -25,8 +25,8 @@
 
 ## 模型输出与 AnalysisRun
 
-- 内置分析提示词 ID 为 `rustforge.traffic-analysis`，当前 builtin version 为 3；自定义模板采用 append-only 版本历史，支持复制、回滚和恢复内置版本。
-- 模型最多返回 4 个假设。结构化校验拒绝未知字段、非法严重度、越界长度、未知标准引用和伪造 evidence ref。
+- 内置分析提示词 ID 为 `rustforge.traffic-analysis`，当前 builtin version 为 5；自定义模板采用 append-only 版本历史，支持复制、回滚和恢复内置版本。
+- 模型最多返回 4 个假设。结构化校验拒绝未知字段、非法严重度、越界长度、未知标准引用和伪造 evidence ref；证据引用先按唯一值去重，再按 body/header/status/定位信息强度做确定性置信度校准，重复假设会合并并写入审计警告。
 - 不支持 provider-side JSON Schema 时仍执行同一套本地校验；首次失败只使用固定 retry 消息重试一次。
 - 每次得到模型响应都会写入 `analysis_runs`：provider/Base URL、模型、提示词版本、输入 hash、policy、脱敏 manifest、token、Schema 模式、校验结果和原始输出 hash。
 - 校验失败的 AnalysisRun 可审计，但不能创建 AI Finding；通过的假设仍以 `pending` 状态开始。
@@ -70,7 +70,7 @@
 
 ## 自动验证
 
-测试覆盖结构化脱敏、提示注入标记、上下文 hash 失效、Schema 与本地校验、无效输出不建 Finding、秘密不进入设置/日志、知识包 hash 与版本查找、规则恶意 JSON/正则/深度/候选预算、截断置信度、后台队列和稳定指纹。
+测试覆盖结构化脱敏、提示注入标记、上下文 hash 失效、Schema 与本地校验、无效输出不建 Finding、秘密不进入设置/日志、知识包 hash 与版本查找、括号平衡 JSON 提取、证据强度校准与重复假设合并、规则恶意 JSON/正则/深度/候选预算、截断置信度、后台队列和稳定指纹。
 
 复现命令：
 
@@ -90,7 +90,7 @@ pnpm check
 
 ## 已知限制
 
-- AI 质量取决于脱敏后上下文和所选 provider；grounding 通过也只表示引用了已发送字段，不表示漏洞成立。
+- AI 质量取决于脱敏后上下文和所选 provider；grounding 通过也只表示引用了已发送字段且置信度已经过后端证据强度校准，不表示漏洞成立。
 - 当前只加载内置规则包；没有第三方规则安装、签名市场或热更新入口。
 - 规则只分析已捕获的有界快照，无法从截断片段推断完整正文。
 - 当前黑盒 HTTP 流程不读取源码；源码辅助模式属于后续独立设计。
