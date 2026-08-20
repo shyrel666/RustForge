@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { isNavigationFailure, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { ArrowRight, Plus } from "@element-plus/icons-vue";
+import { ArrowRight } from "@element-plus/icons-vue";
 import { useProjectStore } from "../stores/project";
 import {
   countTraffic,
@@ -151,12 +151,9 @@ async function resumeProject(item: Project) {
 <template>
   <div class="home-page">
     <section v-if="project.projects.length === 0" class="empty-home">
-      <div class="empty-mark" aria-hidden="true">
-        <el-icon :size="22"><Plus /></el-icon>
-      </div>
       <h1>还没有授权项目</h1>
       <p>
-        点击右上角的“+”新建项目，用于隔离目标、流量、任务与发现。
+        点击右上角的"+"新建项目，用于隔离目标、流量、任务与发现。
       </p>
     </section>
 
@@ -276,7 +273,7 @@ async function resumeProject(item: Project) {
 .section-kicker {
   margin: 0 0 10px 2px;
   color: var(--rf-text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
@@ -301,8 +298,7 @@ async function resumeProject(item: Project) {
 
 .project-mark,
 .recent-mark,
-.no-current-mark,
-.empty-mark {
+.no-current-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -329,7 +325,7 @@ async function resumeProject(item: Project) {
   margin: 0;
   overflow: hidden;
   color: var(--rf-text);
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 720;
   letter-spacing: -0.015em;
   text-overflow: ellipsis;
@@ -342,7 +338,8 @@ async function resumeProject(item: Project) {
   gap: 0 7px;
   margin-top: 6px;
   color: var(--rf-text-secondary);
-  font-size: 11.5px;
+  font-size: 12.5px;
+  font-weight: var(--rf-font-weight-secondary);
   line-height: 1.55;
 }
 
@@ -360,7 +357,7 @@ async function resumeProject(item: Project) {
   background: var(--rf-accent);
   color: var(--rf-accent-on);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   transition:
@@ -406,7 +403,7 @@ async function resumeProject(item: Project) {
   display: block;
   min-height: 20px;
   color: var(--rf-text);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 20px;
 }
@@ -415,7 +412,8 @@ async function resumeProject(item: Project) {
   display: block;
   margin-top: 2px;
   color: var(--rf-text-secondary);
-  font-size: 10.5px;
+  font-size: 12px;
+  font-weight: var(--rf-font-weight-secondary);
 }
 
 .metric-skeleton {
@@ -439,7 +437,8 @@ async function resumeProject(item: Project) {
 
 .recent-head > span {
   color: var(--rf-text-secondary);
-  font-size: 10.5px;
+  font-size: 12px;
+  font-weight: var(--rf-font-weight-secondary);
 }
 
 .recent-list {
@@ -481,7 +480,7 @@ async function resumeProject(item: Project) {
   border-radius: 10px;
   background: var(--rf-bg-raised);
   color: var(--rf-text-secondary);
-  font-size: 10.5px;
+  font-size: 11.5px;
 }
 
 .recent-row:hover .recent-mark {
@@ -500,7 +499,7 @@ async function resumeProject(item: Project) {
 .recent-copy > strong {
   overflow: hidden;
   color: var(--rf-text);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -508,7 +507,8 @@ async function resumeProject(item: Project) {
 
 .recent-copy > span {
   color: var(--rf-text-secondary);
-  font-size: 10.5px;
+  font-size: 12px;
+  font-weight: var(--rf-font-weight-secondary);
   line-height: 1.5;
 }
 
@@ -520,7 +520,7 @@ async function resumeProject(item: Project) {
   padding: 6px 9px;
   border-radius: 7px;
   color: var(--rf-accent);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -558,7 +558,8 @@ async function resumeProject(item: Project) {
 .empty-home p {
   margin: 5px 0 0;
   color: var(--rf-text-secondary);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
   line-height: 1.6;
 }
 
@@ -573,13 +574,6 @@ async function resumeProject(item: Project) {
 
 .empty-home p {
   max-width: 420px;
-}
-
-.empty-mark {
-  width: 48px;
-  height: 48px;
-  margin-bottom: var(--rf-space-4);
-  border-radius: 14px;
 }
 
 @keyframes metric-pulse {

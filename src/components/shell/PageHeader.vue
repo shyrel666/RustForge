@@ -13,8 +13,8 @@ function goBack() {
 
 <template>
   <header class="page-header">
-    <button type="button" class="back-btn" aria-label="返回" @click="goBack">
-      <el-icon :size="18"><ArrowLeft /></el-icon>
+    <button type="button" class="back-btn" aria-label="返回概览" title="返回概览" @click="goBack">
+      <el-icon :size="14"><ArrowLeft /></el-icon>
     </button>
     <div class="page-copy">
       <h1 class="page-title">{{ title }}</h1>
@@ -29,31 +29,31 @@ function goBack() {
 <style scoped>
 .page-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--rf-space-3);
   flex-shrink: 0;
+  padding-bottom: var(--rf-space-2);
+  border-bottom: 1px solid var(--rf-border);
 }
 
 .back-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  margin-top: 2px;
-  border: none;
-  border-radius: 10px;
-  background: var(--rf-bg-pill);
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
   color: var(--rf-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
-  transition:
-    background var(--rf-duration) var(--rf-ease),
-    color var(--rf-duration) var(--rf-ease);
+  transition: all var(--rf-duration) var(--rf-ease);
 }
 
 .back-btn:hover {
   color: var(--rf-text);
+  border-color: var(--rf-border-strong);
   background: var(--rf-bg-hover);
 }
 
@@ -61,28 +61,28 @@ function goBack() {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .page-title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 750;
-  letter-spacing: -0.02em;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
   color: var(--rf-text);
-  line-height: 1.2;
+  line-height: 1.25;
 }
 
 .page-desc {
   margin: 0;
   font-size: 13px;
-  line-height: 1.45;
+  font-weight: var(--rf-font-weight-secondary);
+  line-height: 1.4;
   color: var(--rf-text-secondary);
 }
 
 .page-actions {
   margin-left: auto;
-  margin-top: 2px;
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);

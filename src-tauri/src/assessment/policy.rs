@@ -155,10 +155,11 @@ impl AssessmentPolicy {
                 "URL 路径包含内置禁止的破坏性动作段",
             ));
         }
+        let candidate_path = canonical_policy_path(authorized.url.path());
         if self
             .excluded_paths
             .iter()
-            .any(|excluded| path_matches_prefix(authorized.url.path(), excluded))
+            .any(|excluded| path_matches_prefix(&candidate_path, excluded))
         {
             return Err(reject("USER_EXCLUDED_PATH", "URL 命中用户排除路径"));
         }
@@ -224,22 +225,32 @@ pub fn normalize_excluded_paths(paths: &[String]) -> Result<Vec<String>, PolicyR
 
 fn normalize_excluded_path(raw: &str) -> Result<String, PolicyRejection> {
     let raw = raw.trim();
-    if raw.is_empty()
-        || !raw.starts_with('/')
-        || raw.contains(['?', '#', '\r', '\n'])
-        || raw.len() > 2048
+    let canonical = canonical_policy_path(raw);
+    if canonical.is_empty()
+        || !canonical.starts_with('/')
+        || canonical.contains(['?', '#', '\r', '\n'])
+        || canonical.len() > 2048
     {
         return Err(reject(
             "INVALID_EXCLUDED_PATH",
             "排除路径必须是 2048 字符内、以 / 开始且不含 query/fragment 的路径",
         ));
     }
-    let normalized = if raw.len() > 1 {
-        raw.trim_end_matches('/').to_string()
+    let normalized = if canonical.len() > 1 {
+        canonical.trim_end_matches('/').to_string()
     } else {
-        raw.to_string()
+        canonical
     };
     Ok(normalized)
+}
+
+/// `url::Url::path()` deliberately returns percent-encoded ASCII. Policy
+/// comparisons instead use the path shape that common routing stacks see
+/// after decoding. Reusing the same bounded decoder as destructive-path
+/// checks prevents encoded and double-encoded aliases from bypassing a user
+/// exclusion without introducing an unbounded decode loop.
+fn canonical_policy_path(path: &str) -> String {
+    percent_decode_repeatedly(path).replace('\\', "/")
 }
 
 fn path_matches_prefix(path: &str, excluded: &str) -> bool {
@@ -498,6 +509,27 @@ mod tests {
             "https://example.test/admin/archive/2026",
         ] {
             assert!(policy().authorize(&scope(), candidate("GET", url)).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_encoded_aliases_of_user_excluded_paths() {
+        let policy =
+            AssessmentPolicy::new("https://example.test:443", &["/private/reports".into()])
+                .unwrap();
+
+        for url in [
+            "https://example.test/pr%69vate/reports",
+            "https://example.test/pr%2569vate/reports/2026",
+            "https://example.test/private%2Freports",
+        ] {
+            assert_eq!(
+                policy
+                    .authorize(&scope(), candidate("GET", url))
+                    .unwrap_err()
+                    .code,
+                "USER_EXCLUDED_PATH"
+            );
         }
     }
 

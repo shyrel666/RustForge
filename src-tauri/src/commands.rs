@@ -4057,8 +4057,12 @@ pub async fn start_assessment_mission(
             model: resolved.model,
             supports_json_schema: resolved.supports_json_schema,
         };
-        let run = crate::assessment::service::create_run(&mut db, &preview)?;
-        crate::assessment::mission::link_run(&mut db, input.project_id, input.mission_id, run.id)?;
+        let run = crate::assessment::mission::create_and_link_run(
+            &mut db,
+            input.project_id,
+            input.mission_id,
+            &preview,
+        )?;
         (client, provider, preview, run)
     };
 

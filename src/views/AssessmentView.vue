@@ -5,9 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Aim,
   ChatDotRound,
-  CircleCheck,
   Close,
-  Connection,
   Document,
   FolderOpened,
   Key,
@@ -69,6 +67,10 @@ const reportVisible = ref(false);
 const reportLoading = ref(false);
 const reportExporting = ref(false);
 const reportMarkdown = ref("");
+const reportProjectId = ref<number | null>(null);
+const reportMissionId = ref<number | null>(null);
+let reportGeneration = 0;
+let reportExportGeneration = 0;
 const followUp = ref("");
 const followUpSending = ref(false);
 
@@ -103,18 +105,18 @@ const runResources = ref<AssessmentRun[]>([]);
 const STATUS_LABEL: Record<AssessmentMissionStatus, string> = {
   draft: "草稿",
   awaiting_context_approval: "等待上下文确认",
-  queued: "已进入队列",
+  queued: "已入队",
   discovering: "发现攻击面",
-  planning: "AI 规划",
+  planning: "诊断规划",
   awaiting_action_approval: "等待动作审批",
-  executing: "执行工具",
+  executing: "执行探针",
   verifying: "确定性验证",
   awaiting_manual_handoff: "等待人工接力",
   completed: "已完成",
   stopped: "已停止",
   cancelled: "已取消",
   failed: "失败",
-  interrupted: "应用中断",
+  interrupted: "中断",
 };
 
 const STATUS_TAG: Record<AssessmentMissionStatus, TagType> = {
@@ -156,9 +158,9 @@ const BUDGETS: Array<{
   cycles: number;
   description: string;
 }> = [
-  { key: "quick", name: "快速", requests: 40, cycles: 2, description: "验证主要入口与低风险基线" },
-  { key: "standard", name: "标准", requests: 120, cycles: 4, description: "默认，平衡覆盖与目标负载" },
-  { key: "deep", name: "深入", requests: 300, cycles: 6, description: "扩大 surface 覆盖，仍保持串行" },
+  { key: "quick", name: "快速模式", requests: 40, cycles: 2, description: "验证主要入口与低风险基线" },
+  { key: "standard", name: "标准模式", requests: 120, cycles: 4, description: "默认平衡覆盖与目标负载" },
+  { key: "deep", name: "深入模式", requests: 300, cycles: 6, description: "扩大 Surface 覆盖，仍保持串行" },
 ];
 
 const canStart = computed(
@@ -181,6 +183,7 @@ const eventAnnouncement = computed(() => missions.lastEvent?.message ?? "");
 watch(
   projectId,
   async (id) => {
+    invalidateReport();
     missions.activateProject(id);
     creating.value = false;
     if (id === null) return;
@@ -197,6 +200,15 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => missions.selectedMissionId,
+  (missionId) => {
+    if (reportVisible.value && missionId !== reportMissionId.value) {
+      invalidateReport();
+    }
+  }
+);
+
 onMounted(async () => {
   try {
     await missions.bindEvents();
@@ -205,7 +217,10 @@ onMounted(async () => {
   }
 });
 
-onUnmounted(() => void missions.unbindEvents());
+onUnmounted(() => {
+  invalidateReport();
+  void missions.unbindEvents();
+});
 
 function seedStartUrl() {
   const target = project.current?.target_host.trim() ?? "";
@@ -251,72 +266,54 @@ async function createMission() {
     return;
   }
   if (!createForm.writtenAuthorizationConfirmed) {
-    ElMessage.warning("请确认已获得目标系统的书面授权");
+    ElMessage.warning("请确认已获得书面授权声明");
     return;
   }
-  if (
-    createForm.identityAProfileId !== null &&
-    createForm.identityAProfileId === createForm.identityBProfileId
-  ) {
-    ElMessage.warning("身份 A 与身份 B 不能使用同一凭据");
-    return;
-  }
+
+  const excluded = createForm.excludedPaths
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
   try {
     await missions.create({
       projectId: projectId.value,
-      title: createForm.title.trim() || null,
+      title: createForm.title.trim() || undefined,
       goal: createForm.goal.trim(),
       startUrl: createForm.startUrl.trim(),
-      excludedPaths: createForm.excludedPaths
-        .split(/[\n,;]+/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-      tlsPolicy: createForm.tlsPolicy,
+      excludedPaths: excluded,
       identityAProfileId: createForm.identityAProfileId,
       identityBProfileId: createForm.identityBProfileId,
-      includeRecentTraffic: createForm.includeRecentTraffic,
-      autonomyMode: createForm.autonomyMode,
       budgetProfile: createForm.budgetProfile,
+      autonomyMode: createForm.autonomyMode,
+      tlsPolicy: createForm.tlsPolicy,
+      includeRecentTraffic: createForm.includeRecentTraffic,
       writtenAuthorizationConfirmed: true,
     });
     creating.value = false;
-    contextDialogVisible.value = true;
-    ElMessage.success("任务已创建，请检查最终 AI 上下文");
+    resetComposer();
+    if (missions.context?.requiresApproval) contextDialogVisible.value = true;
+    ElMessage.success("评估任务已创建；请先审查 AI 上下文披露");
   } catch (error) {
     ElMessage.error(String(error));
   }
 }
 
 async function confirmContext() {
+  if (!missions.context) return;
   try {
     await missions.confirmContext();
     contextDialogVisible.value = false;
-    ElMessage.success(
-      missions.pendingActions.length > 0 ? "上下文已确认，请审批待处理动作" : "上下文与动作策略已确认"
-    );
-  } catch (error) {
-    ElMessage.error(String(error));
-  }
-}
-
-async function decide(action: AssessmentAction, approve: boolean, sameTool = false) {
-  try {
-    await missions.decide(action, approve, sameTool);
-    ElMessage.success(approve ? "动作已批准" : "动作已拒绝；不会创建目标请求");
+    ElMessage.success("上下文已确认；后端正在规划安全动作");
   } catch (error) {
     ElMessage.error(String(error));
   }
 }
 
 async function startMission() {
-  if (missions.context?.requiresApproval) {
-    contextDialogVisible.value = true;
-    ElMessage.warning("上下文或权限已变化，请再次确认");
-    return;
-  }
   try {
     await missions.start();
-    ElMessage.success("任务已进入串行执行器");
+    ElMessage.success("评估引擎已启动");
   } catch (error) {
     ElMessage.error(String(error));
   }
@@ -324,27 +321,34 @@ async function startMission() {
 
 async function stopMission() {
   try {
-    await ElMessageBox.confirm(
-      "将立即取消等待；正在执行的单个请求安全结束后保存部分结果。",
-      "停止当前任务",
-      { type: "warning", confirmButtonText: "停止并保存", cancelButtonText: "继续任务" }
-    );
+    await ElMessageBox.confirm("确定安全停止当前任务？当前正在进行的单个请求会安全结束，后续计划不会执行。", "停止评估任务", {
+      confirmButtonText: "停止",
+      cancelButtonText: "继续运行",
+      type: "warning",
+    });
     await missions.stop();
-    ElMessage.success("停止请求已记录");
+    ElMessage.info("评估已安全停止");
   } catch (error) {
-    if (String(error).includes("cancel")) return;
+    if (error !== "cancel") ElMessage.error(String(error));
+  }
+}
+
+async function decide(action: AssessmentAction, approve: boolean, rememberForTool = false) {
+  try {
+    await missions.decide(action, approve, rememberForTool);
+    ElMessage.success(approve ? "已批准执行该动作" : "已拒绝该动作");
+  } catch (error) {
     ElMessage.error(String(error));
   }
 }
 
 async function sendFollowUp() {
-  const content = followUp.value.trim();
-  if (!content) return;
+  if (!followUp.value.trim()) return;
   followUpSending.value = true;
   try {
-    await missions.sendMessage(content);
+    await missions.sendMessage(followUp.value.trim());
     followUp.value = "";
-    ElMessage.success("追问已加入，下一个规划点会重新规划");
+    ElMessage.success("引导提示已进入执行队列");
   } catch (error) {
     ElMessage.error(String(error));
   } finally {
@@ -475,38 +479,85 @@ async function linkHandoff() {
 }
 
 async function previewReport() {
-  if (!detail.value) return;
+  const current = detail.value;
+  if (!current) return;
+  const projectId = current.mission.projectId;
+  const missionId = current.mission.id;
+  const generation = ++reportGeneration;
+  reportExportGeneration += 1;
+  reportProjectId.value = projectId;
+  reportMissionId.value = missionId;
+  reportMarkdown.value = "";
   reportVisible.value = true;
   reportLoading.value = true;
+  reportExporting.value = false;
   try {
-    reportMarkdown.value = await buildAssessmentMissionReport(
-      detail.value.mission.projectId,
-      detail.value.mission.id
-    );
+    const markdown = await buildAssessmentMissionReport(projectId, missionId);
+    if (
+      generation === reportGeneration &&
+      reportVisible.value &&
+      detail.value?.mission.projectId === projectId &&
+      detail.value?.mission.id === missionId
+    ) {
+      reportMarkdown.value = markdown;
+    }
   } catch (error) {
-    reportMarkdown.value = `报告生成失败：${String(error)}`;
+    if (
+      generation === reportGeneration &&
+      reportVisible.value &&
+      detail.value?.mission.projectId === projectId &&
+      detail.value?.mission.id === missionId
+    ) {
+      reportMarkdown.value = `报告生成失败：${String(error)}`;
+    }
   } finally {
-    reportLoading.value = false;
+    if (generation === reportGeneration) reportLoading.value = false;
   }
 }
 
 async function exportMissionReport() {
-  if (!detail.value) return;
+  const projectId = reportProjectId.value;
+  const missionId = reportMissionId.value;
+  if (
+    projectId === null ||
+    missionId === null ||
+    detail.value?.mission.projectId !== projectId ||
+    detail.value?.mission.id !== missionId
+  ) {
+    return;
+  }
+  const generation = ++reportExportGeneration;
   reportExporting.value = true;
   try {
-    const result = await exportAssessmentMissionReport(
-      detail.value.mission.projectId,
-      detail.value.mission.id
-    );
-    ElMessage.success(`Report v4 已导出：${result.markdown_path}`);
+    const result = await exportAssessmentMissionReport(projectId, missionId);
+    if (
+      generation === reportExportGeneration &&
+      reportVisible.value &&
+      reportProjectId.value === projectId &&
+      reportMissionId.value === missionId
+    ) {
+      ElMessage.success(`Report v4 已导出：${result.markdown_path}`);
+    }
   } catch (error) {
-    ElMessage.error(String(error));
+    if (generation === reportExportGeneration) ElMessage.error(String(error));
   } finally {
-    reportExporting.value = false;
+    if (generation === reportExportGeneration) reportExporting.value = false;
   }
 }
 
+function invalidateReport(close = true) {
+  reportGeneration += 1;
+  reportExportGeneration += 1;
+  reportLoading.value = false;
+  reportExporting.value = false;
+  reportMarkdown.value = "";
+  reportProjectId.value = null;
+  reportMissionId.value = null;
+  if (close) reportVisible.value = false;
+}
+
 function selectMission(missionId: number) {
+  invalidateReport();
   creating.value = false;
   void missions.selectMission(missionId).catch((error) => ElMessage.error(String(error)));
 }
@@ -542,7 +593,7 @@ function riskType(risk: string): TagType {
 
 function resultLabel(action: AssessmentAction) {
   if (action.status === "awaiting_approval") return "等待批准";
-  if (action.executionKind === "manual_recipe" && action.status === "queued") return "已批准 · 等待 AI 选择";
+  if (action.executionKind === "manual_recipe" && action.status === "queued") return "已批准 · 等待选择";
   if (action.status === "manual_ready") return "等待人工发送";
   if (action.status === "manual_result_pending") return "Evidence 待复核";
   if (action.status === "completed") return "已完成";
@@ -554,13 +605,13 @@ function resultLabel(action: AssessmentAction) {
 <template>
   <div class="assessment-page">
     <PageHeader
-      title="AI 安全评估"
-      description="目标驱动地发现、规划、审批、验证并沉淀证据；AI 不能生成或发送任意请求。"
+      title="AI 自动化安全评估引擎"
+      description="目标驱动地发现、规划、审批、验证并沉淀证据；严格单并发、2 RPS 与 Rust 后端 Scope 约束。"
     >
       <template v-if="project.current">
         <el-button :icon="Refresh" circle aria-label="刷新任务" :loading="missions.loading" @click="refresh" />
         <el-button class="inspector-trigger" :icon="Setting" @click="inspectorDrawerVisible = true">边界与覆盖</el-button>
-        <el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">新任务</el-button>
+        <el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">新评估任务</el-button>
       </template>
     </PageHeader>
 
@@ -569,34 +620,35 @@ function resultLabel(action: AssessmentAction) {
     <section v-if="!project.current" class="project-empty-shell">
       <EmptyState
         centered
-        title="先选择一个已授权项目"
-        description="任务必须绑定后端 Scope、AI Provider、身份凭据与书面授权。未选择项目时不会构造任何目标请求。"
+        title="选择已授权项目以启动评估"
+        description="评估任务绑定后端 Scope、AI 供应商、身份凭据与书面授权。未选择项目时不会执行任何请求。"
       >
-        <template #icon><FolderOpened :size="26" /></template>
+        <template #icon><FolderOpened :size="24" /></template>
         <template #action>
           <div class="project-actions">
             <el-select v-model="emptyProjectChoice" placeholder="选择已有项目" aria-label="选择已有项目">
               <el-option v-for="item in project.projects" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
             <el-button type="primary" :disabled="emptyProjectChoice === null" @click="selectEmptyProject">进入项目</el-button>
-            <el-button :icon="Plus" @click="createProjectVisible = true">创建项目</el-button>
+            <el-button :icon="Plus" @click="createProjectVisible = true">创建新项目</el-button>
           </div>
         </template>
       </EmptyState>
-      <div class="readiness-grid" aria-label="开始评估前准备清单">
-        <div><CircleCheck /><strong>Scope</strong><span>由项目白名单和精确 origin 双重约束</span></div>
-        <div><Connection /><strong>AI Provider</strong><span>创建任务时由后端重新解析并绑定</span></div>
-        <div><Key /><strong>身份</strong><span>真实值只保存在系统凭据库，不进入上下文</span></div>
-        <div><Document /><strong>授权</strong><span>每个新任务都需要显式确认书面授权</span></div>
-      </div>
     </section>
 
     <div v-else class="mission-layout">
+      <!-- 任务历史与工作流左侧栏 -->
       <aside class="mission-sidebar" aria-label="评估任务历史">
         <div class="sidebar-heading">
-          <div><small>{{ project.current.name }}</small><strong>任务历史</strong></div>
-          <el-button text :icon="Plus" aria-label="创建新任务" @click="resetComposer(); creating = true" />
+          <div class="sidebar-project-info">
+            <small class="project-tag">{{ project.current.name }}</small>
+            <strong class="sidebar-title">任务记录</strong>
+          </div>
+          <button type="button" class="icon-add-btn" title="创建新任务" @click="resetComposer(); creating = true">
+            <el-icon :size="13"><Plus /></el-icon>
+          </button>
         </div>
+
         <div class="mission-list">
           <button
             v-for="mission in missions.missions"
@@ -606,24 +658,27 @@ function resultLabel(action: AssessmentAction) {
             :class="{ active: mission.id === missions.selectedMissionId && !creating }"
             @click="selectMission(mission.id)"
           >
-            <span class="mission-item-top">
-              <strong>{{ mission.title }}</strong>
+            <div class="mission-item-top">
+              <strong class="item-title">{{ mission.title }}</strong>
               <el-tag size="small" :type="STATUS_TAG[mission.status]">{{ STATUS_LABEL[mission.status] }}</el-tag>
-            </span>
+            </div>
             <span class="mission-goal">{{ mission.goal }}</span>
-            <span class="mission-meta">
+            <div class="mission-meta">
               <span>#{{ mission.id }}{{ mission.legacy ? " · legacy" : "" }}</span>
               <time>{{ formatTime(mission.updatedAt) }}</time>
-            </span>
+            </div>
           </button>
-          <div v-if="missions.missions.length === 0" class="sidebar-empty">还没有任务</div>
+          <div v-if="missions.missions.length === 0" class="sidebar-empty">暂无评估任务</div>
         </div>
 
         <div v-if="detail && !creating" class="workflow-list">
-          <header>逻辑工作流</header>
+          <header class="workflow-header">执行逻辑工作流</header>
           <div v-for="stream in detail.workstreams" :key="stream.id" class="workflow-row">
             <span class="workflow-dot" :data-status="stream.status" />
-            <div><strong>{{ stream.title }}</strong><small>{{ stream.objective }}</small></div>
+            <div class="workflow-content">
+              <strong>{{ stream.title }}</strong>
+              <small>{{ stream.objective }}</small>
+            </div>
           </div>
           <div v-if="detail.workstreams.length === 0" class="sidebar-empty">
             {{ detail.mission.legacy ? "旧运行不激活 task_nodes" : "确认上下文后生成工作流" }}
@@ -631,142 +686,280 @@ function resultLabel(action: AssessmentAction) {
         </div>
       </aside>
 
-      <main class="mission-main">
+      <!-- 任务主控台 -->
+      <main class="mission-main" :class="{ 'mission-main--creating': creating }">
+        <!-- 创建任务视图 -->
         <section v-if="creating" class="composer-card">
           <header class="composer-heading">
-            <div><span class="eyebrow">NEW MISSION</span><h2>描述你想达成的安全目标</h2><p>后端会把目标分解为有界工作流，模型只能选择已注册工具与不透明 surface。</p></div>
+            <div>
+              <span class="eyebrow">NEW MISSION</span>
+              <h2>设定安全测试目标</h2>
+              <p>评估引擎会将目标自动分解为严格受控的工作流，模型仅能调用预注册 ToolSpec 与已知 Surface。</p>
+            </div>
             <el-button v-if="missions.missions.length" text :icon="Close" @click="creating = false">取消</el-button>
           </header>
+
           <el-form label-position="top" class="mission-form">
             <div class="form-grid two">
-              <el-form-item label="任务标题（可选）"><el-input v-model="createForm.title" maxlength="160" placeholder="例如：登录后订单接口授权边界" /></el-form-item>
-              <el-form-item label="起始 URL" required><el-input v-model="createForm.startUrl" placeholder="https://target.example/" /></el-form-item>
-            </div>
-            <el-form-item label="评估目标" required>
-              <el-input v-model="createForm.goal" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="说明业务区域、希望回答的问题和不希望触碰的边界。例：检查登录前后订单 API 的可见性、CORS 与只读授权边界，并为高风险输入点生成人工 Repeater 配方。" />
-            </el-form-item>
-            <div class="form-grid two">
-              <el-form-item label="身份 A">
-                <el-select v-model="createForm.identityAProfileId" clearable placeholder="匿名或选择身份 A">
-                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
-                </el-select>
+              <el-form-item label="任务标题（可选）">
+                <el-input v-model="createForm.title" maxlength="160" placeholder="例如：订单接口水平越权边界诊断" />
               </el-form-item>
-              <el-form-item label="身份 B">
-                <el-select v-model="createForm.identityBProfileId" clearable placeholder="可选，用于 A/B 只读比较">
-                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
-                </el-select>
+              <el-form-item label="起始 URL" required>
+                <el-input v-model="createForm.startUrl" placeholder="https://target.example/" />
               </el-form-item>
             </div>
-            <el-button text :icon="Key" class="identity-link" @click="identityDialogVisible = true">新建系统凭据身份</el-button>
 
-            <label class="field-label">评估档位</label>
+            <el-form-item label="评估目标与问题假设" required>
+              <el-input
+                v-model="createForm.goal"
+                type="textarea"
+                :rows="4"
+                maxlength="4000"
+                show-word-limit
+                placeholder="描述业务范围、希望验证的安全假设以及严格排除项。例：检查 /api/v1/orders 接口的只读授权边界、CORS 配置与参数枚举风险，对破坏性操作只生成 Repeater 配方。"
+              />
+            </el-form-item>
+
+            <div class="form-grid two">
+              <el-form-item label="身份 A（测试主体）">
+                <el-select v-model="createForm.identityAProfileId" clearable placeholder="匿名或选择凭据 A">
+                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="身份 B（对比主体）">
+                <el-select v-model="createForm.identityBProfileId" clearable placeholder="可选，用于越权 A/B 比对">
+                  <el-option v-for="profile in missions.profiles" :key="profile.id" :label="profile.label" :value="profile.id" />
+                </el-select>
+              </el-form-item>
+            </div>
+
+            <div class="identity-action-bar">
+              <el-button text :icon="Key" class="identity-link" @click="identityDialogVisible = true">新建凭据身份</el-button>
+            </div>
+
+            <label class="field-label">评估预算档位</label>
             <div class="budget-options">
-              <label v-for="budget in BUDGETS" :key="budget.key" :class="{ selected: createForm.budgetProfile === budget.key }">
+              <label
+                v-for="budget in BUDGETS"
+                :key="budget.key"
+                :class="{ selected: createForm.budgetProfile === budget.key }"
+              >
                 <input v-model="createForm.budgetProfile" type="radio" :value="budget.key" />
-                <strong>{{ budget.name }}</strong><span>{{ budget.requests }} 请求 · {{ budget.cycles }} 次规划</span><small>{{ budget.description }}</small>
+                <div class="budget-header">
+                  <strong>{{ budget.name }}</strong>
+                  <span class="budget-quota">{{ budget.requests }} 请求 · {{ budget.cycles }} 轮</span>
+                </div>
+                <small>{{ budget.description }}</small>
               </label>
             </div>
 
             <div class="form-grid two compact-grid">
-              <el-form-item label="权限模式">
+              <el-form-item label="自主控制模式">
                 <el-radio-group v-model="createForm.autonomyMode">
-                  <el-radio-button value="manual">手动</el-radio-button>
-                  <el-radio-button value="smart">智能（默认）</el-radio-button>
-                  <el-radio-button value="automatic">自动</el-radio-button>
+                  <el-radio-button value="manual">手动审批</el-radio-button>
+                  <el-radio-button value="smart">智能放行（推荐）</el-radio-button>
+                  <el-radio-button value="automatic">完全自动</el-radio-button>
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="TLS 策略">
-                <el-select v-model="createForm.tlsPolicy"><el-option label="严格校验证书" value="strict" /><el-option label="忽略无效证书（靶场）" value="ignore_invalid" /></el-select>
+                <el-select v-model="createForm.tlsPolicy">
+                  <el-option label="严格校验证书" value="strict" />
+                  <el-option label="忽略无效证书（靶场环境）" value="ignore_invalid" />
+                </el-select>
               </el-form-item>
             </div>
-            <el-form-item label="额外排除路径">
-              <el-input v-model="createForm.excludedPaths" type="textarea" :rows="2" placeholder="每行一个路径；内置危险路径仍始终拒绝" />
+
+            <el-form-item label="排除路径（黑名单）">
+              <el-input v-model="createForm.excludedPaths" type="textarea" :rows="2" placeholder="每行一个路径，例：/logout、/delete_account" />
             </el-form-item>
+
             <div class="composer-checks">
-              <el-checkbox v-model="createForm.includeRecentTraffic">把同项目近期 Traffic 作为只读发现种子</el-checkbox>
-              <el-checkbox v-model="createForm.writtenAuthorizationConfirmed">我确认已获得对该目标执行安全评估的书面授权</el-checkbox>
+              <el-checkbox v-model="createForm.includeRecentTraffic">将同项目近期捕获的 Traffic 作为只读发现种子</el-checkbox>
+              <el-checkbox v-model="createForm.writtenAuthorizationConfirmed">我确认已获得对目标系统进行安全评估的合法授权</el-checkbox>
             </div>
-            <el-alert type="info" :closable="false" show-icon title="人工配方永远不会自动发送；SQLi、SSRF、XSS 和业务逻辑差异必须由你在 Repeater 中亲自点击。" />
+
             <footer class="composer-footer">
-              <span>硬上限始终为 2 RPS、单并发、精确 origin。</span>
-              <el-button type="primary" :icon="Aim" :loading="missions.mutating" @click="createMission">创建并预览上下文</el-button>
+              <span class="footer-note">硬上限约束：2 RPS、单并发、目标 Host 精确 Scope。</span>
+              <el-button type="primary" :icon="Aim" :loading="missions.mutating" @click="createMission">
+                创建任务并审查上下文
+              </el-button>
             </footer>
           </el-form>
         </section>
 
-        <EmptyState v-else-if="!detail" centered title="选择或创建一个任务" description="任务历史、审批等待和旧版运行都会保存在当前项目中。">
-          <template #icon><Aim :size="26" /></template>
-          <template #action><el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">创建任务</el-button></template>
+        <!-- 空状态 -->
+        <EmptyState v-else-if="!detail" centered title="选择或创建一个安全评估任务" description="任务历史、审批决策与证据链均持久化保存。">
+          <template #icon><Aim :size="24" /></template>
+          <template #action>
+            <el-button type="primary" :icon="Plus" @click="resetComposer(); creating = true">创建评估任务</el-button>
+          </template>
         </EmptyState>
 
+        <!-- 任务工作台流水线 -->
         <template v-else>
+          <!-- 任务 Hero 诊断条 -->
           <section class="mission-hero">
             <div class="mission-title-row">
-              <div><span class="eyebrow">MISSION #{{ detail.mission.id }}</span><h2>{{ detail.mission.title }}</h2></div>
-              <el-tag :type="STATUS_TAG[detail.mission.status]">{{ STATUS_LABEL[detail.mission.status] }}</el-tag>
+              <div class="title-meta">
+                <span class="eyebrow">MISSION #{{ detail.mission.id }}</span>
+                <h2>{{ detail.mission.title }}</h2>
+              </div>
+              <el-tag :type="STATUS_TAG[detail.mission.status]" size="large">{{ STATUS_LABEL[detail.mission.status] }}</el-tag>
             </div>
+
             <p class="goal-copy">{{ detail.mission.goal }}</p>
+
             <div class="mission-command-row">
-              <div class="mission-facts"><span>{{ detail.mission.exactOrigin }}</span><span>{{ detail.mission.autonomyMode }}</span><span>{{ detail.mission.budgetProfile }}</span></div>
+              <div class="mission-facts">
+                <span class="fact-chip">Origin: {{ detail.mission.exactOrigin }}</span>
+                <span class="fact-chip">模式: {{ detail.mission.autonomyMode }}</span>
+                <span class="fact-chip">预算: {{ detail.mission.budgetProfile }}</span>
+              </div>
               <div class="mission-buttons">
-                <el-button :icon="Document" @click="previewReport">报告</el-button>
-                <el-button v-if="canStop" :icon="VideoPause" :loading="missions.mutating" @click="stopMission">停止</el-button>
-                <el-button v-if="!detail.mission.legacy" type="primary" :icon="VideoPlay" :disabled="!canStart" :loading="missions.mutating" @click="startMission">开始 / 恢复</el-button>
+                <el-button :icon="Document" @click="previewReport">证据报告</el-button>
+                <el-button v-if="canStop" :icon="VideoPause" :loading="missions.mutating" @click="stopMission">安全停止</el-button>
+                <el-button v-if="!detail.mission.legacy" type="primary" :icon="VideoPlay" :disabled="!canStart" :loading="missions.mutating" @click="startMission">
+                  启动 / 恢复执行
+                </el-button>
               </div>
             </div>
-            <el-progress v-if="isActive" :percentage="Math.min(100, Math.round((detail.mission.requestCount / Math.max(1, detail.mission.requestBudget)) * 100))" :stroke-width="5" :show-text="false" />
+
+            <el-progress
+              v-if="isActive"
+              :percentage="Math.min(100, Math.round((detail.mission.requestCount / Math.max(1, detail.mission.requestBudget)) * 100))"
+              :stroke-width="3"
+              :show-text="false"
+              class="hero-progress"
+            />
           </section>
 
+          <!-- 审批横幅 -->
           <el-alert v-if="detail.mission.legacy" class="mission-alert" type="info" :closable="false" show-icon title="这是旧版 Phase 6 运行：仅支持只读查看与 legacy 报告，不会重新激活旧 task_nodes。" />
+
           <section v-else-if="missions.context?.requiresApproval" class="approval-banner">
-            <div><Warning /><span><strong>需要确认 AI 上下文</strong><small>首次调用、附件或工具权限变化后，模型不会在确认前收到上下文。</small></span></div>
-            <el-button type="warning" @click="contextDialogVisible = true">查看披露清单并确认</el-button>
-          </section>
-
-          <section class="conversation" aria-label="任务对话与事件">
-            <article v-for="message in detail.messages" :key="message.id" class="message" :data-role="message.role">
-              <div class="message-avatar">{{ message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "RF" }}</div>
-              <div class="message-body"><header><strong>{{ message.messageKind === "goal" ? "任务目标" : message.messageKind === "follow_up" ? "中途引导" : "系统记录" }}</strong><time>{{ formatTime(message.createdAt) }}</time></header><p>{{ message.content }}</p><small v-if="message.redactionManifest.length">已脱敏：{{ message.redactionManifest.join("、") }}</small></div>
-            </article>
-          </section>
-
-          <section v-if="!detail.mission.legacy" class="action-timeline" aria-label="可信工具动作">
-            <header class="timeline-heading"><div><span class="eyebrow">TRUSTED ACTIONS</span><h3>计划与动作</h3></div><span>{{ detail.actions.length }} 个动作 · {{ missions.pendingActions.length }} 个待审批</span></header>
-            <article v-for="action in detail.actions" :key="action.id" class="action-card" :class="{ pending: action.approvalStatus === 'pending', manual: action.executionKind === 'manual_recipe' }">
-              <header class="action-header">
-                <div class="action-name"><span class="action-index">{{ action.id }}</span><div><strong>{{ actionToolLabel(action) }}</strong><small>{{ workstreamTitle(action.workstreamId) }} · {{ action.toolId }}@{{ action.toolVersion }}</small></div></div>
-                <div class="action-tags"><el-tag size="small" :type="riskType(action.riskLevel)">{{ action.riskLevel }}</el-tag><el-tag size="small" type="info">{{ resultLabel(action) }}</el-tag></div>
-              </header>
-              <div class="action-explanation">
-                <div><small>为什么执行</small><p>{{ action.rationale }}</p></div>
-                <div><small>预期观察</small><p>{{ action.expectedSignal || "等待确定性执行器记录预期信号" }}</p></div>
+            <div class="approval-info">
+              <el-icon :size="18"><Warning /></el-icon>
+              <div>
+                <strong>需要确认 AI 上下文披露</strong>
+                <small>目标附件或工具权限变更后，模型将在确认披露后才接收上下文。</small>
               </div>
-              <div class="action-meta"><span>后端工具：{{ action.toolId }}</span><span>批准方式：{{ action.approvalSource || action.permissionSnapshot }}</span><span>身份：{{ action.identityMode }}</span><span>成本：{{ action.requestCost }} 请求</span></div>
-              <el-alert v-if="action.executionKind === 'manual_recipe'" type="warning" :closable="false" show-icon title="仅生成 Repeater 差异草稿；评估引擎不能自动发送。" />
+            </div>
+            <el-button type="warning" @click="contextDialogVisible = true">审查披露清单并确认</el-button>
+          </section>
+
+          <!-- 诊断流水线执行记录 (Trace Console) -->
+          <section class="trace-console" aria-label="诊断执行轨迹">
+            <header class="trace-header">
+              <span class="eyebrow">EXECUTION TRACE</span>
+              <span class="trace-meta">{{ detail.messages.length }} 条事件</span>
+            </header>
+            <div class="trace-feed">
+              <div v-for="message in detail.messages" :key="message.id" class="trace-row" :data-role="message.role">
+                <span class="trace-tag" :class="`trace-tag--${message.role}`">
+                  {{ message.messageKind === "goal" ? "GOAL" : message.messageKind === "follow_up" ? "GUIDE" : message.role.toUpperCase() }}
+                </span>
+                <div class="trace-body">
+                  <div class="trace-time">{{ formatTime(message.createdAt) }}</div>
+                  <div class="trace-text">{{ message.content }}</div>
+                  <div v-if="message.redactionManifest.length" class="trace-redacted">
+                    脱敏项: {{ message.redactionManifest.join("、") }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 可信工具调用与动作列表 -->
+          <section v-if="!detail.mission.legacy" class="action-timeline" aria-label="可信工具动作">
+            <header class="timeline-heading">
+              <div>
+                <span class="eyebrow">TRUSTED TOOL ACTIONS</span>
+                <h3>执行动作与验证链</h3>
+              </div>
+              <span class="action-count">{{ detail.actions.length }} 个动作 · {{ missions.pendingActions.length }} 个待审批</span>
+            </header>
+
+            <article
+              v-for="action in detail.actions"
+              :key="action.id"
+              class="action-card"
+              :class="{ pending: action.approvalStatus === 'pending', manual: action.executionKind === 'manual_recipe' }"
+            >
+              <header class="action-header">
+                <div class="action-name">
+                  <span class="action-index">#{{ action.id }}</span>
+                  <div>
+                    <strong class="action-title">{{ actionToolLabel(action) }}</strong>
+                    <span class="action-sub">{{ workstreamTitle(action.workstreamId) }} · {{ action.toolId }}@{{ action.toolVersion }}</span>
+                  </div>
+                </div>
+                <div class="action-tags">
+                  <el-tag size="small" :type="riskType(action.riskLevel)">{{ action.riskLevel }}</el-tag>
+                  <el-tag size="small" type="info">{{ resultLabel(action) }}</el-tag>
+                </div>
+              </header>
+
+              <div class="action-explanation">
+                <div class="rationale-box">
+                  <small>执行理由</small>
+                  <p>{{ action.rationale }}</p>
+                </div>
+                <div class="signal-box">
+                  <small>预期观察信号</small>
+                  <p>{{ action.expectedSignal || "等待确定性执行器记录预期信号" }}</p>
+                </div>
+              </div>
+
+              <div class="action-meta">
+                <span>后端工具: {{ action.toolId }}</span>
+                <span>审批来源: {{ action.approvalSource || action.permissionSnapshot }}</span>
+                <span>身份: {{ action.identityMode }}</span>
+                <span>开销: {{ action.requestCost }} 请求</span>
+              </div>
+
+              <el-alert v-if="action.executionKind === 'manual_recipe'" type="warning" :closable="false" show-icon title="高风险探针：仅生成 Repeater 差异草稿，必须由测试员在重放模块中人工发送。" class="manual-alert" />
+
               <footer class="action-footer">
-                <el-button text :icon="View" @click="openActionDetails(action)">技术详情</el-button>
+                <el-button text :icon="View" @click="openActionDetails(action)">技术诊断详情</el-button>
                 <div v-if="action.approvalStatus === 'pending'" class="approval-buttons">
                   <el-button :loading="missions.mutating" @click="decide(action, false)">拒绝</el-button>
                   <el-button :loading="missions.mutating" @click="decide(action, true, true)">批准同工具</el-button>
-                  <el-button type="primary" :loading="missions.mutating" @click="decide(action, true)">批准本动作</el-button>
+                  <el-button type="primary" :loading="missions.mutating" @click="decide(action, true)">批准执行</el-button>
                 </div>
                 <div v-else-if="action.executionKind === 'manual_recipe' && ['manual_ready', 'manual_result_pending'].includes(action.status)" class="approval-buttons">
                   <el-button v-if="!handoffFor(action.id)" type="warning" @click="createHandoff(action)">创建 Repeater 草稿</el-button>
-                  <template v-else><el-tag type="warning">会话 #{{ handoffFor(action.id)?.replaySessionId }} · 尚需用户点击发送</el-tag><el-button v-if="handoffFor(action.id)?.status !== 'result_linked'" @click="openHandoffLink(handoffFor(action.id)!)">回传 ReplayRun</el-button></template>
+                  <template v-else>
+                    <el-tag type="warning">会话 #{{ handoffFor(action.id)?.replaySessionId }} · 等待发送</el-tag>
+                    <el-button v-if="handoffFor(action.id)?.status !== 'result_linked'" @click="openHandoffLink(handoffFor(action.id)!)">回传 ReplayRun</el-button>
+                  </template>
                 </div>
               </footer>
             </article>
-            <div v-if="detail.actions.length === 0" class="timeline-empty">确认上下文后，工具动作会在这里显示理由、预期信号、风险与审批方式。</div>
+
+            <div v-if="detail.actions.length === 0" class="timeline-empty">
+              确认上下文后，工具动作将按规划顺序在此展示理由、预期信号与审批控制。
+            </div>
           </section>
 
+          <!-- 中途引导控制条 -->
           <section v-if="!detail.mission.legacy && !TERMINAL_STATUSES.has(detail.mission.status)" class="followup-box">
-            <ChatDotRound />
-            <el-input v-model="followUp" type="textarea" :autosize="{ minRows: 1, maxRows: 4 }" maxlength="2000" placeholder="中途调整目标或追问；当前单个请求先安全结束，下一规划点重新规划。" @keydown.ctrl.enter.prevent="sendFollowUp" />
-            <el-button type="primary" :loading="followUpSending" :disabled="!followUp.trim()" @click="sendFollowUp">发送</el-button>
+            <el-icon class="followup-icon" :size="16"><ChatDotRound /></el-icon>
+            <el-input
+              v-model="followUp"
+              type="textarea"
+              :autosize="{ minRows: 1, maxRows: 3 }"
+              maxlength="2000"
+              placeholder="中途调整目标或提出补充要求；当前单个请求将安全结束，下一个规划周期生效。（Ctrl + Enter 发送）"
+              @keydown.ctrl.enter.prevent="sendFollowUp"
+            />
+            <el-button type="primary" :loading="followUpSending" :disabled="!followUp.trim()" @click="sendFollowUp">
+              注入引导
+            </el-button>
           </section>
         </template>
       </main>
 
+      <!-- 侧边边界与覆盖检查器 -->
       <MissionInspector
         v-if="detail && !creating"
         class="mission-inspector desktop-inspector"
@@ -783,7 +976,8 @@ function resultLabel(action: AssessmentAction) {
       />
     </div>
 
-    <el-drawer v-model="inspectorDrawerVisible" title="边界、资源与覆盖" direction="rtl" size="380px">
+    <!-- 移动/窄屏抽屉 -->
+    <el-drawer v-model="inspectorDrawerVisible" title="边界、资源与覆盖" direction="rtl" size="360px">
       <MissionInspector
         v-if="detail && project.current"
         :project="project.current"
@@ -799,49 +993,135 @@ function resultLabel(action: AssessmentAction) {
       />
     </el-drawer>
 
+    <!-- 对话框群 -->
     <el-dialog v-model="contextDialogVisible" title="最终 AI 上下文与披露清单" width="min(820px, 92vw)" destroy-on-close>
       <template v-if="missions.context">
-        <el-alert :type="missions.context.approved ? 'success' : 'warning'" :closable="false" show-icon :title="missions.context.approved ? '当前上下文已确认' : '确认前不会调用模型'" />
-        <div class="context-manifest"><strong>披露数据类别</strong><div><el-tag v-for="item in missions.context.disclosureManifest" :key="item" size="small">{{ item }}</el-tag></div></div>
-        <details class="context-details" open><summary>脱敏结构摘要</summary><pre>{{ contextJson }}</pre></details>
-        <div class="hash-grid"><span>context <code>{{ shortHash(missions.context.contextHash) }}</code></span><span>contract <code>{{ shortHash(missions.context.contractHash) }}</code></span><span>registry <code>{{ shortHash(missions.context.toolRegistryHash) }}</code></span><span>permission <code>{{ shortHash(missions.context.permissionHash) }}</code></span></div>
+        <el-alert :type="missions.context.approved ? 'success' : 'warning'" :closable="false" show-icon :title="missions.context.approved ? '当前上下文已确认' : '确认披露前模型不会接收任何目标上下文'" />
+        <div class="context-manifest">
+          <strong>披露数据类别</strong>
+          <div><el-tag v-for="item in missions.context.disclosureManifest" :key="item" size="small">{{ item }}</el-tag></div>
+        </div>
+        <details class="context-details" open>
+          <summary>脱敏结构摘要</summary>
+          <pre>{{ contextJson }}</pre>
+        </details>
+        <div class="hash-grid">
+          <span>context <code>{{ shortHash(missions.context.contextHash) }}</code></span>
+          <span>contract <code>{{ shortHash(missions.context.contractHash) }}</code></span>
+          <span>registry <code>{{ shortHash(missions.context.toolRegistryHash) }}</code></span>
+          <span>permission <code>{{ shortHash(missions.context.permissionHash) }}</code></span>
+        </div>
       </template>
-      <el-empty v-else description="旧运行没有 v2 AI 上下文" />
-      <template #footer><el-button @click="contextDialogVisible = false">关闭</el-button><el-button v-if="missions.context?.requiresApproval" type="primary" :loading="missions.mutating" @click="confirmContext">确认上下文并生成动作</el-button></template>
+      <el-empty v-else description="旧运行无 v2 AI 上下文" />
+      <template #footer>
+        <el-button @click="contextDialogVisible = false">关闭</el-button>
+        <el-button v-if="missions.context?.requiresApproval" type="primary" :loading="missions.mutating" @click="confirmContext">
+          确认上下文并生成动作
+        </el-button>
+      </template>
     </el-dialog>
 
-    <el-dialog v-model="resourceDialogVisible" title="附加同项目资源" width="620px">
+    <el-dialog v-model="resourceDialogVisible" title="附加同项目资源" width="560px">
       <el-form label-position="top" v-loading="resourceLoading">
-        <el-form-item label="资源类型"><el-radio-group v-model="resourceForm.type" @change="resourceForm.sourceId = null"><el-radio-button value="traffic">Traffic</el-radio-button><el-radio-button value="finding">Finding</el-radio-button><el-radio-button value="assessment_run">历史评估</el-radio-button></el-radio-group></el-form-item>
-        <el-form-item label="资源" required>
-          <el-select v-if="resourceForm.type === 'traffic'" v-model="resourceForm.sourceId" filterable placeholder="选择最近 Traffic"><el-option v-for="item in trafficResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.method} ${item.path} · ${item.status ?? '—'}`" /></el-select>
-          <el-select v-else-if="resourceForm.type === 'finding'" v-model="resourceForm.sourceId" filterable placeholder="选择 Finding"><el-option v-for="item in findingResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.title} · ${item.status}`" /></el-select>
-          <el-select v-else v-model="resourceForm.sourceId" filterable placeholder="选择历史运行"><el-option v-for="item in runResources" :key="item.id" :value="item.id" :label="`Run #${item.id} · ${item.status} · ${item.startUrl}`" /></el-select>
+        <el-form-item label="资源类型">
+          <el-radio-group v-model="resourceForm.type" @change="resourceForm.sourceId = null">
+            <el-radio-button value="traffic">Traffic</el-radio-button>
+            <el-radio-button value="finding">Finding</el-radio-button>
+            <el-radio-button value="assessment_run">历史评估</el-radio-button>
+          </el-radio-group>
         </el-form-item>
-        <el-alert type="info" :closable="false" title="只保存不可变脱敏摘要与 hash；资源必须属于当前项目。" />
+        <el-form-item label="选择资源" required>
+          <el-select v-if="resourceForm.type === 'traffic'" v-model="resourceForm.sourceId" filterable placeholder="选择最近 Traffic">
+            <el-option v-for="item in trafficResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.method} ${item.path} · ${item.status ?? '—'}`" />
+          </el-select>
+          <el-select v-else-if="resourceForm.type === 'finding'" v-model="resourceForm.sourceId" filterable placeholder="选择 Finding">
+            <el-option v-for="item in findingResources" :key="item.id" :value="item.id" :label="`#${item.id} · ${item.title} · ${item.status}`" />
+          </el-select>
+          <el-select v-else v-model="resourceForm.sourceId" filterable placeholder="选择历史运行">
+            <el-option v-for="item in runResources" :key="item.id" :value="item.id" :label="`Run #${item.id} · ${item.status} · ${item.startUrl}`" />
+          </el-select>
+        </el-form-item>
       </el-form>
-      <template #footer><el-button @click="resourceDialogVisible = false">取消</el-button><el-button type="primary" :loading="missions.mutating" @click="attachResource">附加并重新预览</el-button></template>
+      <template #footer>
+        <el-button @click="resourceDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="missions.mutating" @click="attachResource">附加并重新预览</el-button>
+      </template>
     </el-dialog>
 
-    <el-dialog v-model="identityDialogVisible" title="新建评估身份" width="520px" destroy-on-close>
+    <el-dialog v-model="identityDialogVisible" title="新建评估身份凭据" width="480px" destroy-on-close>
       <el-alert type="warning" :closable="false" title="凭据真实值只写入系统凭据库，不进入 SQLite、事件、报告或 AI 上下文。" />
-      <el-form label-position="top" class="identity-form"><el-form-item label="名称" required><el-input v-model="identityForm.label" maxlength="80" placeholder="例如：普通用户 A" /></el-form-item><el-form-item label="Header"><el-select v-model="identityForm.headerName"><el-option label="Authorization" value="Authorization" /><el-option label="Cookie" value="Cookie" /><el-option label="X-API-Key" value="X-API-Key" /><el-option label="X-Auth-Token" value="X-Auth-Token" /></el-select></el-form-item><el-form-item label="凭据值" required><el-input v-model="identityForm.secret" type="password" show-password autocomplete="off" /></el-form-item></el-form>
-      <template #footer><el-button @click="identityDialogVisible = false; identityForm.secret = ''">取消</el-button><el-button type="primary" :loading="identitySaving" @click="createIdentity">保存到系统凭据库</el-button></template>
+      <el-form label-position="top" class="identity-form">
+        <el-form-item label="身份名称" required>
+          <el-input v-model="identityForm.label" maxlength="80" placeholder="例如：测试用户 A" />
+        </el-form-item>
+        <el-form-item label="Header 字段">
+          <el-select v-model="identityForm.headerName">
+            <el-option label="Authorization" value="Authorization" />
+            <el-option label="Cookie" value="Cookie" />
+            <el-option label="X-API-Key" value="X-API-Key" />
+            <el-option label="X-Auth-Token" value="X-Auth-Token" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="凭据真实值" required>
+          <el-input v-model="identityForm.secret" type="password" show-password autocomplete="off" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="identityDialogVisible = false; identityForm.secret = ''">取消</el-button>
+        <el-button type="primary" :loading="identitySaving" @click="createIdentity">保存到凭据库</el-button>
+      </template>
     </el-dialog>
 
-    <el-drawer v-model="actionDrawerVisible" title="动作技术详情" size="min(620px, 92vw)">
+    <el-drawer v-model="actionDrawerVisible" title="动作技术详情" size="min(600px, 92vw)">
       <template v-if="selectedAction">
-        <el-descriptions :column="1" border><el-descriptions-item label="工具">{{ selectedAction.toolId }}@{{ selectedAction.toolVersion }}</el-descriptions-item><el-descriptions-item label="surface">{{ selectedAction.surfaceId ?? "由后端在发现后绑定" }}</el-descriptions-item><el-descriptions-item label="风险 / 权限">{{ selectedAction.riskLevel }} / {{ selectedAction.permissionSnapshot }} / {{ selectedAction.approvalSource }}</el-descriptions-item><el-descriptions-item label="策略结果">{{ selectedAction.policyReason || selectedAction.status }}</el-descriptions-item><el-descriptions-item label="request hash">{{ selectedAction.requestHash ?? "—" }}</el-descriptions-item><el-descriptions-item label="response hash">{{ selectedAction.responseHash ?? "—" }}</el-descriptions-item><el-descriptions-item label="result hash">{{ selectedAction.resultHash ?? "—" }}</el-descriptions-item></el-descriptions>
-        <section class="technical-block"><h4>参数（仅已有参数名与身份模式）</h4><pre>{{ pretty(selectedAction.parameters) }}</pre></section>
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="工具">{{ selectedAction.toolId }}@{{ selectedAction.toolVersion }}</el-descriptions-item>
+          <el-descriptions-item label="Surface">{{ selectedAction.surfaceId ?? "后端发现后绑定" }}</el-descriptions-item>
+          <el-descriptions-item label="风险 / 权限">{{ selectedAction.riskLevel }} / {{ selectedAction.permissionSnapshot }} / {{ selectedAction.approvalSource }}</el-descriptions-item>
+          <el-descriptions-item label="策略结果">{{ selectedAction.policyReason || selectedAction.status }}</el-descriptions-item>
+          <el-descriptions-item label="Request Hash">{{ selectedAction.requestHash ?? "—" }}</el-descriptions-item>
+          <el-descriptions-item label="Response Hash">{{ selectedAction.responseHash ?? "—" }}</el-descriptions-item>
+        </el-descriptions>
+        <section class="technical-block"><h4>参数（仅已知参数名）</h4><pre>{{ pretty(selectedAction.parameters) }}</pre></section>
         <section class="technical-block"><h4>脱敏请求</h4><pre>{{ pretty(selectedAction.redactedRequest) }}</pre></section>
-        <section class="technical-block"><h4>脱敏响应 / Replay 关联结果</h4><pre>{{ pretty(selectedAction.redactedResponse) }}</pre></section>
-        <section class="technical-block"><h4>确定性结果</h4><pre>{{ pretty(selectedAction.result) }}</pre></section>
+        <section class="technical-block"><h4>脱敏响应</h4><pre>{{ pretty(selectedAction.redactedResponse) }}</pre></section>
+        <section class="technical-block"><h4>确定性验证结果</h4><pre>{{ pretty(selectedAction.result) }}</pre></section>
       </template>
     </el-drawer>
 
-    <el-dialog v-model="handoffDialogVisible" title="回传人工 ReplayRun" width="520px"><el-alert type="warning" :closable="false" show-icon title="只接受同项目、同 handoff 人工会话的 ReplayRun；Evidence 默认未接受且不会自动确认 Finding。" /><el-form label-position="top"><el-form-item label="ReplayRun ID" required><el-input-number v-model="handoffReplayRunId" :min="1" :step="1" controls-position="right" /></el-form-item></el-form><template #footer><el-button @click="handoffDialogVisible = false">取消</el-button><el-button type="primary" :loading="missions.mutating" @click="linkHandoff">回传为待复核 Evidence</el-button></template></el-dialog>
+    <el-dialog v-model="handoffDialogVisible" title="回传人工 ReplayRun" width="480px">
+      <el-alert type="warning" :closable="false" show-icon title="只接受同项目、同 handoff 人工会话的 ReplayRun；Evidence 默认未接受且不会自动确认 Finding。" />
+      <el-form label-position="top">
+        <el-form-item label="ReplayRun ID" required>
+          <el-input-number v-model="handoffReplayRunId" :min="1" :step="1" controls-position="right" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="handoffDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="missions.mutating" @click="linkHandoff">回传为待复核 Evidence</el-button>
+      </template>
+    </el-dialog>
 
-    <el-dialog v-model="reportVisible" title="证据化报告 · Schema v4" width="min(900px, 94vw)"><div v-loading="reportLoading" class="report-preview"><pre>{{ reportMarkdown }}</pre></div><template #footer><el-button @click="reportVisible = false">关闭</el-button><el-button type="primary" :loading="reportExporting" @click="exportMissionReport">导出 Markdown + JSON</el-button></template></el-dialog>
+    <el-dialog
+      v-model="reportVisible"
+      title="证据化安全报告 · Schema v4"
+      width="min(880px, 94vw)"
+      @close="invalidateReport(false)"
+    >
+      <div v-loading="reportLoading" class="report-preview">
+        <pre>{{ reportMarkdown }}</pre>
+      </div>
+      <template #footer>
+        <el-button @click="reportVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="reportExporting"
+          :disabled="reportLoading || reportMissionId === null"
+          @click="exportMissionReport"
+        >导出 Markdown + JSON</el-button>
+      </template>
+    </el-dialog>
+
     <ProjectCreateDialog v-model="createProjectVisible" />
   </div>
 </template>
@@ -852,207 +1132,785 @@ function resultLabel(action: AssessmentAction) {
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 20px 18px;
+  gap: var(--rf-space-3);
   overflow: hidden;
-  background: var(--rf-bg-base);
 }
 
 .sr-live {
   position: absolute;
   width: 1px;
   height: 1px;
-  padding: 0;
-  overflow: hidden;
   clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  overflow: hidden;
 }
 
 .project-empty-shell {
-  display: grid;
-  min-height: 0;
+  display: flex;
   flex: 1;
-  grid-template-rows: minmax(300px, 1fr) auto;
-  gap: 14px;
+  min-height: 0;
 }
 
-.project-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.project-actions :deep(.el-select) { width: 230px; }
-.project-actions :deep(.el-button + .el-button) { margin-left: 0; }
-
-.readiness-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.readiness-grid > div {
-  display: grid;
-  grid-template-columns: 24px 1fr;
-  gap: 2px 8px;
-  padding: 13px;
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
-  background: var(--rf-bg-panel);
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.readiness-grid svg { grid-row: 1 / 3; width: 20px; color: var(--rf-accent); }
-.readiness-grid strong { color: var(--rf-text); font-size: 12px; }
-.readiness-grid span { color: var(--rf-text-muted); font-size: 10.5px; line-height: 1.4; }
+
+.project-actions :deep(.el-select) {
+  width: 200px;
+}
 
 .mission-layout {
   display: grid;
   min-height: 0;
   flex: 1;
-  grid-template-columns: 250px minmax(430px, 1fr) 310px;
+  grid-template-columns: 240px minmax(400px, 1fr) 290px;
   overflow: hidden;
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   background: var(--rf-bg-panel);
   box-shadow: var(--rf-shadow-light);
 }
 
-.mission-sidebar { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--rf-border); background: color-mix(in srgb, var(--rf-bg-panel) 80%, var(--rf-bg-base)); }
-.sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 13px; border-bottom: 1px solid var(--rf-border); }
-.sidebar-heading div { display: grid; gap: 1px; }
-.sidebar-heading small { color: var(--rf-text-muted); font-size: 9px; text-transform: uppercase; }
-.sidebar-heading strong { color: var(--rf-text); font-size: 13px; }
-.mission-list { display: grid; gap: 5px; max-height: 48%; padding: 8px; overflow: auto; }
-.mission-item { display: grid; gap: 6px; width: 100%; padding: 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.mission-item:hover { background: var(--rf-bg-hover); }
-.mission-item.active { border-color: color-mix(in srgb, var(--rf-accent) 45%, var(--rf-border)); background: var(--rf-accent-muted); }
-.mission-item:focus-visible { outline: 2px solid var(--rf-accent); outline-offset: -2px; }
-.mission-item-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
-.mission-item-top strong { min-width: 0; overflow: hidden; color: var(--rf-text); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.mission-goal { display: -webkit-box; overflow: hidden; color: var(--rf-text-secondary); font-size: 10.5px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.mission-meta { display: flex; justify-content: space-between; gap: 5px; color: var(--rf-text-muted); font-size: 9px; }
-.sidebar-empty { padding: 14px; color: var(--rf-text-muted); font-size: 10.5px; text-align: center; }
-.workflow-list { min-height: 0; flex: 1; padding: 12px; overflow: auto; border-top: 1px solid var(--rf-border); }
-.workflow-list > header { margin-bottom: 10px; color: var(--rf-text-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.workflow-row { position: relative; display: grid; grid-template-columns: 12px 1fr; gap: 7px; padding-bottom: 13px; }
-.workflow-row:not(:last-child)::before { position: absolute; top: 10px; bottom: 0; left: 4px; width: 1px; background: var(--rf-border-strong); content: ""; }
-.workflow-dot { z-index: 1; width: 9px; height: 9px; margin-top: 3px; border: 2px solid var(--rf-border-strong); border-radius: 50%; background: var(--rf-bg-panel); }
-.workflow-dot[data-status="completed"] { border-color: var(--rf-success); background: var(--rf-success); }
-.workflow-dot[data-status="active"] { border-color: var(--rf-accent); background: var(--rf-accent); }
-.workflow-row div { display: grid; gap: 2px; }
-.workflow-row strong { color: var(--rf-text-secondary); font-size: 10.5px; }
-.workflow-row small { color: var(--rf-text-muted); font-size: 9.5px; line-height: 1.4; }
+/* 侧边栏 */
+.mission-sidebar {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--rf-border);
+  background: var(--rf-bg-panel);
+}
 
-.mission-main { min-width: 0; min-height: 0; padding: 16px 18px 24px; overflow: auto; background: var(--rf-bg-base); }
-.composer-card, .mission-hero, .conversation, .action-timeline, .followup-box { max-width: 880px; margin-right: auto; margin-left: auto; }
-.composer-card { padding: 20px; border: 1px solid var(--rf-border); border-radius: var(--rf-radius-shell); background: var(--rf-bg-panel); }
-.composer-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
-.composer-heading h2, .mission-title-row h2, .timeline-heading h3 { margin: 2px 0 0; color: var(--rf-text); }
-.composer-heading h2 { font-size: 19px; }
-.composer-heading p { max-width: 660px; margin: 5px 0 0; color: var(--rf-text-secondary); font-size: 11.5px; line-height: 1.5; }
-.eyebrow { color: var(--rf-accent); font-size: 9px; font-weight: 750; letter-spacing: .11em; }
-.form-grid { display: grid; gap: 12px; }
+.sidebar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--rf-space-3);
+  border-bottom: 1px solid var(--rf-border);
+}
+
+.sidebar-project-info {
+  display: grid;
+  gap: 1px;
+}
+
+.project-tag {
+  color: var(--rf-accent);
+  font-size: 10px;
+  font-family: var(--rf-font-mono);
+  text-transform: uppercase;
+}
+
+.sidebar-title {
+  color: var(--rf-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.icon-add-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--rf-border);
+  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  color: var(--rf-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--rf-duration) var(--rf-ease);
+}
+
+.icon-add-btn:hover {
+  background: var(--rf-accent-muted);
+  border-color: var(--rf-accent);
+  color: var(--rf-accent);
+}
+
+.mission-list {
+  display: grid;
+  gap: 4px;
+  max-height: 50%;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.mission-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--rf-radius-control);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--rf-duration) var(--rf-ease);
+}
+
+.mission-item:hover {
+  background: var(--rf-bg-hover);
+}
+
+.mission-item.active {
+  border-color: var(--rf-accent);
+  background: var(--rf-accent-muted);
+}
+
+.mission-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.item-title {
+  color: var(--rf-text);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-goal {
+  color: var(--rf-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mission-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--rf-text-muted);
+  font-size: 9.5px;
+  font-family: var(--rf-font-mono);
+}
+
+.sidebar-empty {
+  padding: 14px;
+  color: var(--rf-text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.workflow-list {
+  min-height: 0;
+  flex: 1;
+  padding: var(--rf-space-3);
+  overflow-y: auto;
+  border-top: 1px solid var(--rf-border);
+}
+
+.workflow-header {
+  margin-bottom: 8px;
+  color: var(--rf-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workflow-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.workflow-row:not(:last-child)::before {
+  position: absolute;
+  top: 8px;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: var(--rf-border);
+  content: "";
+}
+
+.workflow-dot {
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  margin-top: 3px;
+  border: 2px solid var(--rf-border-strong);
+  border-radius: 50%;
+  background: var(--rf-bg-panel);
+}
+
+.workflow-dot[data-status="completed"] {
+  border-color: var(--rf-success);
+  background: var(--rf-success);
+}
+
+.workflow-dot[data-status="active"] {
+  border-color: var(--rf-accent);
+  background: var(--rf-accent);
+}
+
+.workflow-content { display: grid; gap: 1px; }
+.workflow-content strong { color: var(--rf-text); font-size: 11px; font-weight: 600; }
+.workflow-content small { color: var(--rf-text-secondary); font-size: 10px; line-height: 1.35; }
+
+/* 主工作区 */
+.mission-main {
+  min-width: 0;
+  min-height: 0;
+  padding: var(--rf-space-4);
+  overflow-y: auto;
+  background: var(--rf-bg-base);
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.mission-main--creating {
+  grid-column: 2 / -1;
+}
+
+.composer-card {
+  padding: var(--rf-space-4);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+}
+
+.composer-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: var(--rf-space-4);
+}
+
+.composer-heading h2 {
+  margin: 2px 0 0;
+  font-size: 16px;
+  color: var(--rf-text);
+  letter-spacing: -0.01em;
+}
+
+.composer-heading p {
+  margin: 4px 0 0;
+  color: var(--rf-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.eyebrow {
+  color: var(--rf-accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-family: var(--rf-font-mono);
+}
+
+.form-grid { display: grid; gap: 10px; }
 .form-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.mission-form :deep(.el-form-item) { margin-bottom: 13px; }
-.mission-form :deep(.el-form-item__label) { color: var(--rf-text-secondary); font-size: 11px; }
-.identity-link { margin: -9px 0 12px; }
-.field-label { display: block; margin: 1px 0 8px; color: var(--rf-text-secondary); font-size: 11px; }
-.budget-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
-.budget-options label { position: relative; display: grid; gap: 3px; padding: 11px; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); cursor: pointer; }
-.budget-options label.selected { border-color: var(--rf-accent); box-shadow: 0 0 0 1px var(--rf-accent-muted); }
+
+.identity-action-bar {
+  margin-top: -6px;
+  margin-bottom: 8px;
+}
+
+.identity-link {
+  font-size: 11.5px;
+  padding: 0;
+}
+
+.budget-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.budget-options label {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+  cursor: pointer;
+  transition: all var(--rf-duration) var(--rf-ease);
+}
+
+.budget-options label:hover {
+  border-color: var(--rf-border-strong);
+}
+
+.budget-options label.selected {
+  border-color: var(--rf-accent);
+  box-shadow: 0 0 0 1px var(--rf-accent-muted);
+  background: var(--rf-bg-panel);
+}
+
 .budget-options input { position: absolute; opacity: 0; }
-.budget-options strong { color: var(--rf-text); font-size: 12px; }
-.budget-options span { color: var(--rf-accent); font-size: 10px; }
-.budget-options small { color: var(--rf-text-muted); font-size: 9.5px; line-height: 1.4; }
-.composer-checks { display: grid; gap: 5px; margin: 4px 0 13px; }
-.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
-.composer-footer > span { color: var(--rf-text-muted); font-size: 10.5px; }
 
-.mission-hero { padding: 3px 2px 15px; }
-.mission-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-.mission-title-row h2 { font-size: 20px; }
-.goal-copy { margin: 9px 0 12px; color: var(--rf-text-secondary); font-size: 12.5px; line-height: 1.65; }
-.mission-command-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.mission-facts, .mission-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-.mission-facts span { padding: 4px 8px; border-radius: var(--rf-radius-tag); background: var(--rf-bg-raised); color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9.5px; }
-.mission-buttons :deep(.el-button + .el-button) { margin-left: 0; }
-.mission-hero :deep(.el-progress) { margin-top: 12px; }
-.mission-alert { max-width: 880px; margin: 0 auto 12px; }
-.approval-banner { display: flex; max-width: 880px; align-items: center; justify-content: space-between; gap: 12px; margin: 0 auto 12px; padding: 12px; border: 1px solid color-mix(in srgb, var(--rf-warning) 50%, var(--rf-border)); border-radius: 10px; background: color-mix(in srgb, var(--rf-warning) 9%, var(--rf-bg-panel)); }
-.approval-banner > div { display: flex; align-items: center; gap: 9px; color: var(--rf-warning); }
-.approval-banner span { display: grid; gap: 2px; }
-.approval-banner strong { color: var(--rf-text); font-size: 11.5px; }
-.approval-banner small { color: var(--rf-text-secondary); font-size: 10px; }
+.budget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 
-.conversation { display: grid; gap: 9px; margin-bottom: 16px; }
-.message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; }
-.message-avatar { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 9px; background: var(--rf-bg-raised); color: var(--rf-text-muted); font-size: 9px; font-weight: 700; }
-.message[data-role="user"] .message-avatar { background: var(--rf-accent); color: var(--rf-accent-on); }
-.message-body { padding: 10px 12px; border: 1px solid var(--rf-border); border-radius: 2px 10px 10px; background: var(--rf-bg-panel); }
-.message-body header { display: flex; justify-content: space-between; gap: 8px; }
-.message-body strong { color: var(--rf-text); font-size: 10.5px; }
-.message-body time, .message-body small { color: var(--rf-text-muted); font-size: 9px; }
-.message-body p { margin: 5px 0 0; color: var(--rf-text-secondary); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; }
+.budget-header strong { color: var(--rf-text); font-size: 11.5px; }
+.budget-quota { color: var(--rf-accent); font-size: 10px; font-family: var(--rf-font-mono); }
+.budget-options small { color: var(--rf-text-muted); font-size: 10px; line-height: 1.35; }
 
-.action-timeline { display: grid; gap: 10px; }
-.timeline-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 5px 0 2px; }
-.timeline-heading h3 { font-size: 15px; }
-.timeline-heading > span { color: var(--rf-text-muted); font-size: 10px; }
-.action-card { padding: 13px; border: 1px solid var(--rf-border); border-radius: 11px; background: var(--rf-bg-panel); box-shadow: var(--rf-shadow-light); }
-.action-card.pending { border-color: color-mix(in srgb, var(--rf-warning) 55%, var(--rf-border)); }
-.action-card.manual { border-left: 3px solid var(--rf-warning); }
-.action-header, .action-name, .action-tags, .action-footer, .approval-buttons { display: flex; align-items: center; }
-.action-header, .action-footer { justify-content: space-between; gap: 10px; }
-.action-name { min-width: 0; gap: 9px; }
-.action-index { display: grid; width: 25px; height: 25px; flex: 0 0 auto; place-items: center; border-radius: 8px; background: var(--rf-bg-raised); color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9px; }
-.action-name > div { display: grid; min-width: 0; gap: 2px; }
-.action-name strong { color: var(--rf-text); font-size: 12px; }
-.action-name small { overflow: hidden; color: var(--rf-text-muted); font-family: var(--rf-font-mono); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.action-tags, .approval-buttons { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.approval-buttons :deep(.el-button + .el-button) { margin-left: 0; }
-.action-explanation { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 11px 0; }
-.action-explanation > div { padding: 9px; border-radius: 8px; background: var(--rf-bg-raised); }
-.action-explanation small { color: var(--rf-text-muted); font-size: 9px; }
-.action-explanation p { margin: 3px 0 0; color: var(--rf-text-secondary); font-size: 10.5px; line-height: 1.5; }
-.action-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-bottom: 9px; color: var(--rf-text-muted); font-size: 9.5px; }
-.action-footer { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--rf-border); }
-.timeline-empty { padding: 22px; border: 1px dashed var(--rf-border-strong); border-radius: 10px; color: var(--rf-text-muted); font-size: 11px; text-align: center; }
-.followup-box { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 13px; padding: 10px; border: 1px solid var(--rf-border); border-radius: 11px; background: var(--rf-bg-panel); }
-.followup-box > svg { color: var(--rf-accent); }
+.composer-checks {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 12px;
+}
 
-.mission-inspector { border-left: 1px solid var(--rf-border); }
-.inspector-trigger { display: none; }
-.context-manifest { display: grid; gap: 8px; margin: 14px 0; }
-.context-manifest strong { color: var(--rf-text); font-size: 12px; }
-.context-manifest > div { display: flex; flex-wrap: wrap; gap: 5px; }
-.context-details { border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
-.context-details summary { padding: 10px; color: var(--rf-text-secondary); font-size: 11px; cursor: pointer; }
-.context-details pre, .technical-block pre, .report-preview pre { margin: 0; padding: 12px; overflow: auto; color: var(--rf-text-secondary); font-family: var(--rf-font-mono); font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-.context-details pre { max-height: 360px; border-top: 1px solid var(--rf-border); }
-.hash-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; }
-.hash-grid span { color: var(--rf-text-muted); font-size: 9px; }
-.hash-grid code { color: var(--rf-text-secondary); font-family: var(--rf-font-mono); }
-.identity-form { margin-top: 14px; }
-.technical-block { margin-top: 12px; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
-.technical-block h4 { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--rf-border); color: var(--rf-text); font-size: 11px; }
-.report-preview { min-height: 280px; max-height: 65vh; overflow: auto; border: 1px solid var(--rf-border); border-radius: 9px; background: var(--rf-bg-raised); }
+.composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rf-border);
+}
 
-@media (max-width: 1260px) {
-  .mission-layout { grid-template-columns: 240px minmax(0, 1fr); }
+.footer-note {
+  color: var(--rf-text-muted);
+  font-size: 11px;
+}
+
+/* Mission Hero */
+.mission-hero {
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+}
+
+.mission-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title-meta h2 {
+  margin: 2px 0 0;
+  font-size: 16px;
+  color: var(--rf-text);
+}
+
+.goal-copy {
+  margin: 8px 0 10px;
+  color: var(--rf-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mission-command-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mission-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fact-chip {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
+  color: var(--rf-text-secondary);
+  font-family: var(--rf-font-mono);
+  font-size: 10.5px;
+}
+
+.mission-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hero-progress {
+  margin-top: 10px;
+}
+
+.approval-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: var(--rf-space-3);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--rf-radius-card);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.approval-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--rf-warning);
+}
+
+.approval-info strong {
+  display: block;
+  color: var(--rf-text);
+  font-size: 12px;
+}
+
+.approval-info small {
+  color: var(--rf-text-secondary);
+  font-size: 11px;
+}
+
+/* Trace Console */
+.trace-console {
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+  overflow: hidden;
+}
+
+.trace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--rf-bg-raised);
+  border-bottom: 1px solid var(--rf-border);
+}
+
+.trace-meta {
+  color: var(--rf-text-muted);
+  font-size: 10px;
+  font-family: var(--rf-font-mono);
+}
+
+.trace-feed {
+  display: grid;
+  gap: 1px;
+  background: var(--rf-border);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.trace-row {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--rf-bg-panel);
+  font-size: 11.5px;
+}
+
+.trace-tag {
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-family: var(--rf-font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--rf-bg-raised);
+  color: var(--rf-text-secondary);
+}
+
+.trace-tag--user {
+  background: var(--rf-accent-muted);
+  color: var(--rf-accent);
+}
+
+.trace-tag--assistant {
+  background: var(--rf-info-muted);
+  color: var(--rf-info);
+}
+
+.trace-body {
+  display: grid;
+  gap: 2px;
+}
+
+.trace-time {
+  color: var(--rf-text-muted);
+  font-size: 9.5px;
+  font-family: var(--rf-font-mono);
+}
+
+.trace-text {
+  color: var(--rf-text);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.trace-redacted {
+  color: var(--rf-warning);
+  font-size: 10px;
+}
+
+/* Action Timeline */
+.action-timeline {
+  display: grid;
+  gap: 8px;
+}
+
+.timeline-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin: 4px 0 2px;
+}
+
+.timeline-heading h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--rf-text);
+}
+
+.action-count {
+  color: var(--rf-text-muted);
+  font-size: 11px;
+}
+
+.action-card {
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+  box-shadow: var(--rf-shadow-light);
+}
+
+.action-card.pending {
+  border-color: var(--rf-warning);
+}
+
+.action-card.manual {
+  border-left: 3px solid var(--rf-warning);
+}
+
+.action-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.action-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.action-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: var(--rf-bg-raised);
+  color: var(--rf-text-muted);
+  font-family: var(--rf-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.action-title {
+  color: var(--rf-text);
+  font-size: 12px;
+}
+
+.action-sub {
+  display: block;
+  color: var(--rf-text-muted);
+  font-family: var(--rf-font-mono);
+  font-size: 10px;
+}
+
+.action-explanation {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.rationale-box,
+.signal-box {
+  padding: 6px 8px;
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+}
+
+.rationale-box small,
+.signal-box small {
+  color: var(--rf-text-muted);
+  font-size: 9.5px;
+  text-transform: uppercase;
+}
+
+.rationale-box p,
+.signal-box p {
+  margin: 2px 0 0;
+  color: var(--rf-text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.action-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  color: var(--rf-text-muted);
+  font-size: 10px;
+}
+
+.manual-alert {
+  margin: 6px 0;
+}
+
+.action-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rf-border);
+}
+
+.approval-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-empty {
+  padding: 18px;
+  border: 1px dashed var(--rf-border-strong);
+  border-radius: var(--rf-radius-card);
+  color: var(--rf-text-muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* Follow-up box */
+.followup-box {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+}
+
+.followup-icon {
+  color: var(--rf-accent);
+}
+
+.mission-inspector {
+  border-left: 1px solid var(--rf-border);
+}
+
+.inspector-trigger {
+  display: none;
+}
+
+.context-manifest {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.context-details {
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+}
+
+.context-details summary {
+  padding: 8px 10px;
+  color: var(--rf-text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.context-details pre,
+.technical-block pre,
+.report-preview pre {
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  color: var(--rf-text-secondary);
+  font-family: var(--rf-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.hash-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.hash-grid span {
+  color: var(--rf-text-muted);
+  font-size: 10px;
+}
+
+.hash-grid code {
+  color: var(--rf-text-secondary);
+  font-family: var(--rf-font-mono);
+}
+
+.technical-block {
+  margin-top: 10px;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+}
+
+.technical-block h4 {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rf-border);
+  color: var(--rf-text);
+  font-size: 11.5px;
+}
+
+.report-preview {
+  min-height: 260px;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  background: var(--rf-bg-raised);
+}
+
+@media (max-width: 1200px) {
+  .mission-layout { grid-template-columns: 220px minmax(0, 1fr); }
   .desktop-inspector { display: none; }
   .inspector-trigger { display: inline-flex; }
 }
 
-@media (max-width: 780px) {
-  .assessment-page { padding: 12px; overflow: auto; }
-  .mission-layout { display: flex; min-height: 720px; flex-direction: column; overflow: visible; }
-  .mission-sidebar { max-height: 290px; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--rf-border); }
-  .mission-list { display: flex; max-height: 150px; overflow-x: auto; }
-  .mission-item { min-width: 220px; }
-  .workflow-list { display: none; }
-  .mission-main { overflow: visible; }
-  .form-grid.two, .action-explanation, .budget-options, .readiness-grid { grid-template-columns: 1fr; }
-  .mission-command-row, .composer-footer, .approval-banner { align-items: stretch; flex-direction: column; }
-  .followup-box { grid-template-columns: 1fr; }
-  .followup-box > svg { display: none; }
-  .hash-grid { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 640px) {
-  .mission-sidebar { max-height: 360px; }
-  .mission-list { display: grid; max-height: 230px; overflow-x: hidden; overflow-y: auto; }
-  .mission-item { min-width: 0; }
-  .mission-title-row { align-items: flex-start; flex-direction: column; }
-  .mission-buttons { width: 100%; }
+@media (max-width: 768px) {
+  .mission-layout { display: flex; flex-direction: column; }
+  .mission-sidebar { max-height: 240px; border-right: none; border-bottom: 1px solid var(--rf-border); }
+  .form-grid.two, .action-explanation, .budget-options { grid-template-columns: 1fr; }
 }
 </style>

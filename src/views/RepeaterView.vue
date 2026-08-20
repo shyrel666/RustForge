@@ -405,23 +405,22 @@ onBeforeUnmount(() => {
 <template>
   <div class="rep-page rf-page rf-page--inset">
     <PageHeader
-      title="重放"
-      description="项目内多会话手动改包；每次运行可复现、比较并关联为证据。"
+      title="HTTP 重放测试工作台 (Repeater)"
+      description="多会话改包测试与差分比对；发送结果不可变归档并支持一键关联为漏洞证据。"
     />
 
     <EmptyState
       v-if="!project.current"
-      title="请先打开项目"
-      description="Repeater 的会话、Scope 与证据都必须归属于明确项目。"
+      title="请先选择测试项目"
+      description="Repeater 会话、Scope 白名单与 Evidence 链严格归属于项目目标。"
     >
       <template #icon><el-icon :size="20"><Connection /></el-icon></template>
     </EmptyState>
 
     <template v-else>
+      <!-- 会话标签页 -->
       <el-tabs
-        :model-value="
-          rep.activeSessionId === null ? '' : String(rep.activeSessionId)
-        "
+        :model-value="rep.activeSessionId === null ? '' : String(rep.activeSessionId)"
         type="card"
         editable
         class="session-tabs"
@@ -436,24 +435,23 @@ onBeforeUnmount(() => {
           <template #label>
             <span class="tab-label" :title="session.title">
               <span class="tab-title">{{ session.title }}</span>
-              <span v-if="session.run_count" class="tab-count">{{
-                session.run_count
-              }}</span>
+              <span v-if="session.run_count" class="tab-count mono">{{ session.run_count }}</span>
             </span>
           </template>
         </el-tab-pane>
       </el-tabs>
 
+      <!-- 会话属性与策略条 -->
       <div v-if="rep.activeSession" class="session-policy">
         <el-input
           v-model="sessionTitle"
           size="small"
           maxlength="120"
           class="session-title-input"
-          aria-label="会话标题"
+          placeholder="会话名称"
           @change="saveSessionSettings"
         />
-        <span class="policy-label">TLS</span>
+        <span class="policy-label">TLS 校验:</span>
         <el-select
           v-model="sessionTlsPolicy"
           size="small"
@@ -468,33 +466,35 @@ onBeforeUnmount(() => {
           size="small"
           type="warning"
         >
-          TLS 身份校验已降低
+          TLS 校验已放宽
         </el-tag>
-        <span v-if="rep.activeSession.source_traffic_id" class="source-label">
-          来源流量 #{{ rep.activeSession.source_traffic_id }}
+        <span v-if="rep.activeSession.source_traffic_id" class="source-label mono">
+          源自 Traffic #{{ rep.activeSession.source_traffic_id }}
         </span>
       </div>
 
+      <!-- 人工接力横幅 -->
       <section
         v-if="rep.activeAssessmentHandoff"
         class="assessment-handoff-banner"
         aria-live="polite"
       >
-        <div>
-          <el-tag size="small" type="warning">人工接力</el-tag>
+        <div class="handoff-header">
+          <el-tag size="small" type="warning">AI 评估接力草稿</el-tag>
           <strong>
             Mission #{{ rep.activeAssessmentHandoff.missionId }} ·
             {{ rep.activeAssessmentHandoff.recipeId }}@{{ rep.activeAssessmentHandoff.recipeVersion }}
           </strong>
         </div>
-        <p>
+        <p class="handoff-instruction">
           {{ rep.activeAssessmentHandoff.draft.proposedDifference?.instructions }}
-          当前编辑器已载入后端版本化草稿；RustForge 不会替你点击发送。
+          已自动填入草稿参数；请人工审查后点击发送。
         </p>
-        <code>draft sha256: {{ rep.activeAssessmentHandoff.draftHash }}</code>
+        <code class="handoff-hash">draft hash: {{ rep.activeAssessmentHandoff.draftHash }}</code>
       </section>
 
-      <div class="rf-toolbar">
+      <!-- 请求发送控制条 -->
+      <div class="rf-toolbar request-toolbar">
         <div class="rf-toolbar-group request-bar">
           <el-select v-model="rep.draft.method" class="method" size="default">
             <el-option
@@ -508,7 +508,7 @@ onBeforeUnmount(() => {
             v-model="rep.draft.url"
             placeholder="https://target.example.com/path?a=1"
             class="url mono"
-            @keyup.enter="sendRequest"
+            @keyup.ctrl.enter="sendRequest"
           />
         </div>
         <el-button
@@ -518,29 +518,32 @@ onBeforeUnmount(() => {
           :disabled="!canSend"
           @click="sendRequest"
         >
-          发送并记录 Run
+          发送请求 <span class="rf-kbd" style="margin-left: 6px;">Ctrl + ↵</span>
         </el-button>
       </div>
 
-      <div class="rf-inline-warn">
-        <div>
-          重放会真实向目标发送请求；不自动跟随重定向。后端会在每次发送前重新校验当前项目 Scope。
-        </div>
+      <!-- Scope 授权校验条 -->
+      <div class="scope-bar">
+        <div class="scope-notice">向目标发送真实网络请求；不自动跟随重定向。后端在发送前严格复核 Scope。</div>
         <div class="scope-state">
-          <span v-if="rep.checkingAuthorization">正在由后端校验项目 Scope…</span>
-          <span v-else-if="rep.authorization" class="scope-ok">
-            已授权：{{ rep.authorization.normalized_host }}
-            · 命中 {{ rep.authorization.matched_scope }}
+          <span v-if="rep.checkingAuthorization" class="mono text-muted">校验 Scope 白名单中…</span>
+          <span v-else-if="rep.authorization" class="scope-ok mono">
+            ✓ 已授权：{{ rep.authorization.normalized_host }} ({{ rep.authorization.matched_scope }})
           </span>
-          <span v-else class="scope-denied">
-            {{ rep.authorizationError || "等待填写 URL 并完成 Scope 校验" }}
+          <span v-else class="scope-denied mono">
+            ✗ {{ rep.authorizationError || "等待填写合法 URL" }}
           </span>
         </div>
       </div>
 
+      <!-- 请求/响应双栏工作区 -->
       <div class="rf-split-shell content">
+        <!-- 请求栏 -->
         <div class="pane">
-          <div class="pane-title">请求草稿</div>
+          <div class="pane-title">
+            <span>Request 草稿</span>
+          </div>
+
           <el-alert
             v-if="rep.sourceReplayWarning"
             type="warning"
@@ -548,52 +551,46 @@ onBeforeUnmount(() => {
             class="body-warning"
             :title="rep.sourceReplayWarning"
           />
+
           <div class="field">
-            <div class="rf-field-label">请求头（每行 Name: Value）</div>
+            <div class="rf-field-label">Headers（每行 Header: Value）</div>
             <el-input
               v-model="rep.draft.headersRaw"
               type="textarea"
-              :rows="9"
+              :rows="8"
               class="mono"
-              placeholder="User-Agent: ...&#10;Cookie: ..."
+              placeholder="User-Agent: RustForge&#10;Authorization: ..."
             />
           </div>
+
           <div class="field grow">
             <div class="body-label-row">
-              <div class="rf-field-label">请求体</div>
+              <div class="rf-field-label">Body 正文</div>
               <el-radio-group v-model="rep.draft.bodyEncoding" size="small">
                 <el-radio-button value="text">UTF-8 文本</el-radio-button>
-                <el-radio-button value="base64">Base64 原始字节</el-radio-button>
+                <el-radio-button value="base64">Base64</el-radio-button>
               </el-radio-group>
             </div>
-            <el-alert
-              v-if="rep.draft.bodyEncoding === 'base64'"
-              type="info"
-              :closable="false"
-              class="body-warning"
-              title="后端会先解码为原始字节；Base64 无效时不会建立网络连接，但会记录失败 run。"
-            />
+
             <el-input
               v-model="rep.draft.body"
               type="textarea"
-              :rows="8"
+              :rows="10"
               class="mono body-input"
-              :placeholder="
-                rep.draft.bodyEncoding === 'base64'
-                  ? 'AAEC/w=='
-                  : '表单 / JSON / 其它'
-              "
+              :placeholder="rep.draft.bodyEncoding === 'base64' ? 'AAEC/w==' : 'JSON / 表单 / Raw 报文'"
             />
           </div>
         </div>
 
         <div class="pane-divider" aria-hidden="true" />
 
+        <!-- 响应栏 -->
         <div class="pane response-pane">
           <div class="pane-title">
-            响应
-            <span v-if="rep.resp" class="run-id">Run #{{ rep.resp.id }}</span>
+            <span>Response 结果</span>
+            <span v-if="rep.resp" class="run-id mono">Run #{{ rep.resp.id }}</span>
           </div>
+
           <el-alert
             v-if="rep.error"
             type="error"
@@ -605,45 +602,36 @@ onBeforeUnmount(() => {
 
           <template v-if="rep.resp?.status !== null && rep.resp?.status !== undefined">
             <div class="resp-status">
-              <el-tag :type="statusType(rep.resp.status)" effect="dark">
+              <el-tag :type="statusType(rep.resp.status)" size="default">
                 {{ rep.resp.status }} {{ rep.resp.status_text }}
               </el-tag>
-              <span class="resp-meta">
-                {{ rep.resp.duration_ms }} ms · 捕获
-                {{ formatSize(rep.resp.resp_captured_size) }} /
-                {{ formatSize(rep.resp.resp_wire_size) }}
+              <span class="resp-meta mono">
+                {{ rep.resp.duration_ms }} ms · {{ formatSize(rep.resp.resp_captured_size) }} / {{ formatSize(rep.resp.resp_wire_size) }}
               </span>
-              <el-tag v-if="rep.resp.resp_truncated" size="small" type="warning">
-                已截断
-              </el-tag>
+              <el-tag v-if="rep.resp.resp_truncated" size="small" type="warning">已截断</el-tag>
             </div>
-            <div class="scope-snapshot">
-              Scope 快照：
-              {{ rep.resp.scope_decision.normalized_host }}
-              → {{ rep.resp.scope_decision.matched_scope }}
-              · TLS {{ rep.resp.tls_policy }}
-              · {{ rep.resp.resp_decode_status }}
-            </div>
+
             <div class="field response-headers-field">
-              <div class="rf-field-label">响应头（重复项逐项保留）</div>
+              <div class="rf-field-label">Response Headers</div>
               <pre class="rf-mono-pre response-headers">{{
                 rep.resp.response_headers
                   .map((header) => `${header.name}: ${header.value}`)
                   .join("\n") || "(无)"
               }}</pre>
             </div>
+
             <div class="field grow response-body-field">
-              <div class="rf-field-label">响应体</div>
+              <div class="rf-field-label">Response Body</div>
               <pre
                 v-if="rep.resp.response_body_text !== null"
                 class="rf-mono-pre body-view"
-              >{{ rep.resp.response_body_text || "(空)" }}</pre>
+              >{{ rep.resp.response_body_text || "(空正文)" }}</pre>
               <el-alert
                 v-else-if="rep.resp.response_body_base64"
                 type="info"
                 :closable="false"
               >
-                二进制有界捕获（Base64 预览）：
+                二进制捕获（Base64 预览）：
                 <pre class="rf-mono-pre body-view">{{
                   rep.resp.response_body_base64.slice(0, 4000)
                 }}{{ rep.resp.response_body_base64.length > 4000 ? "…" : "" }}</pre>
@@ -654,18 +642,15 @@ onBeforeUnmount(() => {
 
           <div v-else-if="rep.resp" class="failed-run">
             <el-icon :size="20"><DocumentCopy /></el-icon>
-            <strong>该次点击已记录，但没有成功响应</strong>
-            <span>
-              {{ rep.resp.error_code || rep.resp.outcome }} ·
-              {{ rep.resp.error_message || "请求未完成" }}
-            </span>
-            <code>request sha256: {{ rep.resp.request_hash }}</code>
+            <strong>该次重放已记录，但未收到成功响应</strong>
+            <span>{{ rep.resp.error_code || rep.resp.outcome }} · {{ rep.resp.error_message || "网络请求未完成" }}</span>
+            <code class="mono">request sha256: {{ rep.resp.request_hash }}</code>
           </div>
 
           <EmptyState
             v-else-if="!rep.error"
-            title="尚未发送"
-            description="发送后响应与不可变 run 会显示在这里。"
+            title="等待发送"
+            description="点击“发送请求”或按下 Ctrl + Enter，响应与不可变 Run 历史将展示在此。"
           >
             <template #icon>
               <el-icon :size="20"><DocumentCopy /></el-icon>
@@ -674,6 +659,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <!-- 历史运行列表 -->
       <ReplayHistory
         :project-id="currentProjectId"
         :runs="rep.runs"
@@ -689,37 +675,35 @@ onBeforeUnmount(() => {
       />
     </template>
 
-    <el-dialog v-model="diffVisible" title="Repeater Run Diff" width="88%">
+    <!-- 比对 Diff 对话框 -->
+    <el-dialog v-model="diffVisible" title="Repeater Run 差分比对 (Diff)" width="85%">
       <div v-loading="diffLoading" class="diff-shell">
         <ReplayDiff v-if="diffData" :diff="diffData" />
       </div>
     </el-dialog>
 
-    <el-dialog v-model="linkVisible" title="将 Run 关联为 Evidence" width="520px">
+    <!-- 关联 Evidence 对话框 -->
+    <el-dialog v-model="linkVisible" title="将 Run 关联为漏洞 Evidence" width="500px">
       <div v-loading="linkLoading" class="link-form">
         <el-alert
           :type="linkRunQualifies ? 'info' : 'warning'"
           :closable="false"
           :title="
             linkRunQualifies
-              ? '新 Finding Evidence 默认未接受，不能直接把 Finding 变成已确认。'
-              : '该 Run 没有可用 HTTP 响应，只能作为审计记录；即使人工接受，也不能单独确认 Finding。'
+              ? '新 Finding Evidence 默认未接受，不能直接将 Finding 转为已确认。'
+              : '该 Run 没有可用 HTTP 响应，作为审计记录；即使人工接受也不能单独确认 Finding。'
           "
         />
-        <div class="rf-field-label">关联对象</div>
+        <div class="rf-field-label">关联目标</div>
         <el-radio-group v-model="linkTargetType">
-          <el-radio-button value="finding">
-            Finding（{{ linkFindings.length }}）
-          </el-radio-button>
-          <el-radio-button value="task">
-            任务（{{ linkTasks.length }}）
-          </el-radio-button>
+          <el-radio-button value="finding">Finding ({{ linkFindings.length }})</el-radio-button>
+          <el-radio-button value="task">任务 ({{ linkTasks.length }})</el-radio-button>
         </el-radio-group>
         <el-select
           v-model="linkTargetId"
           class="target-select"
           filterable
-          placeholder="选择关联对象"
+          placeholder="选择关联目标"
         >
           <el-option
             v-for="target in linkTargets"
@@ -728,13 +712,14 @@ onBeforeUnmount(() => {
             :value="target.id"
           />
         </el-select>
-        <div class="rf-field-label">人工观察</div>
+        <div class="rf-field-label">人工观察结论</div>
         <el-input
           v-model="linkObservation"
           type="textarea"
-          :rows="4"
+          :rows="3"
           maxlength="4000"
           show-word-limit
+          placeholder="记录观察到的漏洞特征、关键差异或业务影响..."
         />
       </div>
       <template #footer>
@@ -754,241 +739,280 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.rep-page {
+  gap: var(--rf-space-2);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .session-tabs {
   width: 100%;
   min-width: 0;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
+
 .tab-label {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 180px;
+  max-width: 160px;
   overflow: hidden;
 }
+
 .tab-title {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
 }
+
 .tab-count {
   flex: 0 0 auto;
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 4px;
   background: var(--rf-bg-raised);
   color: var(--rf-text-muted);
   font-size: 10px;
-  line-height: 18px;
+  line-height: 16px;
   text-align: center;
 }
+
 .session-policy {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 10px;
-  padding: 8px 10px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-control);
   background: var(--rf-bg-panel);
 }
+
 .session-title-input {
-  width: 220px;
+  width: 200px;
 }
-.policy-label,
-.source-label {
+
+.policy-label {
   color: var(--rf-text-secondary);
-  font-size: 12px;
+  font-size: 11.5px;
+  font-weight: 500;
 }
+
 .source-label {
   margin-left: auto;
-  font-family: var(--rf-font-mono);
+  font-size: 11px;
+  color: var(--rf-text-muted);
 }
+
 .tls-select {
-  width: 210px;
+  width: 190px;
 }
+
 .assessment-handoff-banner {
   display: grid;
-  gap: 5px;
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--rf-warning) 55%, var(--rf-border));
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: var(--rf-radius-control);
-  background: color-mix(in srgb, var(--rf-warning) 9%, var(--rf-bg-panel));
+  background: rgba(245, 158, 11, 0.08);
 }
-.assessment-handoff-banner > div {
+
+.handoff-header {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.assessment-handoff-banner strong {
+
+.handoff-header strong {
   color: var(--rf-text);
   font-size: 12px;
 }
-.assessment-handoff-banner p {
+
+.handoff-instruction {
   margin: 0;
   color: var(--rf-text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 11.5px;
+  line-height: 1.45;
 }
-.assessment-handoff-banner code {
+
+.handoff-hash {
   color: var(--rf-text-muted);
   font-family: var(--rf-font-mono);
-  font-size: 9px;
+  font-size: 9.5px;
 }
+
+.request-toolbar {
+  margin-bottom: 4px;
+}
+
 .request-bar {
   flex: 1;
   min-width: 0;
 }
+
 .method {
-  width: 110px;
+  width: 100px;
   flex-shrink: 0;
 }
+
 .url {
   flex: 1;
   min-width: 0;
 }
-.content {
-  min-height: 500px;
-  margin-bottom: var(--rf-space-3);
+
+.scope-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  margin-bottom: 6px;
+  font-size: 11px;
 }
+
+.scope-notice {
+  color: var(--rf-text-muted);
+}
+
+.scope-ok {
+  color: var(--rf-success);
+  font-weight: 500;
+}
+
+.scope-denied {
+  color: var(--rf-danger);
+  font-weight: 500;
+}
+
+.content {
+  min-height: 460px;
+  margin-bottom: var(--rf-space-2);
+}
+
 .pane {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--rf-space-4);
+  padding: var(--rf-space-3);
   overflow: auto;
 }
+
 .pane-divider {
   width: 1px;
   flex-shrink: 0;
   background: var(--rf-border);
 }
+
 .pane-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-weight: 650;
-  font-size: 13px;
-  margin-bottom: var(--rf-space-3);
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: var(--rf-space-2);
   color: var(--rf-text);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
+
 .run-id {
   color: var(--rf-text-muted);
-  font: 11px var(--rf-font-mono);
+  font-size: 11px;
 }
+
 .field {
-  margin-bottom: var(--rf-space-3);
+  margin-bottom: var(--rf-space-2);
   display: flex;
   flex-direction: column;
 }
+
 .field.grow {
   flex: 1;
   min-height: 0;
 }
-.mono :deep(textarea),
-.mono :deep(input) {
-  font-family: var(--rf-font-mono);
-  font-size: 12.5px;
-}
-.body-input :deep(textarea) {
-  min-height: 120px;
-}
+
 .body-label-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
-.body-label-row .rf-field-label {
-  margin-bottom: 0;
-}
+
 .body-warning,
 .resp-err {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
+
 .resp-status {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: var(--rf-space-3);
+  gap: 8px;
+  margin-bottom: var(--rf-space-2);
 }
+
 .resp-meta {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--rf-text-secondary);
 }
-.scope-state {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  margin-top: 4px;
-  font-size: 12px;
-}
-.scope-ok {
-  color: var(--el-color-success-dark-2);
-}
-.scope-denied {
-  color: var(--el-color-danger-dark-2);
-}
-.scope-snapshot {
-  margin: -2px 0 var(--rf-space-3);
-  color: var(--rf-text-secondary);
-  font-family: var(--rf-font-mono);
-  font-size: 12px;
-}
+
 .response-headers-field {
   flex: 0 1 auto;
   min-height: 0;
 }
+
 .response-headers {
-  max-height: 220px;
+  max-height: 180px;
 }
+
 .response-body-field {
-  flex: 1 0 240px;
-  min-height: 240px;
+  flex: 1 0 200px;
+  min-height: 200px;
   margin-bottom: 0;
 }
+
 .body-view {
-  min-height: 210px;
+  min-height: 180px;
   max-height: none;
   flex: 1;
 }
+
 .empty-body {
   color: var(--rf-text-muted);
-  font-size: 13px;
+  font-size: 12px;
 }
+
 .failed-run {
-  min-height: 180px;
+  min-height: 160px;
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   color: var(--rf-text-secondary);
   text-align: center;
 }
-.failed-run code {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  color: var(--rf-text-muted);
-  font-size: 11px;
-}
+
 .diff-shell {
-  min-height: 180px;
-  max-height: 70vh;
+  min-height: 160px;
+  max-height: 65vh;
   overflow: auto;
 }
+
 .link-form {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
+
 .target-select {
   width: 100%;
 }

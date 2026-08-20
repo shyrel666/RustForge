@@ -51,13 +51,13 @@ watch(
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: var(--rf-space-4) var(--rf-space-5) var(--rf-space-5);
+  padding: var(--rf-space-3) var(--rf-space-4) var(--rf-space-4);
   display: flex;
   flex-direction: column;
 }
 
 .work-area--immersive {
-  padding: var(--rf-space-3) clamp(20px, 3.5vw, 40px) var(--rf-space-4);
+  padding: var(--rf-space-3) clamp(16px, 2.5vw, 32px) var(--rf-space-3);
 }
 
 .work-area > :deep(*) {

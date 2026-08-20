@@ -32,8 +32,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Some(icon) = app.default_window_icon() {
+                        let _ = window.set_icon(icon.clone());
+                    }
+                }
+            }
             knowledge::validate_builtin_registry()
                 .map_err(|e| format!("内置安全标准知识包校验失败: {e}"))?;
             let dir = app.path().app_data_dir()?;

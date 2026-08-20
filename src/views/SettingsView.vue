@@ -666,8 +666,9 @@ const chartOption = computed(() => ({
       data: trendData.value.map((d) => d.total_tokens),
       smooth: true,
       showSymbol: false,
-      lineStyle: { width: 2 },
-      areaStyle: { opacity: 0.08 },
+      lineStyle: { width: 2, color: '#ea580c' },
+      itemStyle: { color: '#ea580c' },
+      areaStyle: { opacity: 0.08, color: '#ea580c' },
     },
     {
       name: '输入 Token',
@@ -675,7 +676,8 @@ const chartOption = computed(() => ({
       data: trendData.value.map((d) => d.prompt_tokens),
       smooth: true,
       showSymbol: false,
-      lineStyle: { width: 1.5, type: 'dashed' as const },
+      lineStyle: { width: 1.5, type: 'dashed' as const, color: '#3b82f6' },
+      itemStyle: { color: '#3b82f6' },
     },
     {
       name: '输出 Token',
@@ -683,7 +685,8 @@ const chartOption = computed(() => ({
       data: trendData.value.map((d) => d.completion_tokens),
       smooth: true,
       showSymbol: false,
-      lineStyle: { width: 1.5, type: 'dotted' as const },
+      lineStyle: { width: 1.5, type: 'dotted' as const, color: '#10b981' },
+      itemStyle: { color: '#10b981' },
     },
     {
       name: '缓存命中 Token',
@@ -691,8 +694,8 @@ const chartOption = computed(() => ({
       data: trendData.value.map((d) => d.cached_tokens),
       smooth: true,
       showSymbol: false,
-      lineStyle: { width: 1.5 },
-      itemStyle: { color: '#a78bfa' },
+      lineStyle: { width: 1.5, color: '#f59e0b' },
+      itemStyle: { color: '#f59e0b' },
     },
   ],
 }));
@@ -1879,7 +1882,7 @@ async function save() {
 }
 
 .stat-card--cache {
-  border-color: color-mix(in srgb, #a78bfa 42%, var(--rf-border));
+  border-color: color-mix(in srgb, var(--rf-warning) 42%, var(--rf-border));
 }
 
 .stat-hint {

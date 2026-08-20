@@ -51,6 +51,8 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
     error: "",
     lastEvent: null as AssessmentMissionEvent | null,
     _generation: 0,
+    _loadingOwner: 0,
+    _mutationOwner: 0,
     _unlisten: null as UnlistenFn | null,
     _refreshTimer: null as number | null,
     _lastEventKey: "",
@@ -79,6 +81,8 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       if (this.workspaceProjectId === projectId) return;
       this.workspaceProjectId = projectId;
       this._generation += 1;
+      this._loadingOwner = 0;
+      this._mutationOwner = 0;
       this.missions = [];
       this.profiles = [];
       this.selectedMissionId = null;
@@ -105,6 +109,9 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
     async refresh(projectId: number) {
       if (this.workspaceProjectId !== projectId) this.activateProject(projectId);
       const generation = ++this._generation;
+      this._loadingOwner = generation;
+      this._mutationOwner = 0;
+      this.mutating = false;
       this.loading = true;
       this.error = "";
       try {
@@ -130,12 +137,15 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
         }
         throw error;
       } finally {
-        if (this._generation === generation) this.loading = false;
+        if (this._loadingOwner === generation) {
+          this.loading = false;
+          this._loadingOwner = 0;
+        }
       }
     },
 
     async loadSelected(generation?: number) {
-      const owner = generation ?? this._generation;
+      const owner = generation ?? ++this._generation;
       const projectId = this.workspaceProjectId;
       const missionId = this.selectedMissionId;
       if (projectId === null || missionId === null) return;
@@ -163,7 +173,13 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
           this.context = context;
         }
       } catch {
-        this.context = null;
+        if (
+          this.workspaceProjectId === projectId &&
+          this.selectedMissionId === missionId &&
+          this._generation === owner
+        ) {
+          this.context = null;
+        }
       }
     },
 
@@ -177,11 +193,17 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       this.detail = null;
       this.context = null;
       const generation = ++this._generation;
+      this._loadingOwner = generation;
+      this._mutationOwner = 0;
+      this.mutating = false;
       this.loading = true;
       try {
         await this.loadSelected(generation);
       } finally {
-        if (this._generation === generation) this.loading = false;
+        if (this._loadingOwner === generation) {
+          this.loading = false;
+          this._loadingOwner = 0;
+        }
       }
     },
 
@@ -195,18 +217,55 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       this.mergeMission(detail.mission);
     },
 
+    beginMutation(projectId: number, missionId: number | null) {
+      if (
+        this.workspaceProjectId !== projectId ||
+        (missionId !== null && this.selectedMissionId !== missionId)
+      ) {
+        throw staleWorkspaceError();
+      }
+      const generation = ++this._generation;
+      this._loadingOwner = 0;
+      this.loading = false;
+      this._mutationOwner = generation;
+      this.mutating = true;
+      return generation;
+    },
+
+    ownsMutation(projectId: number, missionId: number | null, generation: number) {
+      return (
+        this.workspaceProjectId === projectId &&
+        this._generation === generation &&
+        this._mutationOwner === generation &&
+        (missionId === null || this.selectedMissionId === missionId)
+      );
+    },
+
+    finishMutation(generation: number) {
+      if (this._mutationOwner !== generation) return;
+      this._mutationOwner = 0;
+      this.mutating = false;
+    },
+
     async create(input: CreateAssessmentMissionInput) {
       if (this.workspaceProjectId === null || input.projectId !== this.workspaceProjectId) {
         throw staleWorkspaceError();
       }
-      this.mutating = true;
+      const generation = this.beginMutation(input.projectId, null);
       try {
         const detail = await createAssessmentMission(input);
+        if (!this.ownsMutation(input.projectId, null, generation)) return detail;
         this.applyDetail(detail);
-        this.context = await previewAssessmentMissionContext(input.projectId, detail.mission.id);
+        const context = await previewAssessmentMissionContext(
+          input.projectId,
+          detail.mission.id
+        );
+        if (this.ownsMutation(input.projectId, detail.mission.id, generation)) {
+          this.context = context;
+        }
         return detail;
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
@@ -214,22 +273,24 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       const detail = this.requireDetail();
       const context = this.context;
       if (!context) throw new Error("请先加载并检查 AI 上下文");
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await confirmAssessmentMissionContext({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-            contextHash: context.contextHash,
-          })
-        );
-        this.context = await previewAssessmentMissionContext(
-          detail.mission.projectId,
-          detail.mission.id
-        );
+        const updated = await confirmAssessmentMissionContext({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+          contextHash: context.contextHash,
+        });
+        if (!this.ownsMutation(projectId, missionId, generation)) return;
+        this.applyDetail(updated);
+        const nextContext = await previewAssessmentMissionContext(projectId, missionId);
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.context = nextContext;
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
@@ -238,23 +299,25 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       sourceId: number
     ) {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await attachAssessmentMissionResource({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-            resourceType,
-            sourceId,
-          })
-        );
-        this.context = await previewAssessmentMissionContext(
-          detail.mission.projectId,
-          detail.mission.id
-        );
+        const updated = await attachAssessmentMissionResource({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+          resourceType,
+          sourceId,
+        });
+        if (!this.ownsMutation(projectId, missionId, generation)) return;
+        this.applyDetail(updated);
+        const context = await previewAssessmentMissionContext(projectId, missionId);
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.context = context;
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
@@ -262,146 +325,172 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
       const detail = this.requireDetail();
       const path = await pickAssessmentOpenApiFile();
       if (!path) return false;
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await importAssessmentMissionOpenApi({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-            path,
-          })
-        );
-        this.context = await previewAssessmentMissionContext(
-          detail.mission.projectId,
-          detail.mission.id
-        );
+        const updated = await importAssessmentMissionOpenApi({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+          path,
+        });
+        if (!this.ownsMutation(projectId, missionId, generation)) return true;
+        this.applyDetail(updated);
+        const context = await previewAssessmentMissionContext(projectId, missionId);
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.context = context;
+        }
         return true;
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async sendMessage(content: string) {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await sendAssessmentMissionMessage({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-            content,
-          })
-        );
+        const updated = await sendAssessmentMissionMessage({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+          content,
+        });
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.applyDetail(updated);
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async decide(action: AssessmentAction, approve: boolean, applyToSameTool = false) {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await decideAssessmentAction({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            actionId: action.id,
-            expectedMissionRevision: detail.mission.revision,
-            expectedActionRevision: action.revision,
-            approve,
-            applyToSameTool,
-          })
-        );
+        const updated = await decideAssessmentAction({
+          projectId,
+          missionId,
+          actionId: action.id,
+          expectedMissionRevision: detail.mission.revision,
+          expectedActionRevision: action.revision,
+          approve,
+          applyToSameTool,
+        });
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.applyDetail(updated);
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async start() {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await startAssessmentMission({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-          })
-        );
+        const updated = await startAssessmentMission({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+        });
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.applyDetail(updated);
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async stop() {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        this.applyDetail(
-          await stopAssessmentMission({
-            projectId: detail.mission.projectId,
-            missionId: detail.mission.id,
-            expectedRevision: detail.mission.revision,
-          })
-        );
+        const updated = await stopAssessmentMission({
+          projectId,
+          missionId,
+          expectedRevision: detail.mission.revision,
+        });
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.applyDetail(updated);
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async setPermission(toolId: string, decision: AssessmentToolPermissionDecision) {
       const detail = this.requireDetail();
       const current = detail.toolPermissions.find((item) => item.toolId === toolId);
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
-        detail.toolPermissions = await setAssessmentToolPermission({
-          projectId: detail.mission.projectId,
+        const permissions = await setAssessmentToolPermission({
+          projectId,
           toolId,
           decision,
           expectedRevision: current?.revision ?? null,
         });
-        this.context = await previewAssessmentMissionContext(
-          detail.mission.projectId,
-          detail.mission.id
-        );
+        if (!this.ownsMutation(projectId, missionId, generation)) return;
+        if (this.detail) this.detail.toolPermissions = permissions;
+        const context = await previewAssessmentMissionContext(projectId, missionId);
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          this.context = context;
+        }
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async createHandoff(action: AssessmentAction) {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
         const handoff = await createAssessmentMissionHandoff({
-          projectId: detail.mission.projectId,
-          missionId: detail.mission.id,
+          projectId,
+          missionId,
           actionId: action.id,
           expectedActionRevision: action.revision,
         });
-        await this.loadSelected();
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          await this.loadSelected(generation);
+        }
         return handoff;
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
     async linkHandoff(handoffId: number, replayRunId: number) {
       const detail = this.requireDetail();
-      this.mutating = true;
+      const projectId = detail.mission.projectId;
+      const missionId = detail.mission.id;
+      const generation = this.beginMutation(projectId, missionId);
       try {
         const handoff = await linkAssessmentMissionHandoffReplay({
-          projectId: detail.mission.projectId,
-          missionId: detail.mission.id,
+          projectId,
+          missionId,
           handoffId,
           replayRunId,
         });
-        await this.loadSelected();
+        if (this.ownsMutation(projectId, missionId, generation)) {
+          await this.loadSelected(generation);
+        }
         return handoff;
       } finally {
-        this.mutating = false;
+        this.finishMutation(generation);
       }
     },
 
@@ -431,12 +520,17 @@ export const useAssessmentMissionStore = defineStore("assessmentMission", {
           }
           if (this.selectedMissionId !== payload.missionId) return;
           if (this._refreshTimer !== null) window.clearTimeout(this._refreshTimer);
-          this._refreshTimer = window.setTimeout(() => {
+          const refreshSelected = () => {
             this._refreshTimer = null;
+            if (this.mutating) {
+              this._refreshTimer = window.setTimeout(refreshSelected, 100);
+              return;
+            }
             void this.loadSelected().catch((error) => {
               this.error = String(error);
             });
-          }, 100);
+          };
+          this._refreshTimer = window.setTimeout(refreshSelected, 100);
         }
       );
     },

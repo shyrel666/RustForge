@@ -12,6 +12,7 @@ import {
   stopProxy,
   proxyStatus,
 } from "../api/tauri";
+import { isCurrentProjectGeneration } from "../utils/asyncOwnership";
 
 /** 每页条数（数据库里是全量的，前端按需加载更多） */
 const PAGE_SIZE = 200;
@@ -33,6 +34,11 @@ export const useTrafficStore = defineStore("traffic", {
     detail: null as TrafficDetail | null,
     drawerVisible: false,
     detailLoading: false,
+    workspaceProjectId: null as number | null,
+    _generation: 0,
+    _loadingOwner: 0,
+    _detailGeneration: 0,
+    _detailOwner: 0,
     // 事件订阅句柄
     _unlisteners: [] as UnlistenFn[],
   }),
@@ -41,8 +47,31 @@ export const useTrafficStore = defineStore("traffic", {
     hasMore: (s) => s.items.length < s.total,
   },
   actions: {
+    activateProject(projectId: number | null) {
+      if (this.workspaceProjectId === projectId) return;
+      this.workspaceProjectId = projectId;
+      this.invalidateRequests();
+      this.items = [];
+      this.total = 0;
+      this.limit = PAGE_SIZE;
+      this.detail = null;
+      this.drawerVisible = false;
+    },
+
+    invalidateRequests() {
+      this._generation += 1;
+      this._detailGeneration += 1;
+      this._loadingOwner = 0;
+      this._detailOwner = 0;
+      this.loading = false;
+      this.detailLoading = false;
+    },
+
     /** 内部：按当前 limit 拉列表 + 统计总数 */
     async load(projectId: number) {
+      if (this.workspaceProjectId !== projectId) this.activateProject(projectId);
+      const generation = ++this._generation;
+      this._loadingOwner = generation;
       this.loading = true;
       try {
         const filter = {
@@ -54,10 +83,22 @@ export const useTrafficStore = defineStore("traffic", {
           listTraffic(projectId, { ...filter, limit: this.limit }),
           countTraffic(projectId, filter),
         ]);
-        this.items = items;
-        this.total = total;
+        if (
+          isCurrentProjectGeneration(
+            this.workspaceProjectId,
+            this._generation,
+            projectId,
+            generation
+          )
+        ) {
+          this.items = items;
+          this.total = total;
+        }
       } finally {
-        this.loading = false;
+        if (this._loadingOwner === generation) {
+          this.loading = false;
+          this._loadingOwner = 0;
+        }
       }
     },
 
@@ -74,19 +115,54 @@ export const useTrafficStore = defineStore("traffic", {
     },
 
     async clear(projectId: number) {
+      if (this.workspaceProjectId !== projectId) this.activateProject(projectId);
+      const generation = ++this._generation;
       await clearTraffic(projectId);
-      this.items = [];
-      this.total = 0;
-      this.limit = PAGE_SIZE;
+      if (
+        isCurrentProjectGeneration(
+          this.workspaceProjectId,
+          this._generation,
+          projectId,
+          generation
+        )
+      ) {
+        // Clearing invalidates every row-backed view. A detail request that
+        // started before the delete must not restore a now-deleted record.
+        this._detailGeneration += 1;
+        this._detailOwner = 0;
+        this.detailLoading = false;
+        this._loadingOwner = 0;
+        this.loading = false;
+        this.items = [];
+        this.total = 0;
+        this.limit = PAGE_SIZE;
+        this.detail = null;
+        this.drawerVisible = false;
+      }
     },
 
     async openDetail(id: number) {
+      const projectId = this.workspaceProjectId;
+      if (projectId === null) return;
+      const generation = ++this._detailGeneration;
+      this._detailOwner = generation;
       this.drawerVisible = true;
       this.detailLoading = true;
+      this.detail = null;
       try {
-        this.detail = await getTrafficDetail(id);
+        const detail = await getTrafficDetail(id);
+        if (
+          this.workspaceProjectId === projectId &&
+          this._detailGeneration === generation &&
+          detail.project_id === projectId
+        ) {
+          this.detail = detail;
+        }
       } finally {
-        this.detailLoading = false;
+        if (this._detailOwner === generation) {
+          this.detailLoading = false;
+          this._detailOwner = 0;
+        }
       }
     },
 
@@ -115,8 +191,14 @@ export const useTrafficStore = defineStore("traffic", {
         listen<TrafficSummary>("traffic:new", (e) => {
           const pid = getProjectId();
           const row = e.payload;
-          if (pid === null || row.project_id !== pid) return;
+          if (
+            pid === null ||
+            this.workspaceProjectId !== pid ||
+            row.project_id !== pid
+          )
+            return;
           if (!this.matchesFilter(row)) return;
+          this._generation += 1;
           this.items.unshift(row);
           this.total += 1;
           // 保持窗口大小，丢弃最旧的（需要时可「加载更多」）
@@ -125,7 +207,13 @@ export const useTrafficStore = defineStore("traffic", {
         listen<TrafficTagsUpdate>("traffic:tags", (e) => {
           const pid = getProjectId();
           const update = e.payload;
-          if (pid === null || update.project_id !== pid) return;
+          if (
+            pid === null ||
+            this.workspaceProjectId !== pid ||
+            update.project_id !== pid
+          )
+            return;
+          this._generation += 1;
           const row = this.items.find((item) => item.id === update.id);
           if (row) row.rule_tags = update.rule_tags;
           if (this.detail?.id === update.id) {

@@ -63,22 +63,22 @@ function permissionOptions(executionKind: string) {
   <aside class="inspector" aria-label="任务安全边界与覆盖信息">
     <section class="inspector-section">
       <header class="section-heading">
-        <span>Scope</span>
-        <el-tag size="small" type="success">后端强制</el-tag>
+        <span class="heading-title">Scope 边界</span>
+        <span class="badge-guard">后端强制</span>
       </header>
       <div class="origin-line">
-        <el-icon><FolderOpened /></el-icon>
+        <el-icon class="origin-icon"><FolderOpened /></el-icon>
         <code>{{ detail.mission.exactOrigin }}</code>
       </div>
       <div class="scope-list">
-        <span v-for="item in project.scope" :key="item">{{ item }}</span>
+        <span v-for="item in project.scope" :key="item" class="scope-chip">{{ item }}</span>
         <span v-if="project.scope.length === 0" class="muted">项目未配置额外 Scope</span>
       </div>
     </section>
 
     <section class="inspector-section">
       <header class="section-heading">
-        <span>上下文与附件</span>
+        <span class="heading-title">上下文与附件</span>
         <button type="button" class="text-action" @click="emit('openContext')">
           查看披露
         </button>
@@ -88,7 +88,8 @@ function permissionOptions(executionKind: string) {
         type="warning"
         :closable="false"
         show-icon
-        title="上下文已变化，需要再次确认"
+        title="上下文已变化，需再次确认"
+        class="alert-compact"
       />
       <div class="resource-list">
         <div v-for="resource in detail.resources" :key="resource.id" class="resource-row">
@@ -104,7 +105,7 @@ function permissionOptions(executionKind: string) {
           :disabled="disabled || !resourceMutable"
           @click="emit('openResource')"
         >
-          项目资源
+          同项目资源
         </el-button>
         <el-button
           size="small"
@@ -120,8 +121,8 @@ function permissionOptions(executionKind: string) {
 
     <section class="inspector-section">
       <header class="section-heading">
-        <span>身份与授权</span>
-        <button type="button" class="text-action" @click="emit('openIdentity')">管理身份</button>
+        <span class="heading-title">身份模式</span>
+        <button type="button" class="text-action" @click="emit('openIdentity')">凭据库</button>
       </header>
       <div class="identity-row">
         <el-icon><Key /></el-icon>
@@ -131,43 +132,51 @@ function permissionOptions(executionKind: string) {
         <el-icon><Key /></el-icon>
         <div><small>身份 B</small><span>{{ identityLabel(detail.mission.identityBProfileId, "身份 B") }}</span></div>
       </div>
-      <div class="safety-note"><el-icon><CircleCheck /></el-icon>真实秘密只从系统凭据库注入执行器</div>
+      <div class="safety-note">
+        <el-icon><CircleCheck /></el-icon>
+        <span>凭据不进入上下文，只在 Rust 端注入</span>
+      </div>
     </section>
 
     <section class="inspector-section">
-      <header class="section-heading"><span>预算</span><b>{{ detail.mission.budgetProfile }}</b></header>
+      <header class="section-heading">
+        <span class="heading-title">预算消耗</span>
+        <span class="budget-badge">{{ detail.mission.budgetProfile }}</span>
+      </header>
       <el-progress
         :percentage="Math.min(100, Math.round((detail.mission.requestCount / Math.max(1, detail.mission.requestBudget)) * 100))"
-        :stroke-width="6"
+        :stroke-width="4"
         :show-text="false"
       />
       <div class="budget-meta">
         <span>{{ detail.mission.requestCount }} / {{ detail.mission.requestBudget }} 请求</span>
         <span>2 RPS · 单并发</span>
-        <span>{{ detail.mission.completedCycles }} / {{ detail.mission.maxPlanningCycles }} 次规划</span>
+        <span>{{ detail.mission.completedCycles }} / {{ detail.mission.maxPlanningCycles }} 轮规划</span>
       </div>
     </section>
 
-    <section class="inspector-section coverage-section">
-      <header class="section-heading"><span>覆盖矩阵</span></header>
+    <section class="inspector-section">
+      <header class="section-heading">
+        <span class="heading-title">覆盖度指标</span>
+      </header>
       <div class="coverage-grid">
-        <div><strong>{{ detail.coverage.confirmed }}</strong><span>confirmed</span></div>
-        <div><strong>{{ detail.coverage.suspected }}</strong><span>suspected</span></div>
-        <div><strong>{{ detail.coverage.notObserved }}</strong><span>not observed</span></div>
-        <div><strong>{{ detail.coverage.coverageGap }}</strong><span>coverage gap</span></div>
+        <div class="coverage-cell"><strong>{{ detail.coverage.confirmed }}</strong><span>Confirmed</span></div>
+        <div class="coverage-cell"><strong>{{ detail.coverage.suspected }}</strong><span>Suspected</span></div>
+        <div class="coverage-cell"><strong>{{ detail.coverage.notObserved }}</strong><span>Not Observed</span></div>
+        <div class="coverage-cell"><strong>{{ detail.coverage.coverageGap }}</strong><span>Gap</span></div>
       </div>
     </section>
 
     <section class="inspector-section tool-section">
       <header class="section-heading">
-        <span>工具权限</span>
-        <el-tag size="small">{{ detail.mission.autonomyMode }}</el-tag>
+        <span class="heading-title">ToolSpec 权限</span>
+        <el-tag size="small" type="info">{{ detail.mission.autonomyMode }}</el-tag>
       </header>
       <div v-if="context" class="tool-list">
         <div v-for="tool in context.tools" :key="tool.id" class="tool-row">
           <div class="tool-copy">
-            <span>{{ tool.displayName }}</span>
-            <small>{{ tool.id }}@{{ tool.version }} · {{ tool.riskLevel }}</small>
+            <span class="tool-title">{{ tool.displayName }}</span>
+            <small class="tool-sub">{{ tool.id }}@{{ tool.version }}</small>
           </div>
           <el-select
             :model-value="tool.effectivePermission"
@@ -202,7 +211,7 @@ function permissionOptions(executionKind: string) {
 }
 
 .inspector-section {
-  padding: 14px;
+  padding: var(--rf-space-3) var(--rf-space-4);
   background: var(--rf-bg-panel);
 }
 
@@ -211,15 +220,31 @@ function permissionOptions(executionKind: string) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 10px;
-  color: var(--rf-text);
-  font-size: 12px;
-  font-weight: 700;
+  margin-bottom: var(--rf-space-2);
 }
 
-.section-heading b {
-  color: var(--rf-text-secondary);
-  font-size: 11px;
+.heading-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--rf-text);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+.badge-guard {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--rf-radius-tag);
+  background: var(--rf-success-muted);
+  color: var(--rf-success);
+}
+
+.budget-badge {
+  font-family: var(--rf-font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--rf-accent);
   text-transform: uppercase;
 }
 
@@ -229,26 +254,35 @@ function permissionOptions(executionKind: string) {
   color: var(--rf-accent);
   cursor: pointer;
   font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 0;
+  transition: opacity var(--rf-duration) var(--rf-ease);
 }
 
-.text-action:focus-visible {
-  outline: 2px solid var(--rf-accent);
-  outline-offset: 2px;
+.text-action:hover {
+  opacity: 0.8;
 }
 
-.origin-line,
-.identity-row,
-.resource-row,
-.safety-note {
+.origin-line {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+}
+
+.origin-icon {
+  color: var(--rf-accent);
+  font-size: 13px;
 }
 
 .origin-line code {
   min-width: 0;
   overflow: hidden;
-  color: var(--rf-text-secondary);
+  color: var(--rf-text);
   font-family: var(--rf-font-mono);
   font-size: 11px;
   text-overflow: ellipsis;
@@ -258,28 +292,32 @@ function permissionOptions(executionKind: string) {
 .scope-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 8px;
+  gap: 4px;
+  margin-top: 6px;
 }
 
-.scope-list > span:not(.muted) {
-  padding: 3px 7px;
-  border-radius: var(--rf-radius-tag);
+.scope-chip {
+  padding: 2px 6px;
+  border-radius: 4px;
   background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
   color: var(--rf-text-secondary);
-  font-size: 10px;
+  font-family: var(--rf-font-mono);
+  font-size: 10.5px;
 }
 
 .resource-list {
   display: grid;
-  gap: 7px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .resource-row {
-  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--rf-text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .resource-row span {
@@ -297,31 +335,41 @@ function permissionOptions(executionKind: string) {
 
 .microcopy,
 .muted {
-  margin: 7px 0 0;
+  margin: 6px 0 0;
   color: var(--rf-text-muted);
-  font-size: 10.5px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
-.identity-row + .identity-row { margin-top: 8px; }
-.identity-row { color: var(--rf-text-secondary); }
+.identity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--rf-text-secondary);
+}
+
+.identity-row + .identity-row { margin-top: 6px; }
+
 .identity-row div { display: grid; min-width: 0; }
 .identity-row small { color: var(--rf-text-muted); font-size: 9px; text-transform: uppercase; }
-.identity-row span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.identity-row span { overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; color: var(--rf-text); }
 
 .safety-note {
-  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
   color: var(--rf-success);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .budget-meta {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 5px;
-  margin-top: 8px;
+  gap: 4px;
+  margin-top: 6px;
   color: var(--rf-text-muted);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .budget-meta span:last-child { grid-column: 1 / -1; }
@@ -332,29 +380,38 @@ function permissionOptions(executionKind: string) {
   gap: 6px;
 }
 
-.coverage-grid > div {
+.coverage-cell {
   display: grid;
   gap: 2px;
-  padding: 8px;
+  padding: 6px 8px;
   border: 1px solid var(--rf-border);
-  border-radius: 8px;
+  border-radius: var(--rf-radius-control);
   background: var(--rf-bg-raised);
 }
 
-.coverage-grid strong { color: var(--rf-text); font-size: 16px; }
-.coverage-grid span { color: var(--rf-text-muted); font-size: 9px; }
+.coverage-cell strong {
+  color: var(--rf-text);
+  font-size: 14px;
+  font-family: var(--rf-font-mono);
+}
 
-.tool-list { display: grid; gap: 9px; }
-.tool-row { display: flex; align-items: center; gap: 8px; }
+.coverage-cell span {
+  color: var(--rf-text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.tool-list { display: grid; gap: 6px; }
+.tool-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tool-copy { display: grid; min-width: 0; flex: 1; }
-.tool-copy > span { color: var(--rf-text-secondary); font-size: 11px; }
-.tool-copy small {
+.tool-title { color: var(--rf-text); font-size: 11.5px; font-weight: 500; }
+.tool-sub {
   overflow: hidden;
   color: var(--rf-text-muted);
   font-family: var(--rf-font-mono);
-  font-size: 9px;
+  font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.permission-select { width: 76px; flex: 0 0 auto; }
+.permission-select { width: 72px; flex: 0 0 auto; }
 </style>

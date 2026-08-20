@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod discovery;
 pub mod executor;
+pub(crate) mod finding_identity;
 pub mod manager;
 pub mod mission;
 pub mod model;

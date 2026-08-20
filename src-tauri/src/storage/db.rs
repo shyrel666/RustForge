@@ -274,7 +274,7 @@ mod tests {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| {
-                        name.starts_with("upgrade.db.pre-v3-to-v4-") && name.ends_with(".bak")
+                        name.starts_with("upgrade.db.pre-v3-to-v5-") && name.ends_with(".bak")
                     })
             })
             .expect("migration backup");

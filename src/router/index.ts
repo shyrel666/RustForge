@@ -28,6 +28,10 @@ const router = createRouter({
       meta: { title: "AI 评估", immersive: true },
     },
     {
+      path: "/assessment",
+      redirect: "/tasks",
+    },
+    {
       path: "/findings",
       name: "findings",
       component: () => import("../views/FindingsView.vue"),

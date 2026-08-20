@@ -91,7 +91,7 @@ async function onSelect(id: number) {
 <style scoped>
 .picker-label {
   margin-bottom: 6px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--rf-text-muted);

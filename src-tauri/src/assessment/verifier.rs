@@ -1,3 +1,4 @@
+use super::finding_identity::{security_baseline_title, SecurityBaselineKinds};
 use super::model::{AssessmentEndpoint, AssessmentVerdict};
 use crate::replay::model::{ReplayHeader, ReplayRun};
 use serde::{Deserialize, Serialize};
@@ -201,6 +202,7 @@ fn verify_security_headers(
                 json!({"facts": [], "suspectedFacts": []}),
             )
         } else {
+            let finding_kinds = SecurityBaselineKinds::from_values(&gaps, &suspected);
             VerificationOutcome {
                 verdict: AssessmentVerdict::Suspected,
                 observations: json!({
@@ -208,7 +210,7 @@ fn verify_security_headers(
                     "suspectedFacts": suspected,
                     "responseComplete": true,
                 }),
-                title: "响应安全基线需要人工复核".into(),
+                title: security_baseline_title(&finding_kinds),
                 vuln_type: "security_misconfiguration".into(),
                 severity: "info".into(),
                 confidence: 70,
@@ -217,6 +219,7 @@ fn verify_security_headers(
             }
         }
     } else {
+        let finding_kinds = SecurityBaselineKinds::from_values(&gaps, &suspected);
         VerificationOutcome {
             verdict: AssessmentVerdict::Confirmed,
             observations: json!({
@@ -224,7 +227,7 @@ fn verify_security_headers(
                 "suspectedFacts": suspected,
                 "responseComplete": true,
             }),
-            title: "响应安全基线配置缺口".into(),
+            title: security_baseline_title(&finding_kinds),
             vuln_type: "security_misconfiguration".into(),
             severity: "low".into(),
             confidence: 100,

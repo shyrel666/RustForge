@@ -1,87 +1,103 @@
 :root {
-  /* Light theme — CC Switch style: clean off-white + blue accent */
-  --rf-bg-base: #f5f6f8;
+  /* Light theme — Rust & Steel / Clean Slate Engineering Workspace */
+  --rf-bg-base: #f8fafc;
   --rf-bg-shell: #ffffff;
   --rf-bg-panel: #ffffff;
-  --rf-bg-raised: #f3f4f6;
-  --rf-bg-hover: #ebeef2;
-  --rf-bg-pill: #eef0f3;
+  --rf-bg-raised: #f1f5f9;
+  --rf-bg-hover: #e2e8f0;
+  --rf-bg-pill: #f1f5f9;
 
-  --rf-accent: #3b82f6;
-  --rf-accent-hover: #60a5fa;
-  --rf-accent-muted: rgba(59, 130, 246, 0.14);
+  --rf-accent: #ea580c;
+  --rf-accent-hover: #c2410c;
+  --rf-accent-muted: rgba(234, 88, 12, 0.12);
   --rf-accent-on: #ffffff;
-  --rf-cta: #f97316;
-  --rf-cta-hover: #fb923c;
-  --rf-cta-muted: rgba(249, 115, 22, 0.14);
+  --rf-cta: #ea580c;
+  --rf-cta-hover: #f97316;
+  --rf-cta-muted: rgba(234, 88, 12, 0.12);
   --rf-info: #2563eb;
-  --rf-info-muted: rgba(37, 99, 235, 0.12);
+  --rf-info-muted: rgba(37, 99, 235, 0.1);
 
-  --rf-success: #16a34a;
+  --rf-success: #059669;
+  --rf-success-muted: rgba(5, 150, 105, 0.12);
   --rf-warning: #d97706;
-  --rf-danger: #ef4444;
+  --rf-warning-muted: rgba(217, 119, 6, 0.12);
+  --rf-danger: #dc2626;
+  --rf-danger-muted: rgba(220, 38, 38, 0.12);
 
-  --rf-text: #111827;
-  --rf-text-secondary: #6b7280;
-  --rf-text-muted: #9ca3af;
+  --rf-text: #0f172a;
+  --rf-text-secondary: #334155;
+  --rf-text-muted: #64748b;
 
-  --rf-border: #e5e7eb;
-  --rf-border-strong: #d1d5db;
-  --rf-mask: rgba(17, 24, 39, 0.35);
-  --rf-shadow: 0 8px 24px rgba(17, 24, 39, 0.06);
-  --rf-shadow-light: 0 2px 8px rgba(17, 24, 39, 0.04);
+  --rf-border: #e2e8f0;
+  --rf-border-strong: #cbd5e1;
+  --rf-mask: rgba(15, 23, 42, 0.45);
+  --rf-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+  --rf-shadow-light: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --rf-shadow-raised: 0 8px 24px rgba(15, 23, 42, 0.08);
 
   /* Typography */
-  --rf-font-ui: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei",
-    sans-serif;
-  --rf-font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  --rf-font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable",
+    "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", sans-serif;
+  --rf-font-mono: "Cascadia Code", "JetBrains Mono", "Fira Code", Menlo,
+    Consolas, monospace;
+  --rf-font-size-body: 14px;
+  --rf-font-size-compact: 12px;
+  --rf-font-weight-body: 450;
+  --rf-font-weight-secondary: 500;
 
   /* Scale */
-  --rf-radius-shell: 14px;
-  --rf-radius-control: 10px;
+  --rf-radius-shell: 8px;
+  --rf-radius-card: 8px;
+  --rf-radius-control: 6px;
   --rf-radius-tag: 999px;
   --rf-space-1: 4px;
   --rf-space-2: 8px;
   --rf-space-3: 12px;
   --rf-space-4: 16px;
-  --rf-space-5: 24px;
-  --rf-space-6: 32px;
-  --rf-topbar-height: 56px;
+  --rf-space-5: 20px;
+  --rf-space-6: 28px;
+  --rf-topbar-height: 46px;
 
   /* Motion */
-  --rf-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --rf-duration: 180ms;
+  --rf-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --rf-duration: 150ms;
 }
 
 html.dark {
-  --rf-bg-base: #121212;
-  --rf-bg-shell: #171717;
-  --rf-bg-panel: #1e1e1e;
-  --rf-bg-raised: #262626;
-  --rf-bg-hover: #2e2e2e;
-  --rf-bg-pill: #252525;
+  /* Dark theme — Titanium Zinc & Deep Obsidian Base */
+  --rf-bg-base: #09090b;
+  --rf-bg-shell: #0d0d10;
+  --rf-bg-panel: #121215;
+  --rf-bg-raised: #18181c;
+  --rf-bg-hover: #222228;
+  --rf-bg-pill: #18181d;
 
-  --rf-accent: #2dd4bf;
-  --rf-accent-hover: #5eead4;
-  --rf-accent-muted: rgba(45, 212, 191, 0.14);
-  --rf-accent-on: #042f2e;
+  --rf-accent: #f97316;
+  --rf-accent-hover: #fb923c;
+  --rf-accent-muted: rgba(249, 115, 22, 0.16);
+  --rf-accent-on: #09090b;
   --rf-cta: #f97316;
   --rf-cta-hover: #fb923c;
-  --rf-cta-muted: rgba(249, 115, 22, 0.18);
-  --rf-info: #60a5fa;
-  --rf-info-muted: rgba(96, 165, 250, 0.16);
+  --rf-cta-muted: rgba(249, 115, 22, 0.16);
+  --rf-info: #3b82f6;
+  --rf-info-muted: rgba(59, 130, 246, 0.14);
 
-  --rf-success: #34d399;
-  --rf-warning: #fbbf24;
-  --rf-danger: #f87171;
+  --rf-success: #10b981;
+  --rf-success-muted: rgba(16, 185, 129, 0.14);
+  --rf-warning: #f59e0b;
+  --rf-warning-muted: rgba(245, 158, 11, 0.14);
+  --rf-danger: #ef4444;
+  --rf-danger-muted: rgba(239, 68, 68, 0.14);
 
-  --rf-text: #f5f5f5;
-  --rf-text-secondary: #a3a3a3;
-  --rf-text-muted: #737373;
+  --rf-text: #f4f4f5;
+  --rf-text-secondary: #d4d4d8;
+  --rf-text-muted: #a1a1aa;
 
-  --rf-border: #2a2a2a;
-  --rf-border-strong: #3f3f3f;
-  --rf-mask: rgba(0, 0, 0, 0.65);
-  --rf-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --rf-shadow-light: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --rf-border: rgba(255, 255, 255, 0.08);
+  --rf-border-strong: rgba(255, 255, 255, 0.16);
+  --rf-mask: rgba(0, 0, 0, 0.7);
+  --rf-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --rf-shadow-light: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --rf-shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.65);
 }

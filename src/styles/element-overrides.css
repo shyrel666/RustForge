@@ -1,12 +1,12 @@
-/* Map RustForge tokens onto Element Plus CSS variables (light + dark) */
+/* Map RustForge Rust & Steel tokens onto Element Plus CSS variables */
 :root {
-  --el-color-primary: var(--rf-cta);
+  --el-color-primary: var(--rf-accent);
   --el-color-primary-light-3: #fb923c;
   --el-color-primary-light-5: #fdba74;
   --el-color-primary-light-7: #fed7aa;
   --el-color-primary-light-8: #ffedd5;
-  --el-color-primary-light-9: var(--rf-cta-muted);
-  --el-color-primary-dark-2: #ea580c;
+  --el-color-primary-light-9: var(--rf-accent-muted);
+  --el-color-primary-dark-2: var(--rf-accent-hover);
 
   --el-color-success: var(--rf-success);
   --el-color-warning: var(--rf-warning);
@@ -42,55 +42,143 @@
   --el-mask-color: var(--rf-mask);
   --el-box-shadow: var(--rf-shadow);
   --el-box-shadow-light: var(--rf-shadow-light);
-  --el-box-shadow-lighter: 0 2px 6px rgba(0, 0, 0, 0.08);
-  --el-box-shadow-dark: 0 12px 32px rgba(0, 0, 0, 0.18);
+  --el-box-shadow-lighter: 0 1px 4px rgba(0, 0, 0, 0.08);
+  --el-box-shadow-dark: var(--rf-shadow-raised);
 
   --el-border-radius-base: var(--rf-radius-control);
-  --el-border-radius-small: 8px;
-  --el-border-radius-round: 999px;
-  --el-font-size-base: 13px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: var(--rf-radius-tag);
+  --el-font-size-base: var(--rf-font-size-body);
+  --el-font-family: var(--rf-font-ui);
 }
 
-html.dark {
-  --el-box-shadow-lighter: 0 2px 6px rgba(0, 0, 0, 0.25);
-  --el-box-shadow-dark: 0 12px 32px rgba(0, 0, 0, 0.5);
+/* Base typography and smooth transition for components */
+.el-button,
+.el-input,
+.el-select,
+.el-dropdown,
+.el-tag,
+.el-dialog,
+.el-drawer {
+  font-family: var(--rf-font-ui);
 }
 
+/* ==========================================================================
+   Buttons (Linear / Raycast grade tactile buttons)
+   ========================================================================== */
 .el-button {
   --el-button-border-radius: var(--rf-radius-control);
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+  transition: all var(--rf-duration) var(--rf-ease);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
-/* Solid primary = CTA orange, with readable white text */
+.el-button:active {
+  transform: translateY(1px);
+}
+
+.el-button--default {
+  background-color: var(--rf-bg-raised);
+  border-color: var(--rf-border);
+  color: var(--rf-text);
+}
+
+.el-button--default:hover {
+  background-color: var(--rf-bg-hover);
+  border-color: var(--rf-border-strong);
+  color: var(--rf-text);
+}
+
+/* Solid primary button */
 .el-button--primary {
-  --el-button-text-color: #fff;
-  --el-button-bg-color: var(--rf-cta);
-  --el-button-border-color: var(--rf-cta);
-  --el-button-hover-text-color: #fff;
-  --el-button-hover-bg-color: var(--rf-cta-hover);
-  --el-button-hover-border-color: var(--rf-cta-hover);
-  --el-button-active-text-color: #fff;
-  --el-button-active-bg-color: #ea580c;
-  --el-button-active-border-color: #ea580c;
+  --el-button-text-color: #ffffff;
+  --el-button-bg-color: var(--rf-accent);
+  --el-button-border-color: var(--rf-accent);
+  --el-button-hover-text-color: #ffffff;
+  --el-button-hover-bg-color: var(--rf-accent-hover);
+  --el-button-hover-border-color: var(--rf-accent-hover);
+  --el-button-active-text-color: #ffffff;
+  --el-button-active-bg-color: var(--rf-accent-hover);
+  --el-button-active-border-color: var(--rf-accent-hover);
 }
 
-/* Plain primary must not inherit solid orange fill + invisible text */
+/* Plain primary button */
 .el-button--primary.is-plain {
-  --el-button-text-color: var(--rf-cta);
-  --el-button-bg-color: var(--rf-cta-muted);
-  --el-button-border-color: rgba(249, 115, 22, 0.45);
-  --el-button-hover-text-color: #fff;
-  --el-button-hover-bg-color: var(--rf-cta);
-  --el-button-hover-border-color: var(--rf-cta);
-  --el-button-active-text-color: #fff;
-  --el-button-active-bg-color: #ea580c;
-  --el-button-active-border-color: #ea580c;
+  --el-button-text-color: var(--rf-accent);
+  --el-button-bg-color: var(--rf-accent-muted);
+  --el-button-border-color: var(--rf-accent-muted);
+  --el-button-hover-text-color: #ffffff;
+  --el-button-hover-bg-color: var(--rf-accent);
+  --el-button-hover-border-color: var(--rf-accent);
+}
+
+.el-button--danger {
+  --el-button-text-color: #ffffff;
+  --el-button-bg-color: var(--rf-danger);
+  --el-button-border-color: var(--rf-danger);
 }
 
 .el-button--danger.is-plain {
   --el-button-text-color: var(--rf-danger);
-  --el-button-bg-color: rgba(248, 113, 113, 0.12);
-  --el-button-border-color: rgba(248, 113, 113, 0.4);
+  --el-button-bg-color: var(--rf-danger-muted);
+  --el-button-border-color: var(--rf-danger-muted);
+}
+
+.el-button--danger.is-plain:hover {
+  --el-button-text-color: #ffffff;
+  --el-button-bg-color: var(--rf-danger);
+  --el-button-border-color: var(--rf-danger);
+}
+
+/* ==========================================================================
+   Inputs & Form Controls
+   ========================================================================== */
+.el-input__wrapper,
+.el-textarea__inner {
+  background-color: var(--rf-bg-raised) !important;
+  box-shadow: 0 0 0 1px var(--rf-border) inset !important;
+  border-radius: var(--rf-radius-control);
+  transition: box-shadow var(--rf-duration) var(--rf-ease),
+    background-color var(--rf-duration) var(--rf-ease);
+}
+
+.el-input__inner,
+.el-textarea__inner,
+.el-select__selected-item,
+.el-checkbox__label,
+.el-radio__label {
+  font-weight: var(--rf-font-weight-secondary);
+}
+
+.el-input__wrapper:hover,
+.el-textarea__inner:hover {
+  box-shadow: 0 0 0 1px var(--rf-border-strong) inset !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1.5px var(--rf-accent) inset !important;
+}
+
+.el-select__wrapper {
+  background-color: var(--rf-bg-raised) !important;
+  box-shadow: 0 0 0 1px var(--rf-border) inset !important;
+  border-radius: var(--rf-radius-control);
+  transition: box-shadow var(--rf-duration) var(--rf-ease);
+}
+
+.el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--rf-border-strong) inset !important;
+}
+
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1.5px var(--rf-accent) inset !important;
+}
+
+.el-input-number {
+  border-radius: var(--rf-radius-control);
 }
 
 .el-switch.is-checked .el-switch__core {
@@ -98,6 +186,9 @@ html.dark {
   border-color: var(--rf-accent);
 }
 
+/* ==========================================================================
+   Tables (High-density Developer Grade Table)
+   ========================================================================== */
 .el-table {
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
@@ -105,67 +196,191 @@ html.dark {
   --el-table-row-hover-bg-color: var(--rf-bg-hover);
   --el-table-border-color: var(--rf-border);
   --el-table-header-text-color: var(--rf-text-secondary);
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-body);
+  border-radius: var(--rf-radius-card);
+  border: 1px solid var(--rf-border);
 }
 
 .el-table th.el-table__cell {
   font-weight: 600;
-  height: 40px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  height: 36px;
+  background-color: var(--rf-bg-raised) !important;
 }
 
 .el-table td.el-table__cell {
-  padding: 8px 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rf-border);
 }
 
+/* ==========================================================================
+   Cards, Dialogs & Drawers
+   ========================================================================== */
 .el-card {
   --el-card-bg-color: var(--rf-bg-panel);
   --el-card-border-color: var(--rf-border);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
+  border: 1px solid var(--rf-border);
+  box-shadow: var(--rf-shadow-light);
 }
 
 .el-dialog {
   --el-dialog-bg-color: var(--rf-bg-panel);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   border: 1px solid var(--rf-border);
+  box-shadow: var(--rf-shadow-raised);
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: var(--rf-space-4) var(--rf-space-5);
+  border-bottom: 1px solid var(--rf-border);
+  margin-right: 0;
+}
+
+.el-dialog__title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--rf-text);
+}
+
+.el-dialog__body {
+  padding: var(--rf-space-5);
+}
+
+.el-dialog__footer {
+  padding: var(--rf-space-3) var(--rf-space-5);
+  border-top: 1px solid var(--rf-border);
+  background: var(--rf-bg-shell);
 }
 
 .el-drawer {
   background: var(--rf-bg-panel);
+  box-shadow: var(--rf-shadow-raised);
 }
 
-.el-input__wrapper,
-.el-textarea__inner {
-  background-color: var(--rf-bg-raised);
-  box-shadow: 0 0 0 1px var(--rf-border) inset;
-  border-radius: var(--rf-radius-control);
+.el-drawer__header {
+  padding: var(--rf-space-4) var(--rf-space-5);
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--rf-border);
 }
 
-.el-select__wrapper {
-  background-color: var(--rf-bg-raised);
-  box-shadow: 0 0 0 1px var(--rf-border) inset;
-  border-radius: var(--rf-radius-control);
+.el-drawer__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rf-text);
 }
 
-.el-input-number {
-  width: 140px;
+.el-drawer__body {
+  padding: var(--rf-space-4) var(--rf-space-5);
 }
 
-.el-alert {
-  border-radius: var(--rf-radius-control);
-  border: 1px solid var(--rf-border);
-  background: var(--rf-bg-raised);
-}
-
+/* ==========================================================================
+   Tags & Badges
+   ========================================================================== */
 .el-tag {
   border-radius: var(--rf-radius-tag);
+  font-weight: 600;
+  font-size: 12px;
+  padding: 0 8px;
+  height: 22px;
+  line-height: 20px;
+  border: 1px solid transparent;
+}
+
+.el-tag--primary {
+  background: var(--rf-accent-muted);
+  border-color: rgba(249, 115, 22, 0.25);
+  color: var(--rf-accent);
+}
+
+.el-tag--success {
+  background: var(--rf-success-muted);
+  border-color: rgba(16, 185, 129, 0.25);
+  color: var(--rf-success);
+}
+
+.el-tag--warning {
+  background: var(--rf-warning-muted);
+  border-color: rgba(245, 158, 11, 0.25);
+  color: var(--rf-warning);
+}
+
+.el-tag--danger {
+  background: var(--rf-danger-muted);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: var(--rf-danger);
+}
+
+.el-tag--info {
+  background: var(--rf-bg-raised);
+  border-color: var(--rf-border);
+  color: var(--rf-text-secondary);
+}
+
+/* ==========================================================================
+   Dropdowns & Menus
+   ========================================================================== */
+.el-dropdown-menu {
+  background: var(--rf-bg-panel);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  padding: 4px;
+  box-shadow: var(--rf-shadow);
+}
+
+.el-dropdown-menu__item {
+  border-radius: var(--rf-radius-control);
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
+  padding: 6px 10px;
+  color: var(--rf-text);
+}
+
+.el-dropdown-menu__item:hover,
+.el-dropdown-menu__item:focus {
+  background-color: var(--rf-bg-hover);
+  color: var(--rf-text);
+}
+
+/* ==========================================================================
+   Tabs
+   ========================================================================== */
+.el-tabs__item {
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
+  color: var(--rf-text-secondary);
+  transition: color var(--rf-duration) var(--rf-ease);
 }
 
 .el-tabs__item.is-active {
   color: var(--rf-accent);
+  font-weight: 600;
 }
 
 .el-tabs__active-bar {
   background-color: var(--rf-accent);
+  height: 2px;
+  border-radius: 1px;
+}
+
+.el-tabs__nav-wrap::after {
+  background-color: var(--rf-border);
+  height: 1px;
+}
+
+/* ==========================================================================
+   Alerts & Notifications
+   ========================================================================== */
+.el-alert {
+  border-radius: var(--rf-radius-control);
+  border: 1px solid var(--rf-border);
+  background: var(--rf-bg-raised);
+  padding: 8px 12px;
 }
 
 .el-form-item {
@@ -174,4 +389,6 @@ html.dark {
 
 .el-form-item__label {
   color: var(--rf-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
 }

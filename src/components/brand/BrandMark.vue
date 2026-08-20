@@ -16,37 +16,52 @@ withDefaults(
     :class="[`is-${variant}`]"
     :width="size"
     :height="size"
-    :viewBox="variant === 'app' ? '0 0 1024 1024' : '0 0 24 24'"
+    viewBox="0 0 1024 1024"
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
     aria-hidden="true"
     focusable="false"
   >
+    <defs>
+      <!-- Core Radiant Flame Gradient (Amber/Gold) -->
+      <linearGradient id="bm-core-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#fbbf24" />
+        <stop offset="50%" stop-color="#f97316" />
+        <stop offset="100%" stop-color="#ea580c" />
+      </linearGradient>
+    </defs>
+
     <template v-if="variant === 'app'">
-      <rect width="1024" height="1024" rx="216" fill="#050B20" />
-      <path
-        d="M751.3 311.1 134.7 349.5 303.8 463 245 601 328.3 709.6 453.2 458.1 660.6 423Z"
-        fill="#2070F8"
+      <!-- Theme Adaptive Rounded Container -->
+      <rect
+        class="bm-bg-rect"
+        x="32"
+        y="32"
+        width="960"
+        height="960"
+        rx="224"
       />
-      <path
-        d="M616.5 498.9 477.7 521 427.9 619.8 564.3 592Z"
-        fill="#2070F8"
-      />
-      <path
-        d="M490.8 654.1 402.6 670.4 359.3 757.8 332.4 764.3 231.9 631.2 110.2 902.3 400.1 848.4Z"
-        fill="#19BCB9"
-      />
-      <path
-        d="M813.3 195.2 798.6 194.3 800.3 250.7 769.2 214.8 758.6 226.2 790.5 258 743.1 254 743.9 269.5 789.6 271.9 761.1 290.7 768.4 301.3 797 282.5 780.7 327.5 795.4 333.2 809.2 285 826.4 325 839.5 317.7 819.9 280.9 857.4 297.2 862.3 285.8 826.4 269.5 877.8 256.4 872.9 240.9 823.1 257.2 846.8 224.6 837.8 215.6 813.3 249.9Z"
-        fill="#FC8442"
-      />
+
+      <g transform="translate(0, 10)">
+        <!-- Top Anvil Head Facet -->
+        <path class="bm-facet-top" d="M512 216 L768 364 L512 512 L256 364 Z" />
+        <!-- Top Facet Inner Cut -->
+        <path class="bm-facet-cut" d="M512 286 L660 372 L512 458 L364 372 Z" />
+        <!-- Left Pillar -->
+        <path class="bm-facet-left" d="M256 398 L488 532 L488 776 L256 642 Z" />
+        <!-- Right Pillar -->
+        <path class="bm-facet-right" d="M536 532 L768 398 L768 642 L536 776 Z" />
+        <!-- Central Forge Core -->
+        <path d="M512 376 L604 492 L512 608 L420 492 Z" fill="url(#bm-core-grad)" />
+      </g>
     </template>
+
     <template v-else>
-      <g fill="currentColor" transform="scale(.0234375)">
-        <path d="M751.3 311.1 134.7 349.5 303.8 463 245 601 328.3 709.6 453.2 458.1 660.6 423Z" />
-        <path d="M616.5 498.9 477.7 521 427.9 619.8 564.3 592Z" />
-        <path d="M490.8 654.1 402.6 670.4 359.3 757.8 332.4 764.3 231.9 631.2 110.2 902.3 400.1 848.4Z" />
-        <path d="M813.3 195.2 798.6 194.3 800.3 250.7 769.2 214.8 758.6 226.2 790.5 258 743.1 254 743.9 269.5 789.6 271.9 761.1 290.7 768.4 301.3 797 282.5 780.7 327.5 795.4 333.2 809.2 285 826.4 325 839.5 317.7 819.9 280.9 857.4 297.2 862.3 285.8 826.4 269.5 877.8 256.4 872.9 240.9 823.1 257.2 846.8 224.6 837.8 215.6 813.3 249.9Z" />
+      <g fill="currentColor" transform="translate(0, 10)">
+        <path d="M512 216 L768 364 L512 512 L256 364 Z" />
+        <path d="M256 398 L488 532 L488 776 L256 642 Z" opacity="0.75" />
+        <path d="M536 532 L768 398 L768 642 L536 776 Z" opacity="0.85" />
+        <path d="M512 376 L604 492 L512 608 L420 492 Z" fill="var(--rf-accent)" />
       </g>
     </template>
   </svg>
@@ -57,7 +72,55 @@ withDefaults(
   display: block;
   flex-shrink: 0;
 }
-.rf-brand-mark.is-app {
-  border-radius: 22%;
+
+/* Light Theme: Clean Slate & Titanium Container */
+.bm-bg-rect {
+  fill: #f1f5f9;
+  stroke: #cbd5e1;
+  stroke-width: 20px;
+  transition: fill var(--rf-duration) var(--rf-ease), stroke var(--rf-duration) var(--rf-ease);
+}
+
+.bm-facet-top {
+  fill: #1e293b;
+  transition: fill var(--rf-duration) var(--rf-ease);
+}
+
+.bm-facet-cut {
+  fill: #f1f5f9;
+  opacity: 0.95;
+  transition: fill var(--rf-duration) var(--rf-ease);
+}
+
+.bm-facet-left {
+  fill: #475569;
+  transition: fill var(--rf-duration) var(--rf-ease);
+}
+
+.bm-facet-right {
+  fill: #334155;
+  transition: fill var(--rf-duration) var(--rf-ease);
+}
+
+/* Dark Theme: Deep Titanium & Crisp Steel */
+:global(html.dark) .bm-bg-rect {
+  fill: #18181c;
+  stroke: rgba(255, 255, 255, 0.14);
+}
+
+:global(html.dark) .bm-facet-top {
+  fill: #f4f4f5;
+}
+
+:global(html.dark) .bm-facet-cut {
+  fill: #18181c;
+}
+
+:global(html.dark) .bm-facet-left {
+  fill: #52525b;
+}
+
+:global(html.dark) .bm-facet-right {
+  fill: #71717a;
 }
 </style>

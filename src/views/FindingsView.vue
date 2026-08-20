@@ -224,17 +224,17 @@ async function setStatus(id: number, status: string) {
   try {
     const required = status === "rejected";
     const { value } = await ElMessageBox.prompt(
-      required ? "请填写判断为误报的原因" : "可填写本次状态变更说明",
+      required ? "请填写判定为误报的原因" : "可填写本次状态变更说明",
       status === "confirmed"
-        ? "确认 Finding"
+        ? "确认该 Finding"
         : status === "rejected"
-          ? "标记误报"
-          : "重置待验证",
+          ? "标记为误报 (False Positive)"
+          : "重置为待验证",
       {
-        confirmButtonText: "提交",
+        confirmButtonText: "提交变更",
         cancelButtonText: "取消",
         inputType: "textarea",
-        inputPlaceholder: required ? "必填" : "可选",
+        inputPlaceholder: required ? "必填说明" : "可选说明",
         inputValidator: (input) =>
           !required || Boolean(input.trim()) || "标记误报必须填写原因",
       }
@@ -246,12 +246,18 @@ async function setStatus(id: number, status: string) {
   }
 }
 
-const pendingCount = computed(
-  () => findings.items.filter((f) => f.status === "pending").length
-);
+const severityCounts = computed(() => {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const item of findings.items) {
+    if (item.severity in counts) {
+      counts[item.severity as keyof typeof counts]++;
+    }
+  }
+  return counts;
+});
 
-function severityTag(s: string): string {
-  const map: Record<string, string> = {
+function severityTag(s: string): "danger" | "warning" | "info" {
+  const map: Record<string, "danger" | "warning" | "info"> = {
     critical: "danger",
     high: "danger",
     medium: "warning",
@@ -261,8 +267,8 @@ function severityTag(s: string): string {
   return map[s] ?? "info";
 }
 
-function statusTag(s: string): { text: string; type: string } {
-  const map: Record<string, { text: string; type: string }> = {
+function statusTag(s: string): { text: string; type: "warning" | "success" | "info" } {
+  const map: Record<string, { text: string; type: "warning" | "success" | "info" }> = {
     pending: { text: "待验证", type: "warning" },
     confirmed: { text: "已确认", type: "success" },
     rejected: { text: "误报", type: "info" },
@@ -270,13 +276,25 @@ function statusTag(s: string): { text: string; type: string } {
   return map[s] ?? { text: s, type: "info" };
 }
 
-function evaluationStatusTag(s: string): { text: string; type: string } {
-  const map: Record<string, { text: string; type: string }> = {
-    completed: { text: "完成", type: "success" },
-    timed_out: { text: "超时", type: "warning" },
-    pack_disabled: { text: "包已禁用", type: "danger" },
+function producerLabel(producer: Finding["producer"]): string {
+  const labels: Record<Finding["producer"], string> = {
+    ai: "AI 诊断",
+    passive_rule: "被动规则",
+    safe_verifier: "安全验证器",
   };
-  return map[s] ?? { text: s, type: "info" };
+  return labels[producer];
+}
+
+function producerTagType(
+  producer: Finding["producer"]
+): "primary" | "info" | "success" {
+  if (producer === "ai") return "primary";
+  if (producer === "safe_verifier") return "success";
+  return "info";
+}
+
+function standardReferencesLabel(references: Finding["standard_references"]): string {
+  return references.map(formatStandardReference).join(" · ") || "—";
 }
 
 const ruleIssueSummary = computed(() => {
@@ -305,15 +323,31 @@ const ruleIssueSummary = computed(() => {
 <template>
   <div class="findings-page rf-page rf-page--inset">
     <PageHeader
-      title="发现"
-      description="复核 AI、被动规则与安全验证器结果，并导出可追溯的证据化报告。"
+      title="安全发现与证据审查 (Findings)"
+      description="复核 AI 评估、被动规则与确定性验证器结论；证据闭环生成标准安全报告。"
     />
+
+    <!-- 控制与过滤条 -->
     <div class="rf-toolbar">
-      <div v-if="pendingCount" class="rf-toolbar-group">
-        <el-tag type="warning" effect="plain" size="small">
-          {{ pendingCount }} 条待验证
-        </el-tag>
+      <!-- 严重度统计徽章矩阵 -->
+      <div class="severity-matrix">
+        <span class="severity-chip severity-critical" title="严重">
+          <span class="mono">{{ severityCounts.critical }}</span> CRIT
+        </span>
+        <span class="severity-chip severity-high" title="高危">
+          <span class="mono">{{ severityCounts.high }}</span> HIGH
+        </span>
+        <span class="severity-chip severity-medium" title="中危">
+          <span class="mono">{{ severityCounts.medium }}</span> MED
+        </span>
+        <span class="severity-chip severity-low" title="低危">
+          <span class="mono">{{ severityCounts.low }}</span> LOW
+        </span>
+        <span class="severity-chip severity-info" title="提示">
+          <span class="mono">{{ severityCounts.info }}</span> INFO
+        </span>
       </div>
+
       <div class="rf-filters">
         <div class="rf-toolbar-group">
           <el-select
@@ -339,7 +373,7 @@ const ruleIssueSummary = computed(() => {
             <el-option
               v-for="s in ['critical', 'high', 'medium', 'low', 'info']"
               :key="s"
-              :label="s"
+              :label="s.toUpperCase()"
               :value="s"
             />
           </el-select>
@@ -355,6 +389,7 @@ const ruleIssueSummary = computed(() => {
             <el-option label="被动规则" value="rule" />
           </el-select>
         </div>
+
         <el-button
           type="primary"
           size="small"
@@ -362,73 +397,52 @@ const ruleIssueSummary = computed(() => {
           :disabled="projectId === null"
           @click="openReport"
         >
-          生成报告
+          导出证据报告
         </el-button>
       </div>
     </div>
 
+    <!-- 空状态 -->
     <EmptyState
       v-if="!project.current"
       centered
-      title="尚未选择项目"
-      description="请先在顶部创建或选择项目。发现列表按项目隔离。"
+      title="尚未选择测试项目"
+      description="请在顶部切换或新建项目。发现列表与规则引擎按项目严格隔离。"
     >
       <template #icon><el-icon :size="20"><FolderOpened /></el-icon></template>
     </EmptyState>
 
     <template v-else>
-      <el-alert type="info" :closable="false" class="hint" show-icon>
-        AI 与被动规则结果默认待验证；只有版本化安全验证器满足完整证据阈值时才会自动确认，人工结论始终可覆盖。
-      </el-alert>
-
+      <!-- 规则引擎诊断条 -->
       <div v-loading="ruleDiagnosticsLoading" class="rule-health">
         <div class="rule-health__summary">
-          <strong>被动规则后台</strong>
-          <el-tag
-            size="small"
-            :type="ruleDiagnostics?.worker_running ? 'success' : 'info'"
-            effect="plain"
-          >
-            {{ ruleDiagnostics?.worker_running ? "运行中" : "代理未运行" }}
-          </el-tag>
+          <strong class="health-title">被动规则引擎</strong>
+          <span class="rf-pulse-dot" :class="ruleDiagnostics?.worker_running ? 'rf-pulse-dot--active' : 'rf-pulse-dot--stopped'" />
+          <span class="health-status">{{ ruleDiagnostics?.worker_running ? "后台监听中" : "代理未启动" }}</span>
+
           <template v-if="ruleDiagnostics">
-            <span>
+            <span class="health-meta mono">
               队列 {{ ruleDiagnostics.queue_depth }}/{{ ruleDiagnostics.queue_capacity }}
             </span>
-            <span>完成 {{ ruleDiagnostics.completed_evaluations }}</span>
+            <span class="health-meta mono">已求值 {{ ruleDiagnostics.completed_evaluations }}</span>
             <el-tag
               v-if="ruleDiagnostics.dropped_evaluations"
               size="small"
               type="danger"
-              effect="plain"
             >
               丢弃 {{ ruleDiagnostics.dropped_evaluations }}
             </el-tag>
-            <el-tag
-              v-if="ruleDiagnostics.timed_out_evaluations"
-              size="small"
-              type="warning"
-              effect="plain"
-            >
-              超时 {{ ruleDiagnostics.timed_out_evaluations }}
-            </el-tag>
-            <el-tag
-              v-if="ruleDiagnostics.failed_evaluations"
-              size="small"
-              type="danger"
-              effect="plain"
-            >
-              失败 {{ ruleDiagnostics.failed_evaluations }}
-            </el-tag>
           </template>
+
           <el-button
             link
             size="small"
             :icon="Refresh"
             :loading="ruleDiagnosticsLoading"
+            class="refresh-btn"
             @click="loadRuleDiagnostics(true)"
           >
-            刷新
+            刷新状态
           </el-button>
         </div>
 
@@ -436,20 +450,12 @@ const ruleIssueSummary = computed(() => {
           <el-tooltip
             v-for="pack in ruleDiagnostics.packs"
             :key="`${pack.pack_id}@${pack.version}`"
-            :content="
-              pack.loaded
-                ? `${pack.rule_count} 条规则`
-                : pack.disabled_reason || '规则包校验失败'
-            "
+            :content="pack.loaded ? `${pack.rule_count} 条已加载声明式规则` : pack.disabled_reason || '规则包未加载'"
           >
-            <el-tag
-              size="small"
-              :type="pack.loaded ? 'success' : 'danger'"
-              effect="plain"
-            >
-              {{ pack.pack_id }}@{{ pack.version || "未知版本" }}
-              · {{ pack.loaded ? `${pack.rule_count} 条` : "已禁用" }}
-            </el-tag>
+            <span class="rule-pack-chip" :class="{ 'is-disabled': !pack.loaded }">
+              <span class="mono">{{ pack.pack_id }}@{{ pack.version || "未知版本" }}</span>
+              <small>{{ pack.loaded ? `${pack.rule_count} rules` : "禁用" }}</small>
+            </span>
           </el-tooltip>
         </div>
 
@@ -458,276 +464,179 @@ const ruleIssueSummary = computed(() => {
           type="warning"
           :closable="false"
           show-icon
-          title="规则后台存在降级"
+          title="规则后台状态提示"
           :description="ruleIssueSummary"
+          class="rule-alert"
         />
-
-        <el-collapse
-          v-if="ruleDiagnostics?.recent_evaluations.length"
-          class="rule-evaluations"
-        >
-          <el-collapse-item
-            :title="`最近 ${ruleDiagnostics.recent_evaluations.length} 次求值审计`"
-            name="evaluations"
-          >
-            <el-table
-              :data="ruleDiagnostics.recent_evaluations"
-              size="small"
-              max-height="240"
-            >
-              <el-table-column prop="traffic_id" label="流量" width="90">
-                <template #default="{ row }">#{{ row.traffic_id }}</template>
-              </el-table-column>
-              <el-table-column label="规则包" min-width="150">
-                <template #default="{ row }">
-                  {{ row.pack_id }}@{{ row.pack_version || "未知版本" }}
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="90">
-                <template #default="{ row }">
-                  <el-tag
-                    size="small"
-                    :type="evaluationStatusTag(row.status).type"
-                    effect="plain"
-                  >
-                    {{ evaluationStatusTag(row.status).text }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="hit_count" label="命中" width="70" />
-              <el-table-column prop="finding_count" label="Finding" width="85" />
-              <el-table-column prop="duration_ms" label="耗时(ms)" width="90" />
-              <el-table-column label="诊断" min-width="220">
-                <template #default="{ row }">
-                  <span v-if="row.diagnostics.length">
-                    {{ row.diagnostics.join("；") }}
-                  </span>
-                  <span v-else class="cell-sub">—</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-collapse-item>
-        </el-collapse>
       </div>
 
-      <EmptyState
-        v-if="!findings.loading && findings.items.length === 0"
-        centered
-        title="暂无发现"
-        description="可从 AI 评估直接扫描已授权 URL，也可抓包后由被动规则打标或在流量页做 AI 分析。"
-      >
-        <template #icon><el-icon :size="20"><Document /></el-icon></template>
-      </EmptyState>
-
+      <!-- 发现列表表格 -->
       <el-table
-        v-else
         v-loading="findings.loading"
         :data="findings.items"
-        row-key="id"
+        class="findings-table rf-table-shell"
         size="small"
-        class="rf-table-shell"
+        row-key="id"
         @expand-change="handleExpand"
       >
-      <el-table-column type="expand">
-        <template #default="{ row }">
-          <div class="expand">
-            <div class="block">
-              <div class="label">推理过程 / 命中说明</div>
-              <div class="md" v-html="md.render(row.reasoning || '（无）')" />
-            </div>
-            <div class="block">
-              <div class="label">手动验证步骤</div>
-              <div class="md" v-html="md.render(row.verify_steps || '（无）')" />
-            </div>
-            <div v-if="row.standard_references.length" class="block">
-              <div class="label">知识卡片</div>
-              <KnowledgeCard :references="row.standard_references" />
-            </div>
-            <div v-if="row.fingerprint" class="block">
-              <div class="label">稳定指纹</div>
-              <code class="fingerprint">{{ row.fingerprint }}</code>
-            </div>
-            <div v-if="row.producer === 'passive_rule'" class="block">
-              <div class="label">关联流量（累计 {{ row.occurrences }}）</div>
-              <div v-if="findingTrafficLoading[row.id]" class="cell-sub">
-                正在读取关联流量…
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="expand-content">
+              <div v-if="row.producer === 'passive_rule'" class="expand-section">
+                <div class="section-label">规则命中证据快照</div>
+                <el-table
+                  v-loading="findingTrafficLoading[row.id]"
+                  :data="findingRuleHits[row.id] ?? []"
+                  size="small"
+                  border
+                >
+                  <el-table-column label="规则" min-width="220">
+                    <template #default="{ row: hit }">
+                      <div class="rule-identity">
+                        <span class="mono">{{ hit.pack_id }}@{{ hit.pack_version }}</span>
+                        <span class="mono text-muted">{{ hit.rule_id }}@{{ hit.rule_version }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="field_path" label="命中位置" min-width="160">
+                    <template #default="{ row: hit }"><span class="mono">{{ hit.field_path }}</span></template>
+                  </el-table-column>
+                  <el-table-column prop="evidence" label="脱敏证据" min-width="240">
+                    <template #default="{ row: hit }">
+                      <pre class="rf-mono-pre snippet">{{ hit.evidence }}</pre>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="置信度" width="90" align="center">
+                    <template #default="{ row: hit }">{{ hit.confidence }}</template>
+                  </el-table-column>
+                  <el-table-column label="完整性" width="90" align="center">
+                    <template #default="{ row: hit }">
+                      <el-tag size="small" :type="hit.incomplete_evidence ? 'warning' : 'success'">
+                        {{ hit.incomplete_evidence ? "不完整" : "完整" }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                </el-table>
               </div>
-              <el-table
-                v-else-if="findingTraffic[row.id]?.length"
-                :data="findingTraffic[row.id]"
-                size="small"
-                max-height="220"
-              >
-                <el-table-column prop="traffic_id" label="#" width="70" />
-                <el-table-column prop="method" label="方法" width="80" />
-                <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
-                <el-table-column prop="status" label="状态码" width="80" />
-                <el-table-column prop="first_seen_at" label="首次关联" width="165" />
-              </el-table>
-              <span v-else class="cell-sub">暂无可读取的关联流量。</span>
+
+              <!-- 知识库映射标准 -->
+              <KnowledgeCard
+                v-if="row.standard_references.length"
+                :references="row.standard_references"
+                class="knowledge-block"
+              />
+
+              <!-- Evidence 闭环审计面板 -->
+              <EvidencePanel
+                :finding="row"
+                :traffic="findingTraffic[row.id] ?? []"
+                class="evidence-block"
+                @finding-updated="findings.refresh(projectId!)"
+              />
             </div>
-            <div v-if="row.producer === 'passive_rule'" class="block">
-              <div class="label">
-                规则命中审计（最近 {{ findingRuleHits[row.id]?.length ?? 0 }} 条）
-              </div>
-              <div v-if="findingTrafficLoading[row.id]" class="cell-sub">
-                正在读取规则命中记录…
-              </div>
-              <el-table
-                v-else-if="findingRuleHits[row.id]?.length"
-                :data="findingRuleHits[row.id]"
-                size="small"
-                max-height="260"
-              >
-                <el-table-column prop="created_at" label="命中时间" width="175" />
-                <el-table-column prop="traffic_id" label="流量" width="70">
-                  <template #default="{ row: hit }">#{{ hit.traffic_id }}</template>
-                </el-table-column>
-                <el-table-column label="规则包 / 规则版本" min-width="230">
-                  <template #default="{ row: hit }">
-                    <div>{{ hit.pack_id }}@{{ hit.pack_version }}</div>
-                    <div class="cell-sub">{{ hit.rule_id }}@{{ hit.rule_version }}</div>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="field_path" label="命中位置" min-width="190" show-overflow-tooltip />
-                <el-table-column prop="evidence" label="脱敏证据" min-width="280" show-overflow-tooltip />
-                <el-table-column prop="confidence" label="置信度" width="80" />
-                <el-table-column label="完整性" width="90">
-                  <template #default="{ row: hit }">
-                    <el-tag
-                      size="small"
-                      :type="hit.incomplete_evidence ? 'warning' : 'success'"
-                      effect="plain"
-                    >
-                      {{ hit.incomplete_evidence ? "不完整" : "完整" }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <span v-else class="cell-sub">暂无规则命中记录。</span>
-            </div>
-            <EvidencePanel
-              :finding="row"
-              :traffic="findingTraffic[row.id] ?? []"
-              @finding-updated="findings.applyFinding"
-            />
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column prop="id" label="#" width="60" />
-      <el-table-column label="标题" min-width="200">
-        <template #default="{ row }">
-          <div class="cell-title">{{ row.title }}</div>
-          <div class="cell-sub">
-            <el-tag
-              size="small"
-              :type="row.producer === 'safe_verifier' ? 'success' : row.producer === 'ai' ? 'primary' : 'info'"
-              effect="plain"
-            >
-              {{
-                row.producer === "safe_verifier"
-                  ? "安全验证器"
-                  : row.producer === "ai"
-                    ? "AI"
-                    : "被动规则"
-              }}
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="id" label="#" width="65" sortable />
+
+        <el-table-column label="严重度" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="severityTag(row.severity)">
+              {{ row.severity.toUpperCase() }}
             </el-tag>
-            <el-tag
-              v-if="row.producer === 'safe_verifier' && row.status === 'confirmed'"
-              size="small"
-              type="success"
-              effect="dark"
-            >自动确认</el-tag>
-            <span v-if="row.traffic_id" class="tid">流量 #{{ row.traffic_id }}</span>
-            <span v-if="row.producer === 'passive_rule'" class="tid">
-              累计 {{ row.occurrences }} 条关联流量
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="title" label="漏洞标题" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="finding-title">{{ row.title }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="标准映射" min-width="170" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono standard-ref">
+              {{ standardReferencesLabel(row.standard_references) }}
             </span>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="严重度" width="90">
-        <template #default="{ row }">
-          <el-tag size="small" :type="severityTag(row.severity)" effect="dark">{{ row.severity }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="置信度" width="120">
-        <template #default="{ row }">
-          <el-progress
-            :percentage="row.confidence"
-            :stroke-width="6"
-            :status="row.confidence >= 70 ? 'success' : row.confidence >= 40 ? 'warning' : 'exception'"
-          />
-        </template>
-      </el-table-column>
-      <el-table-column label="标准引用" min-width="220">
-        <template #default="{ row }">
-          <div v-if="row.standard_references.length" class="reference-list">
-            <el-tag
-              v-for="reference in row.standard_references"
-              :key="`${reference.framework}@${reference.version}/${reference.id}`"
-              size="small"
-              effect="plain"
-            >
-              {{ formatStandardReference(reference) }}
+          </template>
+        </el-table-column>
+
+        <el-table-column label="来源" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="producerTagType(row.producer)">
+              {{ producerLabel(row.producer) }}
             </el-tag>
-          </div>
-          <span v-else class="cell-sub">—</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="验证状态" width="95">
+          <template #default="{ row }">
+            <el-tag size="small" :type="statusTag(row.status).type">
+              {{ statusTag(row.status).text }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="状态决策" width="180" fixed="right">
+          <template #default="{ row }">
+            <div class="status-actions">
+              <el-button
+                v-if="row.status !== 'confirmed'"
+                size="small"
+                type="success"
+                link
+                @click="setStatus(row.id, 'confirmed')"
+              >
+                确认
+              </el-button>
+              <el-button
+                v-if="row.status !== 'rejected'"
+                size="small"
+                type="danger"
+                link
+                @click="setStatus(row.id, 'rejected')"
+              >
+                误报
+              </el-button>
+              <el-button
+                v-if="row.status !== 'pending'"
+                size="small"
+                type="info"
+                link
+                @click="setStatus(row.id, 'pending')"
+              >
+                重置
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+
+        <template #empty>
+          <el-empty description="暂未发现安全问题。可在 AI 评估中执行测试或开启代理采集流量。" />
         </template>
-      </el-table-column>
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag size="small" :type="statusTag(row.status).type">{{ statusTag(row.status).text }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="210">
-        <template #default="{ row }">
-          <el-button
-            v-if="row.status !== 'confirmed'"
-            size="small"
-            type="success"
-            link
-            @click="setStatus(row.id, 'confirmed')"
-          >确认</el-button>
-          <el-button
-            v-if="row.status !== 'rejected'"
-            size="small"
-            type="info"
-            link
-            @click="setStatus(row.id, 'rejected')"
-          >误报</el-button>
-          <el-button
-            v-if="row.status !== 'pending'"
-            size="small"
-            type="warning"
-            link
-            @click="setStatus(row.id, 'pending')"
-          >重置</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+      </el-table>
     </template>
 
-    <el-dialog v-model="reportVisible" title="证据化报告 v2（默认脱敏预览）" width="76%" top="5vh">
-      <el-alert type="info" :closable="false" show-icon class="report-alert">
-        主报告只列 confirmed Finding；pending 位于独立附录，rejected 默认省略。预览始终使用不可变脱敏 Evidence 快照。
-      </el-alert>
-      <div v-loading="reportLoading" class="report-preview md" v-html="md.render(reportMd)" />
+    <!-- 报告预览对话框 -->
+    <el-dialog v-model="reportVisible" title="安全评估与证据化报告" width="min(860px, 94vw)">
+      <div v-loading="reportLoading" class="report-container">
+        <div v-if="reportMd" class="report-rendered" v-html="md.render(reportMd)" />
+      </div>
       <template #footer>
         <el-button @click="reportVisible = false">关闭</el-button>
-        <el-button
-          type="danger"
-          plain
-          :loading="reportExporting"
-          @click="doExportReport(true)"
-        >
-          单次导出原始敏感内容
-        </el-button>
         <el-button
           type="primary"
           :loading="reportExporting"
           @click="doExportReport(false)"
         >
-          导出脱敏 .md + .json
+          导出脱敏报告 (Markdown + JSON)
+        </el-button>
+        <el-button
+          type="warning"
+          :loading="reportExporting"
+          @click="doExportReport(true)"
+        >
+          导出完整敏感证据报告
         </el-button>
       </template>
     </el-dialog>
@@ -735,96 +644,189 @@ const ruleIssueSummary = computed(() => {
 </template>
 
 <style scoped>
-.f {
-  width: 110px;
+.findings-page {
+  gap: var(--rf-space-2);
 }
-.hint {
-  flex-shrink: 0;
-}
-.report-alert {
-  margin-bottom: 12px;
-}
-.rule-health {
-  flex-shrink: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
-  background: var(--rf-bg-raised);
-}
-.rule-health__summary,
-.rule-pack-list {
-  display: flex;
+
+.severity-matrix {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--rf-text-secondary);
-}
-.rule-pack-list {
-  margin-top: 8px;
-}
-.rule-evaluations {
-  margin-top: 8px;
-}
-.cell-title {
-  font-weight: 600;
-}
-.cell-sub {
-  font-size: 12px;
-  color: var(--rf-text-secondary);
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.reference-list {
-  display: flex;
-  flex-wrap: wrap;
   gap: 4px;
 }
-.tid {
-  font-family: var(--rf-font-mono);
+
+.severity-chip {
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
-.fingerprint {
-  display: block;
-  overflow-wrap: anywhere;
+
+.severity-critical {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--rf-danger);
+}
+
+.severity-high {
+  background: rgba(249, 115, 22, 0.12);
+  color: var(--rf-accent);
+}
+
+.severity-medium {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--rf-warning);
+}
+
+.severity-low {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--rf-info);
+}
+
+.severity-info {
+  background: var(--rf-bg-raised);
   color: var(--rf-text-secondary);
-  font-family: var(--rf-font-mono);
+}
+
+.f {
+  width: 100px;
+}
+
+.rule-health {
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-bg-panel);
+  display: grid;
+  gap: 6px;
+}
+
+.rule-health__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.health-title {
+  color: var(--rf-text);
+  font-size: 12px;
+}
+
+.health-status {
+  color: var(--rf-text-secondary);
+  font-size: 11.5px;
+}
+
+.health-meta {
+  color: var(--rf-text-muted);
   font-size: 11px;
 }
-.expand {
-  padding: var(--rf-space-3) var(--rf-space-4);
+
+.refresh-btn {
+  margin-left: auto;
 }
-.report-preview {
-  max-height: 62vh;
-  overflow: auto;
+
+.rule-pack-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.block {
-  margin-bottom: var(--rf-space-4);
-}
-.label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--rf-text-muted);
-  margin-bottom: var(--rf-space-2);
-}
-.md {
-  font-size: 13px;
-  line-height: 1.7;
+
+.rule-pack-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--rf-border);
+  border-radius: 4px;
   background: var(--rf-bg-raised);
+  font-size: 11px;
+  color: var(--rf-text-secondary);
+}
+
+.rule-pack-chip.is-disabled {
+  opacity: 0.5;
+  border-color: var(--rf-danger);
+}
+
+.rule-alert {
+  margin-top: 4px;
+}
+
+.findings-table {
+  flex: 1;
+}
+
+.finding-title {
+  font-weight: 600;
+  color: var(--rf-text);
+}
+
+.standard-ref {
+  color: var(--rf-text-secondary);
+  font-size: 11.5px;
+}
+
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.expand-content {
+  padding: var(--rf-space-3);
+  background: var(--rf-bg-raised);
+  display: grid;
+  gap: var(--rf-space-3);
   border-radius: var(--rf-radius-control);
-  padding: 8px 12px;
 }
-.md :deep(p) {
-  margin: 4px 0;
+
+.expand-section {
+  display: grid;
+  gap: 6px;
 }
-.md :deep(ol),
-.md :deep(ul) {
-  margin: 4px 0;
-  padding-left: 20px;
+
+.section-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--rf-text-secondary);
+  text-transform: uppercase;
 }
-.md :deep(code) {
-  background: var(--rf-bg-hover);
-  padding: 1px 4px;
-  border-radius: 3px;
+
+.rule-identity {
+  display: grid;
+  gap: 2px;
+}
+
+.snippet {
+  margin: 0;
+  max-height: 80px;
+}
+
+.report-container {
+  min-height: 300px;
+  max-height: 65vh;
+  overflow-y: auto;
+  padding: var(--rf-space-4);
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+}
+
+.report-rendered {
+  color: var(--rf-text);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.report-rendered :deep(pre) {
+  padding: 10px;
+  background: var(--rf-bg-panel);
+  border: 1px solid var(--rf-border);
+  border-radius: 6px;
+  font-family: var(--rf-font-mono);
+  font-size: 12px;
 }
 </style>

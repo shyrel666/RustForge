@@ -37,5 +37,5 @@ export function watchSystemTheme(onChange: () => void): () => void {
 
 export function parseThemeMode(raw: string | undefined): ThemeMode {
   if (raw === "light" || raw === "dark" || raw === "system") return raw;
-  return "dark";
+  return "light";
 }

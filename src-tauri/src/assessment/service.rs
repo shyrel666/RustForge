@@ -13,7 +13,7 @@ use super::policy::{
 use crate::authorization::load_project_policy;
 use crate::secrets::{assessment_auth_profile_secret_id, SecretStore, SecretString};
 use base64::Engine;
-use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -607,11 +607,23 @@ pub fn create_run(
     conn: &mut Connection,
     preview: &AssessmentContractPreview,
 ) -> Result<AssessmentRun, String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let run_id = create_run_on(&tx, preview)?;
+    tx.commit().map_err(|error| error.to_string())?;
+    get_run(conn, preview.project_id, run_id)
+}
+
+pub(crate) fn create_run_on(
+    tx: &Transaction<'_>,
+    preview: &AssessmentContractPreview,
+) -> Result<i64, String> {
     if !preview.written_authorization_confirmed {
         return Err("[AUTHORIZATION_REQUIRED] 必须确认已获得目标的书面授权".into());
     }
     let contract_json = serde_json::to_string(preview).map_err(|error| error.to_string())?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO assessment_runs(
              project_id, start_url, exact_origin, contract_json, contract_hash,
              template_registry_hash, identity_a_profile_id, identity_b_profile_id,
@@ -648,9 +660,9 @@ pub fn create_run(
             format!("创建评估运行失败: {error}")
         }
     })?;
-    let run_id = conn.last_insert_rowid();
-    append_event(
-        conn,
+    let run_id = tx.last_insert_rowid();
+    append_event_on(
+        tx,
         run_id,
         None,
         "run_created",
@@ -658,7 +670,7 @@ pub fn create_run(
         Some("queued"),
         &json!({ "contractHash": preview.contract_hash }),
     )?;
-    get_run(conn, preview.project_id, run_id)
+    Ok(run_id)
 }
 
 pub fn transition_run(
@@ -708,10 +720,9 @@ pub fn transition_run(
         params![run_id, project_id, next.as_str(), stop_reason, ended],
     )
     .map_err(|error| format!("更新评估状态失败: {error}"))?;
+    super::mission::sync_from_run_on(&tx, run_id, next, stop_reason)?;
     tx.commit().map_err(|error| error.to_string())?;
-    let run = get_run(conn, project_id, run_id)?;
-    super::mission::sync_from_run(conn, run_id, next, stop_reason)?;
-    Ok(run)
+    get_run(conn, project_id, run_id)
 }
 
 /// Close every check that could otherwise remain visually "running" after a
@@ -814,16 +825,45 @@ pub fn recover_interrupted_runs(conn: &mut Connection) -> Result<usize, String> 
             [run_id],
         )
         .map_err(|error| error.to_string())?;
-    }
-    tx.commit().map_err(|error| error.to_string())?;
-    for (run_id, _) in &active {
-        super::mission::sync_from_run(
-            conn,
+        super::mission::sync_from_run_on(
+            &tx,
             *run_id,
             AssessmentStatus::Interrupted,
             Some("application_restarted"),
         )?;
     }
+    let mut stale_statement = tx
+        .prepare(
+            "SELECT ar.id, ar.status, ar.stop_reason
+             FROM assessment_missions m
+             JOIN assessment_runs ar ON ar.id = m.active_run_id
+             WHERE m.legacy = 0
+               AND m.status IN ('discovering','planning','executing','verifying')
+               AND ar.status IN ('completed','stopped','cancelled','failed','interrupted')
+             ORDER BY ar.id",
+        )
+        .map_err(|error| error.to_string())?;
+    let stale_terminal_runs = stale_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(stale_statement);
+    for (run_id, status, reason) in stale_terminal_runs {
+        super::mission::sync_from_run_on(
+            &tx,
+            run_id,
+            AssessmentStatus::parse(&status)?,
+            (!reason.is_empty()).then_some(reason.as_str()),
+        )?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
     Ok(active.len())
 }
 

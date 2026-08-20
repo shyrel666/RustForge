@@ -38,7 +38,7 @@ const DEFAULTS = {
   ai_enabled: true,
   proxy_port: 8080,
   consent_accepted: false,
-  theme: "dark" as ThemeMode,
+  theme: "light" as ThemeMode,
 };
 
 /** 生成一个本地唯一 id（时间戳 + 随机后缀，够用即可） */

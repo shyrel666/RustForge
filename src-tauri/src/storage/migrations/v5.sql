@@ -1,0 +1,4 @@
+-- v5 is an atomic data migration. The Rust migration step replaces the
+-- endpoint-specific fingerprints created by security_headers_cookie with a
+-- project + exact-origin + observed-gap identity when that projection is
+-- lossless. Ambiguous histories and shared audit links remain legacy rows.

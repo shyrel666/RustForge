@@ -1,9 +1,9 @@
 use super::catalog::{self, ToolSpec};
 use super::model::{
-    AssessmentAction, AssessmentManualHandoff, AssessmentMessage, AssessmentMission,
-    AssessmentMissionDetail, AssessmentMissionResource, AssessmentSurface,
-    AssessmentToolPermission, AssessmentWorkstream, AttachMissionResourceInput, AutonomyMode,
-    BudgetProfile, ConfirmMissionContextInput, CreateAssessmentMissionInput,
+    AssessmentAction, AssessmentContractPreview, AssessmentManualHandoff, AssessmentMessage,
+    AssessmentMission, AssessmentMissionDetail, AssessmentMissionResource, AssessmentRun,
+    AssessmentSurface, AssessmentToolPermission, AssessmentWorkstream, AttachMissionResourceInput,
+    AutonomyMode, BudgetProfile, ConfirmMissionContextInput, CreateAssessmentMissionInput,
     CreateMissionHandoffInput, DecideAssessmentActionInput, ImportMissionOpenApiInput,
     LinkMissionHandoffReplayInput, MissionContextPreview, MissionControlInput,
     MissionCoverageSummary, MissionStatus, MissionToolDescriptor, SendMissionMessageInput,
@@ -768,14 +768,43 @@ pub fn link_run(
     mission_id: i64,
     run_id: i64,
 ) -> Result<AssessmentMission, String> {
-    let mission = get_mission(conn, project_id, mission_id)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    link_run_on(&tx, project_id, mission_id, run_id)?;
+    tx.commit().map_err(|error| error.to_string())?;
+    get_mission(conn, project_id, mission_id)
+}
+
+pub fn create_and_link_run(
+    conn: &mut Connection,
+    project_id: i64,
+    mission_id: i64,
+    preview: &AssessmentContractPreview,
+) -> Result<AssessmentRun, String> {
+    if preview.project_id != project_id {
+        return Err("运行契约与任务项目不一致".into());
+    }
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let run_id = service::create_run_on(&tx, preview)?;
+    link_run_on(&tx, project_id, mission_id, run_id)?;
+    tx.commit().map_err(|error| error.to_string())?;
+    service::get_run(conn, project_id, run_id)
+}
+
+fn link_run_on(
+    tx: &Transaction<'_>,
+    project_id: i64,
+    mission_id: i64,
+    run_id: i64,
+) -> Result<(), String> {
+    let mission = get_mission(tx, project_id, mission_id)?;
     if mission.status != MissionStatus::Queued || mission.active_run_id.is_some() {
         return Err("任务不在可绑定运行的队列状态".into());
     }
     let next_revision = mission.revision + 1;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
     tx.execute(
         "INSERT INTO assessment_mission_runs(mission_id, run_id, cycle)
          VALUES(?1,?2,?3)",
@@ -783,7 +812,7 @@ pub fn link_run(
     )
     .map_err(|error| error.to_string())?;
     append_message_on(
-        &tx,
+        tx,
         mission_id,
         MessageEntry {
             role: "system",
@@ -796,22 +825,26 @@ pub fn link_run(
         },
         next_revision,
     )?;
-    tx.execute(
-        "UPDATE assessment_missions
-         SET active_run_id=?3, revision=?4,
-             updated_at=strftime('%Y-%m-%d %H:%M:%f','now','localtime')
-         WHERE id=?1 AND project_id=?2 AND revision=?5",
-        params![
-            mission_id,
-            project_id,
-            run_id,
-            next_revision,
-            mission.revision
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())?;
-    get_mission(conn, project_id, mission_id)
+    let changed = tx
+        .execute(
+            "UPDATE assessment_missions
+             SET active_run_id=?3, revision=?4,
+                 updated_at=strftime('%Y-%m-%d %H:%M:%f','now','localtime')
+             WHERE id=?1 AND project_id=?2 AND revision=?5
+               AND status='queued' AND active_run_id IS NULL",
+            params![
+                mission_id,
+                project_id,
+                run_id,
+                next_revision,
+                mission.revision
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("[REVISION_CONFLICT] 任务已被其他操作更新".into());
+    }
+    Ok(())
 }
 
 pub fn request_stop(
@@ -1028,13 +1061,13 @@ pub fn link_handoff_replay(
 
 /// Mirror only real network run phases. Durable approval/manual waiting states
 /// remain mission-owned and are therefore not touched by run recovery.
-pub fn sync_from_run(
-    conn: &mut Connection,
+pub(crate) fn sync_from_run_on(
+    tx: &Transaction<'_>,
     run_id: i64,
     run_status: super::model::AssessmentStatus,
     reason: Option<&str>,
 ) -> Result<(), String> {
-    let mapping: Option<(i64, i64, String, i64)> = conn
+    let mapping: Option<(i64, i64, String, i64)> = tx
         .query_row(
             "SELECT m.id, m.project_id, m.status, m.revision
              FROM assessment_missions m
@@ -1062,7 +1095,7 @@ pub fn sync_from_run(
         super::model::AssessmentStatus::Interrupted => MissionStatus::Interrupted,
     };
     if run_status == super::model::AssessmentStatus::Completed {
-        let manual_pending: bool = conn
+        let manual_pending: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM assessment_actions
                  WHERE mission_id=?1 AND execution_kind='manual_recipe'
@@ -1079,11 +1112,8 @@ pub fn sync_from_run(
     if current == next {
         return Ok(());
     }
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
     transition_mission_on(
-        &tx,
+        tx,
         mission_id,
         project_id,
         MissionTransitionInput {
@@ -1104,13 +1134,12 @@ pub fn sync_from_run(
         )
         .map_err(|error| error.to_string())?;
         sync_actions_from_run_on(
-            &tx,
+            tx,
             mission_id,
             run_id,
             run_status == super::model::AssessmentStatus::Completed,
         )?;
     }
-    tx.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -3327,6 +3356,186 @@ mod tests {
         assert!(error.contains("AUTHORIZATION_REQUIRED"), "got: {error}");
     }
 
+    fn stored_contract(conn: &Connection, mission_id: i64) -> AssessmentContractPreview {
+        let raw: String = conn
+            .query_row(
+                "SELECT contract_json FROM assessment_missions WHERE id = ?1",
+                [mission_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn create_and_link_run_rolls_back_when_mission_cannot_bind() {
+        let mut conn = database();
+        let store = MemorySecretStore::default();
+        let created = create_mission(
+            &mut conn,
+            &store,
+            &input("smart", "atomic run binding"),
+            "fixture",
+            "model",
+        )
+        .unwrap();
+        let preview = stored_contract(&conn, created.mission.id);
+
+        let error = create_and_link_run(&mut conn, 1, created.mission.id, &preview).unwrap_err();
+
+        assert!(error.contains("不在可绑定运行"));
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assessment_runs", [], |row| row.get(0))
+            .unwrap();
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM assessment_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(run_count, 0);
+        assert_eq!(event_count, 0);
+    }
+
+    #[test]
+    fn run_transition_rolls_back_when_mission_sync_fails() {
+        let mut conn = database();
+        let store = MemorySecretStore::default();
+        let created = create_mission(
+            &mut conn,
+            &store,
+            &input("smart", "atomic terminal mirroring"),
+            "fixture",
+            "model",
+        )
+        .unwrap();
+        let preview = stored_contract(&conn, created.mission.id);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transition_mission_on(
+            &tx,
+            created.mission.id,
+            1,
+            MissionTransitionInput {
+                current: MissionStatus::AwaitingContextApproval,
+                next: MissionStatus::Queued,
+                current_revision: created.mission.revision,
+                content: "test queued transition",
+                details: &json!({"test": true}),
+                stop_reason: None,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let run = create_and_link_run(&mut conn, 1, created.mission.id, &preview).unwrap();
+        let linked = get_mission(&conn, 1, created.mission.id).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transition_mission_on(
+            &tx,
+            created.mission.id,
+            1,
+            MissionTransitionInput {
+                current: MissionStatus::Queued,
+                next: MissionStatus::Cancelled,
+                current_revision: linked.revision,
+                content: "test concurrent cancellation",
+                details: &json!({"test": true}),
+                stop_reason: Some("test cancellation"),
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(service::transition_run(
+            &mut conn,
+            1,
+            run.id,
+            super::super::model::AssessmentStatus::Discovering,
+            None,
+        )
+        .is_err());
+
+        let persisted = service::get_run(&conn, 1, run.id).unwrap();
+        assert_eq!(
+            persisted.status,
+            super::super::model::AssessmentStatus::Queued
+        );
+        let status_event_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assessment_events
+                 WHERE run_id=?1 AND event_type='status_changed'",
+                [run.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_event_count, 0);
+    }
+
+    #[test]
+    fn startup_reconciles_active_mission_pointing_to_terminal_run() {
+        let mut conn = database();
+        let store = MemorySecretStore::default();
+        let created = create_mission(
+            &mut conn,
+            &store,
+            &input("smart", "recover terminal run mapping"),
+            "fixture",
+            "model",
+        )
+        .unwrap();
+        let preview = stored_contract(&conn, created.mission.id);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transition_mission_on(
+            &tx,
+            created.mission.id,
+            1,
+            MissionTransitionInput {
+                current: MissionStatus::AwaitingContextApproval,
+                next: MissionStatus::Queued,
+                current_revision: created.mission.revision,
+                content: "test queued transition",
+                details: &json!({"test": true}),
+                stop_reason: None,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let run = create_and_link_run(&mut conn, 1, created.mission.id, &preview).unwrap();
+        for status in [
+            super::super::model::AssessmentStatus::Discovering,
+            super::super::model::AssessmentStatus::Planning,
+        ] {
+            service::transition_run(&mut conn, 1, run.id, status, None).unwrap();
+        }
+        service::append_event(
+            &conn,
+            run.id,
+            None,
+            "status_changed",
+            Some("planning"),
+            Some("completed"),
+            &json!({"reason": "legacy split transaction fixture"}),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE assessment_runs
+             SET status='completed', ended_at=datetime('now','localtime')
+             WHERE id=?1",
+            [run.id],
+        )
+        .unwrap();
+
+        assert_eq!(service::recover_interrupted_runs(&mut conn).unwrap(), 0);
+
+        let recovered = get_mission(&conn, 1, created.mission.id).unwrap();
+        assert_eq!(recovered.status, MissionStatus::Completed);
+        assert_eq!(recovered.active_run_id, None);
+    }
+
     #[test]
     fn permissions_are_backend_determined_and_manual_never_auto_executes() {
         let conn = database();
@@ -3619,8 +3828,7 @@ mod tests {
             },
         )
         .unwrap();
-        let run = service::create_run(&mut conn, &preview).unwrap();
-        link_run(&mut conn, 1, approved.mission.id, run.id).unwrap();
+        let run = create_and_link_run(&mut conn, 1, approved.mission.id, &preview).unwrap();
         service::transition_run(
             &mut conn,
             1,

@@ -12,8 +12,8 @@ const ready = ref(false);
 let stopWatch: (() => void) | undefined;
 
 onMounted(async () => {
-  // 加载完成前先按默认深色渲染，避免闪一下浅色
-  applyTheme("dark");
+  // 加载完成前先按默认浅色渲染，避免主题闪烁
+  applyTheme("light");
   await settings.load();
   await project.load();
   stopWatch = watchSystemTheme(() => {

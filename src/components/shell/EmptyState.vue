@@ -40,27 +40,28 @@ const emit = defineEmits<{
   gap: var(--rf-space-2);
   padding: var(--rf-space-4);
   border: 1px dashed var(--rf-border-strong);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   background: var(--rf-bg-panel);
 }
 
 .empty-state.centered {
   flex: 1;
-  min-height: 220px;
+  min-height: 180px;
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: var(--rf-space-6);
+  padding: var(--rf-space-5);
 }
 
 .empty-state.centered .desc {
-  max-width: 420px;
+  max-width: 380px;
 }
 
 .icon-wrap {
   display: inline-flex;
   color: var(--rf-accent);
   margin-bottom: 2px;
+  font-size: 20px;
 }
 
 .title {
@@ -68,17 +69,19 @@ const emit = defineEmits<{
   font-size: 13px;
   font-weight: 600;
   color: var(--rf-text);
+  letter-spacing: -0.01em;
 }
 
 .desc {
   margin: 0;
-  max-width: 560px;
-  font-size: 12.5px;
-  line-height: 1.55;
+  max-width: 500px;
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
+  line-height: 1.5;
   color: var(--rf-text-secondary);
 }
 
 .actions {
-  margin-top: var(--rf-space-1);
+  margin-top: var(--rf-space-2);
 }
 </style>

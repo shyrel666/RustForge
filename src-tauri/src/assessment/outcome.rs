@@ -1,3 +1,4 @@
+use super::finding_identity::security_baseline_fingerprint;
 use super::model::AssessmentVerdict;
 use super::verifier::VerificationOutcome;
 use crate::evidence::EvidenceSourceType;
@@ -63,14 +64,14 @@ pub fn commit_verification_outcome(
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
-    let context_valid: bool = transaction
+    let exact_origin: Option<String> = transaction
         .query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM assessment_checks c
+            "SELECT ar.exact_origin
+                 FROM assessment_checks c
                  JOIN assessment_runs ar ON ar.id = c.run_id
                  WHERE c.id = ?1 AND c.run_id = ?2 AND ar.project_id = ?3
                    AND c.template_id = ?4 AND c.template_version = ?5
-             )",
+             ",
             rusqlite::params![
                 input.check_id,
                 input.run_id,
@@ -80,10 +81,11 @@ pub fn commit_verification_outcome(
             ],
             |row| row.get(0),
         )
+        .optional()
         .map_err(|error| error.to_string())?;
-    if !context_valid {
+    let Some(exact_origin) = exact_origin else {
         return Err("验证结果与 Assessment check 上下文不匹配".into());
-    }
+    };
     transaction
         .execute(
             "INSERT INTO assessment_verifications(
@@ -122,7 +124,17 @@ pub fn commit_verification_outcome(
             input.endpoint_url,
             field_path,
         );
-        let fingerprint = finding_fingerprint(input.project_id, &hit);
+        // Endpoint-specific verifiers retain their original identity. The
+        // response-baseline verifier is intentionally aggregated by exact
+        // origin and semantic gap set because it runs over every discovered
+        // static resource and page.
+        let fingerprint = security_baseline_fingerprint(
+            input.project_id,
+            input.template_id,
+            &exact_origin,
+            &input.outcome.observations,
+        )
+        .unwrap_or_else(|| finding_fingerprint(input.project_id, &hit));
         let existing: Option<(i64, String)> = transaction
             .query_row(
                 "SELECT id, status FROM findings WHERE fingerprint = ?1",
@@ -548,6 +560,117 @@ mod tests {
                 [result.verification_id],
             )
             .is_err());
+    }
+
+    #[test]
+    fn security_baseline_groups_endpoints_by_origin_and_gap_set() {
+        let mut fixture = Fixture::new();
+        let observations = json!({
+            "facts": [{"kind": "missing_nosniff", "applicable": true}],
+            "suspectedFacts": [],
+            "responseComplete": true
+        });
+        let outcome = VerificationOutcome {
+            verdict: AssessmentVerdict::Confirmed,
+            observations: observations.clone(),
+            title: "缺少 X-Content-Type-Options: nosniff".into(),
+            vuln_type: "security_misconfiguration".into(),
+            severity: "low".into(),
+            confidence: 100,
+            reasoning: "deterministic baseline fixture".into(),
+            evidence_replay_run_id: Some(fixture.replay_run_id),
+        };
+        let first_check = fixture.check("security_headers_cookie", true);
+        let first = commit_verification_outcome(
+            &mut fixture.conn,
+            VerificationCommitInput {
+                project_id: fixture.project_id,
+                run_id: fixture.run_id,
+                check_id: first_check,
+                template_id: "security_headers_cookie",
+                template_version: "1",
+                verifier_id: "security_headers_cookie",
+                verifier_version: "1",
+                endpoint_method: "GET",
+                endpoint_url: "https://example.test/static/a.js",
+                parameter_name: None,
+                outcome: &outcome,
+            },
+        )
+        .unwrap();
+        let second_check = fixture.check("security_headers_cookie", true);
+        let second = commit_verification_outcome(
+            &mut fixture.conn,
+            VerificationCommitInput {
+                project_id: fixture.project_id,
+                run_id: fixture.run_id,
+                check_id: second_check,
+                template_id: "security_headers_cookie",
+                template_version: "1",
+                verifier_id: "security_headers_cookie",
+                verifier_version: "1",
+                endpoint_method: "GET",
+                endpoint_url: "https://example.test/static/b.js",
+                parameter_name: None,
+                outcome: &outcome,
+            },
+        )
+        .unwrap();
+
+        assert!(first.finding_created);
+        assert!(!second.finding_created);
+        assert_eq!(second.finding_id, first.finding_id);
+        let finding_id = first.finding_id.unwrap();
+        let aggregate: (i64, i64, i64) = fixture
+            .conn
+            .query_row(
+                "SELECT f.occurrences,
+                        (SELECT COUNT(*) FROM assessment_finding_links afl
+                         WHERE afl.finding_id = f.id),
+                        (SELECT COUNT(*) FROM finding_evidence fe
+                         WHERE fe.finding_id = f.id)
+                 FROM findings f WHERE f.id = ?1",
+                [finding_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(aggregate, (2, 2, 2));
+
+        let distinct_outcome = VerificationOutcome {
+            observations: json!({
+                "facts": [
+                    {"kind": "missing_nosniff", "applicable": true},
+                    {"kind": "missing_frame_embedding_protection", "applicable": true}
+                ],
+                "suspectedFacts": [{"kind": "content_security_policy_not_observed"}],
+                "responseComplete": true
+            }),
+            ..outcome
+        };
+        let third_check = fixture.check("security_headers_cookie", true);
+        let third = commit_verification_outcome(
+            &mut fixture.conn,
+            VerificationCommitInput {
+                project_id: fixture.project_id,
+                run_id: fixture.run_id,
+                check_id: third_check,
+                template_id: "security_headers_cookie",
+                template_version: "1",
+                verifier_id: "security_headers_cookie",
+                verifier_version: "1",
+                endpoint_method: "GET",
+                endpoint_url: "https://example.test/login",
+                parameter_name: None,
+                outcome: &distinct_outcome,
+            },
+        )
+        .unwrap();
+        assert_ne!(third.finding_id, first.finding_id);
+        let finding_count: i64 = fixture
+            .conn
+            .query_row("SELECT COUNT(*) FROM findings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(finding_count, 2);
     }
 
     #[test]

@@ -8,11 +8,15 @@ body,
 
 body {
   font-family: var(--rf-font-ui);
-  font-size: 13px;
+  font-size: var(--rf-font-size-body);
+  font-weight: var(--rf-font-weight-body);
+  line-height: 1.5;
   color: var(--rf-text);
   background-color: var(--rf-bg-base);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeLegibility;
+  user-select: none;
 }
 
 *,
@@ -21,7 +25,19 @@ body {
   box-sizing: border-box;
 }
 
-/* Theme changes reveal the new palette from the shortcut button. */
+/* Allow text selection in code, tables, inputs and reading text */
+p,
+span,
+code,
+pre,
+input,
+textarea,
+.el-table,
+.rf-selectable {
+  user-select: text;
+}
+
+/* Theme view-transitions */
 ::view-transition-image-pair(root) {
   isolation: auto;
 }
@@ -32,11 +48,30 @@ body {
   mix-blend-mode: normal;
 }
 
+/* Slim native-like scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rf-border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rf-text-muted);
+}
+
 .mono {
   font-family: var(--rf-font-mono);
 }
 
-/* Shared work-area helpers */
+/* Shared page structure */
 .rf-page {
   display: flex;
   flex-direction: column;
@@ -45,13 +80,13 @@ body {
   min-height: 0;
 }
 
-/* Immersive module pages: full width with modest side gutter */
 .rf-page--inset {
   width: 100%;
   box-sizing: border-box;
   padding: 0;
 }
 
+/* Toolbars & Command Strips */
 .rf-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -63,24 +98,26 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--rf-space-2);
-  padding: 4px;
+  gap: var(--rf-space-1);
+  padding: 2px;
   background: var(--rf-bg-pill);
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-tag);
+  border-radius: var(--rf-radius-control);
 }
 
-.rf-toolbar-group + .rf-toolbar-group {
-  margin-left: 0;
-  padding-left: 4px;
-  border-left: 1px solid var(--rf-border);
-}
-
+/* Cards & Panels */
 .rf-card {
-  padding: var(--rf-space-5);
+  padding: var(--rf-space-4);
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   background: var(--rf-bg-panel);
+  box-shadow: var(--rf-shadow-light);
+  transition: border-color var(--rf-duration) var(--rf-ease),
+    box-shadow var(--rf-duration) var(--rf-ease);
+}
+
+.rf-card:hover {
+  border-color: var(--rf-border-strong);
 }
 
 .rf-card.is-active {
@@ -89,43 +126,57 @@ body {
 }
 
 .rf-section-title {
-  margin: 0 0 6px;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
   color: var(--rf-text);
 }
 
 .rf-section-desc {
   margin: 0 0 var(--rf-space-3);
   font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
   line-height: 1.5;
   color: var(--rf-text-secondary);
 }
 
+/* Inline status callouts */
 .rf-inline-warn {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-3) var(--rf-space-4);
+  padding: var(--rf-space-2) var(--rf-space-3);
   border-radius: var(--rf-radius-control);
-  border: 1px solid rgba(251, 191, 36, 0.3);
-  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid var(--rf-warning-muted);
+  background: rgba(245, 158, 11, 0.08);
   color: var(--rf-warning);
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
 }
 
-/* Pill tab strip (CC Switch settings style) */
-.rf-pill-tabs {
+.rf-inline-info {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px;
-  width: fit-content;
-  max-width: 100%;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-radius: var(--rf-radius-control);
+  border: 1px solid var(--rf-info-muted);
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--rf-info);
+  font-size: 13px;
+  font-weight: var(--rf-font-weight-secondary);
+}
+
+/* Segmented Pill Tabs (Linear style) */
+.rf-pill-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
   background: var(--rf-bg-pill);
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-tag);
+  border-radius: var(--rf-radius-control);
 }
 
 .rf-pill-tab {
@@ -134,23 +185,27 @@ body {
   color: var(--rf-text-secondary);
   font: inherit;
   font-size: 13px;
-  font-weight: 500;
-  padding: 8px 16px;
-  border-radius: var(--rf-radius-tag);
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 4px;
   cursor: pointer;
-  transition:
-    background var(--rf-duration) var(--rf-ease),
-    color var(--rf-duration) var(--rf-ease);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all var(--rf-duration) var(--rf-ease);
 }
 
 .rf-pill-tab:hover {
   color: var(--rf-text);
+  background: var(--rf-bg-hover);
 }
 
 .rf-pill-tab.active {
-  background: var(--rf-accent);
-  color: var(--rf-accent-on);
-  font-weight: 650;
+  background: var(--rf-bg-panel);
+  color: var(--rf-text);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid var(--rf-border);
 }
 
 /* Shared workspace chrome */
@@ -166,9 +221,11 @@ body {
   flex: 1;
   min-height: 0;
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   overflow: hidden;
   background: var(--rf-bg-panel);
+  display: flex;
+  flex-direction: column;
 }
 
 .rf-split-shell {
@@ -176,28 +233,128 @@ body {
   display: flex;
   min-height: 0;
   border: 1px solid var(--rf-border);
-  border-radius: var(--rf-radius-shell);
+  border-radius: var(--rf-radius-card);
   overflow: hidden;
   background: var(--rf-bg-panel);
 }
 
 .rf-field-label {
   font-size: 12px;
-  color: var(--rf-text-muted);
-  margin-bottom: 5px;
+  color: var(--rf-text-secondary);
+  margin-bottom: 4px;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
+/* Code & Raw Viewer */
 .rf-mono-pre {
   margin: 0;
-  padding: 10px;
+  padding: var(--rf-space-3);
   background: var(--rf-bg-raised);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-control);
   font-family: var(--rf-font-mono);
   font-size: 12px;
+  line-height: 1.6;
+  color: var(--rf-text);
   white-space: pre-wrap;
   word-break: break-all;
   overflow: auto;
 }
 
+/* Keyboard Shortcut Pill (Kbd) */
+.rf-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-family: var(--rf-font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--rf-text-secondary);
+  background: var(--rf-bg-raised);
+  border: 1px solid var(--rf-border-strong);
+  border-radius: 3px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
+}
+
+/* Live Status Pulse Dot (Subtle 6px crisp dot) */
+.rf-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  position: relative;
+}
+
+.rf-pulse-dot--active {
+  background-color: var(--rf-success);
+  box-shadow: 0 0 0 2px var(--rf-success-muted);
+}
+
+.rf-pulse-dot--busy {
+  background-color: var(--rf-accent);
+  box-shadow: 0 0 0 2px var(--rf-accent-muted);
+  animation: rf-pulse 1.5s infinite ease-in-out;
+}
+
+.rf-pulse-dot--stopped {
+  background-color: var(--rf-text-muted);
+}
+
+@keyframes rf-pulse {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+}
+
+/* Method badge pills */
+.rf-method {
+  font-family: var(--rf-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+  line-height: 1;
+}
+
+.rf-method-get {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+}
+
+.rf-method-post {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+}
+
+.rf-method-put {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.rf-method-delete {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.rf-method-patch,
+.rf-method-options,
+.rf-method-head {
+  background: var(--rf-bg-raised);
+  color: var(--rf-text-secondary);
+}

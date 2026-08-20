@@ -4,15 +4,22 @@
 //! changes are then applied as ordered, transactional steps instead of
 //! extending the bootstrap schema silently.
 
-use rusqlite::{Connection, TransactionBehavior};
-use std::collections::HashSet;
+#[cfg(test)]
+use crate::assessment::finding_identity::security_baseline_fingerprint;
+use crate::assessment::finding_identity::{
+    security_baseline_fingerprint_for_kinds, security_baseline_title, SecurityBaselineKinds,
+};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 pub(crate) const SCHEMA_V1: &str = include_str!("migrations/v1.sql");
 pub(crate) const SCHEMA_V2: &str = include_str!("migrations/v2.sql");
 pub(crate) const SCHEMA_V3: &str = include_str!("migrations/v3.sql");
 pub(crate) const SCHEMA_V4: &str = include_str!("migrations/v4.sql");
+pub(crate) const SCHEMA_V5: &str = include_str!("migrations/v5.sql");
 
 const V3_TABLES: &[(&str, &[&str])] = &[
     (
@@ -1149,6 +1156,7 @@ pub fn migrate(conn: &mut Connection) -> Result<MigrationReport, MigrationError>
             1 => apply_step(conn, 2, SCHEMA_V2)?,
             2 => apply_step(conn, 3, SCHEMA_V3)?,
             3 => apply_step(conn, 4, SCHEMA_V4)?,
+            4 => apply_step(conn, 5, SCHEMA_V5)?,
             from => return Err(MigrationError::MissingStep { from }),
         }
         current = schema_version(conn)?;
@@ -1179,6 +1187,9 @@ fn apply_step(conn: &mut Connection, target_version: u32, sql: &str) -> Result<(
     let result = (|| {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(sql)?;
+        if target_version == 5 {
+            migrate_security_baseline_findings(&tx)?;
+        }
         validate_version(&tx, target_version)?;
         tx.pragma_update(None, "user_version", target_version)?;
         tx.commit()?;
@@ -1203,6 +1214,7 @@ fn validate_version(conn: &Connection, version: u32) -> Result<(), MigrationErro
         2 => validate_v2(conn),
         3 => validate_v3(conn),
         4 => validate_v4(conn),
+        5 => validate_v5(conn),
         from => Err(MigrationError::MissingStep { from }),
     }
 }
@@ -1408,6 +1420,295 @@ fn validate_v4(conn: &Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
+fn validate_v5(conn: &Connection) -> Result<(), MigrationError> {
+    // v5 intentionally changes Finding identity data without widening the
+    // schema. All structural and referential guarantees therefore remain v4.
+    validate_v4(conn)
+}
+
+#[derive(Debug)]
+struct LegacySecurityBaselineFinding {
+    id: i64,
+    status: String,
+    severity: String,
+    analyst_notes: String,
+    occurrences: i64,
+    created_at: String,
+    last_seen_at: String,
+    updated_at: String,
+    semantic_variants: BTreeMap<String, SecurityBaselineKinds>,
+    has_unmigratable_link: bool,
+}
+
+/// Promote old per-URL baseline identities when every linked verification has
+/// the same exact-origin/semantic-gap identity. Ambiguous histories and shared
+/// audit relationships remain legacy records; migration must never invent a
+/// gap union or discard a per-Finding Evidence judgment.
+fn migrate_security_baseline_findings(tx: &Transaction<'_>) -> Result<(), MigrationError> {
+    let mut findings = HashMap::<i64, LegacySecurityBaselineFinding>::new();
+    {
+        let mut statement = tx.prepare(
+            "SELECT f.id, f.project_id, f.status, f.severity, f.analyst_notes,
+                    f.occurrences, f.created_at, f.last_seen_at, f.updated_at,
+                    ar.exact_origin, av.observations_json
+             FROM findings f
+             JOIN assessment_finding_links afl ON afl.finding_id = f.id
+             JOIN assessment_verifications av ON av.id = afl.verification_id
+             JOIN assessment_checks ac ON ac.id = av.check_id
+             JOIN assessment_runs ar ON ar.id = ac.run_id
+             WHERE f.producer = 'safe_verifier'
+               AND ac.template_id = 'security_headers_cookie'
+             ORDER BY f.id, av.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })?;
+        for row in rows {
+            let (
+                id,
+                project_id,
+                status,
+                severity,
+                analyst_notes,
+                occurrences,
+                created_at,
+                last_seen_at,
+                updated_at,
+                exact_origin,
+                observations_json,
+            ) = row?;
+            let observations: Value =
+                serde_json::from_str(&observations_json).map_err(|error| {
+                    invalid_v5(format!(
+                        "Finding #{id} 的安全基线 observations 无法解析: {error}"
+                    ))
+                })?;
+            let finding = findings
+                .entry(id)
+                .or_insert_with(|| LegacySecurityBaselineFinding {
+                    id,
+                    status,
+                    severity,
+                    analyst_notes,
+                    occurrences,
+                    created_at,
+                    last_seen_at,
+                    updated_at,
+                    semantic_variants: BTreeMap::new(),
+                    has_unmigratable_link: false,
+                });
+            let observed_kinds = SecurityBaselineKinds::from_observations(&observations);
+            let Some(fingerprint) = security_baseline_fingerprint_for_kinds(
+                project_id,
+                "security_headers_cookie",
+                &exact_origin,
+                &observed_kinds,
+            ) else {
+                finding.has_unmigratable_link = true;
+                continue;
+            };
+            if let Some(existing) = finding.semantic_variants.get(&fingerprint) {
+                if existing != &observed_kinds {
+                    finding.has_unmigratable_link = true;
+                }
+            } else {
+                finding
+                    .semantic_variants
+                    .insert(fingerprint, observed_kinds);
+            }
+        }
+    }
+
+    let mut groups = BTreeMap::<String, Vec<LegacySecurityBaselineFinding>>::new();
+    for finding in findings.into_values() {
+        // A v4 endpoint Finding may legitimately contain observations from
+        // different points in time. There is no lossless way to project one
+        // human review state and one occurrence count onto several semantic
+        // identities, so preserve that row as legacy instead of fabricating a
+        // union of gaps that no verification observed.
+        if finding.has_unmigratable_link || finding.semantic_variants.len() != 1 {
+            continue;
+        }
+        let fingerprint = finding
+            .semantic_variants
+            .first_key_value()
+            .expect("one semantic variant checked above")
+            .0
+            .clone();
+        groups.entry(fingerprint).or_default().push(finding);
+    }
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    // These two audit tables are append-only during normal operation. Their
+    // foreign keys are repointed only inside this atomic migration and the
+    // guards are restored before validation/commit.
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS trg_finding_events_immutable_update;
+         DROP TRIGGER IF EXISTS trg_assessment_finding_links_immutable_update;",
+    )?;
+
+    for (fingerprint, mut group) in groups {
+        group.sort_by_key(|finding| finding.id);
+        let first = &group[0];
+        let same_review_state = group.iter().all(|finding| {
+            finding.status == first.status
+                && finding.severity == first.severity
+                && (group.len() == 1 || finding.analyst_notes.trim().is_empty())
+        });
+        if !same_review_state {
+            // Preserve divergent human decisions as separate legacy records.
+            continue;
+        }
+        if group.len() > 1 && finding_group_has_shared_audit_links(tx, &group)? {
+            // Both relationship tables use composite primary keys. More
+            // importantly, a shared Evidence may carry different per-Finding
+            // human decisions. Preserve such rows rather than failing the
+            // migration or silently discarding one audit record.
+            continue;
+        }
+
+        let canonical_id = first.id;
+        let kinds = first
+            .semantic_variants
+            .values()
+            .next()
+            .expect("one semantic variant checked above");
+        let title = security_baseline_title(kinds);
+        let occurrences = group.iter().try_fold(0_i64, |total, finding| {
+            total.checked_add(finding.occurrences).ok_or_else(|| {
+                invalid_v5(format!("合并 Finding #{canonical_id} 时 occurrences 溢出"))
+            })
+        })?;
+        let created_at = group
+            .iter()
+            .map(|finding| finding.created_at.as_str())
+            .min()
+            .unwrap_or(first.created_at.as_str());
+        let last_seen_at = group
+            .iter()
+            .map(|finding| finding.last_seen_at.as_str())
+            .max()
+            .unwrap_or(first.last_seen_at.as_str());
+        let updated_at = group
+            .iter()
+            .map(|finding| finding.updated_at.as_str())
+            .max()
+            .unwrap_or(first.updated_at.as_str());
+
+        // Free every legacy unique key first so this also handles a database
+        // that already contains one row with the new semantic fingerprint.
+        for finding in &group {
+            tx.execute(
+                "UPDATE findings SET fingerprint = NULL WHERE id = ?1",
+                [finding.id],
+            )?;
+        }
+
+        for duplicate in group.iter().skip(1) {
+            tx.execute(
+                "UPDATE assessment_finding_links SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute(
+                "UPDATE finding_evidence SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute(
+                "UPDATE finding_events SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute(
+                "UPDATE OR IGNORE finding_traffic SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute(
+                "UPDATE OR IGNORE finding_rule_hits SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute(
+                "UPDATE OR IGNORE task_findings SET finding_id = ?1 WHERE finding_id = ?2",
+                rusqlite::params![canonical_id, duplicate.id],
+            )?;
+            tx.execute("DELETE FROM findings WHERE id = ?1", [duplicate.id])?;
+        }
+
+        tx.execute(
+            "UPDATE findings
+             SET title = ?2, fingerprint = ?3, occurrences = ?4,
+                 created_at = ?5, last_seen_at = ?6, updated_at = ?7
+             WHERE id = ?1",
+            rusqlite::params![
+                canonical_id,
+                title,
+                fingerprint,
+                occurrences,
+                created_at,
+                last_seen_at,
+                updated_at,
+            ],
+        )?;
+    }
+
+    tx.execute_batch(
+        "CREATE TRIGGER trg_finding_events_immutable_update
+         BEFORE UPDATE ON finding_events
+         BEGIN
+             SELECT RAISE(ABORT, 'finding events are immutable');
+         END;
+         CREATE TRIGGER trg_assessment_finding_links_immutable_update
+         BEFORE UPDATE ON assessment_finding_links
+         BEGIN
+             SELECT RAISE(ABORT, 'assessment finding links are immutable');
+         END;",
+    )?;
+    Ok(())
+}
+
+fn finding_group_has_shared_audit_links(
+    tx: &Transaction<'_>,
+    group: &[LegacySecurityBaselineFinding],
+) -> Result<bool, MigrationError> {
+    let mut evidence_ids = HashSet::<i64>::new();
+    let mut verification_ids = HashSet::<i64>::new();
+    for finding in group {
+        let mut evidence_statement =
+            tx.prepare("SELECT evidence_id FROM finding_evidence WHERE finding_id = ?1")?;
+        let evidence_rows =
+            evidence_statement.query_map([finding.id], |row| row.get::<_, i64>(0))?;
+        for evidence_id in evidence_rows {
+            if !evidence_ids.insert(evidence_id?) {
+                return Ok(true);
+            }
+        }
+
+        let mut verification_statement = tx.prepare(
+            "SELECT verification_id FROM assessment_finding_links WHERE finding_id = ?1",
+        )?;
+        let verification_rows =
+            verification_statement.query_map([finding.id], |row| row.get::<_, i64>(0))?;
+        for verification_id in verification_rows {
+            if !verification_ids.insert(verification_id?) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn schema_object_exists(
     conn: &Connection,
     object_type: &str,
@@ -1470,9 +1771,14 @@ fn invalid_v4(reason: String) -> MigrationError {
     MigrationError::InvalidSchema { version: 4, reason }
 }
 
+fn invalid_v5(reason: String) -> MigrationError {
+    MigrationError::InvalidSchema { version: 5, reason }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn table_exists(conn: &Connection, table: &str) -> bool {
         conn.query_row(
@@ -1494,11 +1800,11 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 0,
-                to_version: 4,
+                to_version: 5,
             }
         );
-        assert_eq!(schema_version(&conn).unwrap(), 4);
-        validate_v4(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 5);
+        validate_v5(&conn).unwrap();
     }
 
     #[test]
@@ -1518,7 +1824,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 0);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, 5);
         let project_name: String = conn
             .query_row(
                 "SELECT name FROM projects WHERE id = ?1",
@@ -1548,8 +1854,8 @@ mod tests {
         assert_eq!(
             report,
             MigrationReport {
-                from_version: 4,
-                to_version: 4,
+                from_version: 5,
+                to_version: 5,
             }
         );
         let marker: String = conn
@@ -1588,7 +1894,7 @@ mod tests {
             report,
             MigrationReport {
                 from_version: 1,
-                to_version: 4,
+                to_version: 5,
             }
         );
         let usage: (i64, i64, i64) = conn
@@ -1607,7 +1913,7 @@ mod tests {
             .is_err(),
             "缓存命中必须保持为输入 Token 的子集"
         );
-        validate_v4(&conn).unwrap();
+        validate_v5(&conn).unwrap();
     }
 
     #[test]
@@ -1650,7 +1956,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 2);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, 5);
         let legacy_title: String = conn
             .query_row("SELECT title FROM task_nodes WHERE id = 7", [], |row| {
                 row.get(0)
@@ -1663,7 +1969,7 @@ mod tests {
             .unwrap();
         assert_eq!(legacy_title, "legacy node");
         assert_eq!(producer, "ai");
-        validate_v4(&conn).unwrap();
+        validate_v5(&conn).unwrap();
     }
 
     #[test]
@@ -1849,7 +2155,7 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} must be removed by project lifecycle");
         }
-        validate_v4(&conn).unwrap();
+        validate_v5(&conn).unwrap();
     }
 
     #[test]
@@ -1884,7 +2190,7 @@ mod tests {
         let report = migrate(&mut conn).unwrap();
 
         assert_eq!(report.from_version, 3);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, 5);
         let mission: (i64, i64, String, i64) = conn
             .query_row(
                 "SELECT project_id, legacy_run_id, status, legacy
@@ -1924,7 +2230,315 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sixth_round, 1);
-        validate_v4(&conn).unwrap();
+        validate_v5(&conn).unwrap();
+    }
+
+    fn v4_security_baseline_database() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.execute_batch(SCHEMA_V3).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        apply_step(&mut conn, 4, SCHEMA_V4).unwrap();
+        conn.execute(
+            "INSERT INTO projects(id, name) VALUES(1, 'legacy baseline')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assessment_runs(
+                 id, project_id, status, start_url, exact_origin, contract_json,
+                 contract_hash, template_registry_hash, provider_id, model,
+                 request_budget, discovery_budget, requests_per_second
+             ) VALUES(
+                 10, 1, 'completed', 'http://target.test:9011/',
+                 'http://target.test:9011', '{}', ?1, ?1, 'fixture', 'model',
+                 120, 20, 1.0
+             )",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn v5_merges_compatible_security_baseline_findings_and_preserves_audit_links() {
+        let mut conn = v4_security_baseline_database();
+        let observations = json!({
+            "facts": [{"kind": "missing_nosniff", "applicable": true}],
+            "suspectedFacts": [],
+            "responseComplete": true
+        })
+        .to_string();
+        for (offset, fingerprint, occurrences) in
+            [(0_i64, "b".repeat(64), 1_i64), (1, "c".repeat(64), 2)]
+        {
+            let check_id = 20 + offset;
+            let verification_id = 30 + offset;
+            let finding_id = 40 + offset;
+            conn.execute(
+                "INSERT INTO assessment_checks(
+                     id, run_id, requested_endpoint_id, template_id,
+                     template_version, identity_mode, policy_result, status
+                 ) VALUES(?1, 10, ?2, 'security_headers_cookie', '1',
+                          'anonymous', 'allowed', 'completed')",
+                rusqlite::params![check_id, format!("ep_{offset}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_verifications(
+                     id, check_id, verifier_id, verifier_version, verdict,
+                     observations_json, content_hash
+                 ) VALUES(?1, ?2, 'security_headers_cookie', '1', 'suspected', ?3, ?4)",
+                rusqlite::params![
+                    verification_id,
+                    check_id,
+                    observations,
+                    format!("{offset:x}").repeat(64),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO findings(
+                     id, project_id, source, producer, title, severity,
+                     fingerprint, occurrences
+                 ) VALUES(?1, 1, 'rule', 'safe_verifier',
+                          '响应安全基线配置缺口', 'low', ?2, ?3)",
+                rusqlite::params![finding_id, fingerprint, occurrences],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_finding_links(verification_id, finding_id)
+                 VALUES(?1, ?2)",
+                rusqlite::params![verification_id, finding_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO evidence(
+                     id, project_id, source_type, source_id, observation,
+                     redacted_snapshot, content_hash, created_by
+                 ) VALUES(?1, 1, 'replay_run', ?2, 'legacy evidence', '{}', ?3, 'fixture')",
+                rusqlite::params![50 + offset, 60 + offset, "d".repeat(64)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO finding_evidence(finding_id, evidence_id)
+                 VALUES(?1, ?2)",
+                rusqlite::params![finding_id, 50 + offset],
+            )
+            .unwrap();
+        }
+
+        let report = migrate(&mut conn).unwrap();
+
+        assert_eq!(
+            report,
+            MigrationReport {
+                from_version: 4,
+                to_version: 5,
+            }
+        );
+        let finding: (i64, String, i64, String) = conn
+            .query_row(
+                "SELECT id, title, occurrences, fingerprint FROM findings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(finding.0, 40);
+        assert_eq!(finding.1, "缺少 X-Content-Type-Options: nosniff");
+        assert_eq!(finding.2, 3);
+        assert_eq!(
+            finding.3,
+            security_baseline_fingerprint(
+                1,
+                "security_headers_cookie",
+                "http://target.test:9011",
+                &serde_json::from_str(&observations).unwrap(),
+            )
+            .unwrap()
+        );
+        for table in [
+            "assessment_finding_links",
+            "finding_evidence",
+            "finding_events",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE finding_id = 40"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2, "{table} must retain both legacy audit links");
+        }
+        assert!(conn
+            .execute(
+                "UPDATE finding_events SET reason='tampered' WHERE finding_id=40",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE assessment_finding_links SET relation='human_conflict'
+                 WHERE verification_id=30",
+                [],
+            )
+            .is_err());
+        validate_v5(&conn).unwrap();
+    }
+
+    #[test]
+    fn v5_preserves_findings_that_share_the_same_evidence_link() {
+        let mut conn = v4_security_baseline_database();
+        let observations = json!({
+            "facts": [{"kind": "missing_nosniff", "applicable": true}],
+            "suspectedFacts": [],
+            "responseComplete": true
+        })
+        .to_string();
+        for (offset, fingerprint) in [(0_i64, "b".repeat(64)), (1, "c".repeat(64))] {
+            let check_id = 20 + offset;
+            let verification_id = 30 + offset;
+            let finding_id = 40 + offset;
+            conn.execute(
+                "INSERT INTO assessment_checks(
+                     id, run_id, requested_endpoint_id, template_id,
+                     template_version, identity_mode, policy_result, status
+                 ) VALUES(?1, 10, ?2, 'security_headers_cookie', '1',
+                          'anonymous', 'allowed', 'completed')",
+                rusqlite::params![check_id, format!("ep_{offset}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_verifications(
+                     id, check_id, verifier_id, verifier_version, verdict,
+                     observations_json, content_hash
+                 ) VALUES(?1, ?2, 'security_headers_cookie', '1', 'suspected', ?3, ?4)",
+                rusqlite::params![
+                    verification_id,
+                    check_id,
+                    observations,
+                    format!("{offset:x}").repeat(64),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO findings(
+                     id, project_id, source, producer, title, severity, fingerprint
+                 ) VALUES(?1, 1, 'rule', 'safe_verifier',
+                          '响应安全基线配置缺口', 'low', ?2)",
+                rusqlite::params![finding_id, fingerprint],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_finding_links(verification_id, finding_id)
+                 VALUES(?1, ?2)",
+                rusqlite::params![verification_id, finding_id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO evidence(
+                 id, project_id, source_type, source_id, observation,
+                 redacted_snapshot, content_hash, created_by
+             ) VALUES(50, 1, 'replay_run', 60, 'shared evidence', '{}', ?1, 'fixture')",
+            ["d".repeat(64)],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO finding_evidence(finding_id, evidence_id) VALUES(40, 50);
+             INSERT INTO finding_evidence(finding_id, evidence_id) VALUES(41, 50);",
+        )
+        .unwrap();
+
+        let report = migrate(&mut conn).unwrap();
+
+        assert_eq!(report.to_version, 5);
+        let finding_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM findings", [], |row| row.get(0))
+            .unwrap();
+        let evidence_link_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM finding_evidence", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(finding_count, 2);
+        assert_eq!(evidence_link_count, 2);
+        validate_v5(&conn).unwrap();
+    }
+
+    #[test]
+    fn v5_does_not_union_distinct_historical_gap_sets() {
+        let mut conn = v4_security_baseline_database();
+        conn.execute(
+            "INSERT INTO findings(
+                 id, project_id, source, producer, title, severity, fingerprint
+             ) VALUES(40, 1, 'rule', 'safe_verifier',
+                      'legacy endpoint baseline', 'low', ?1)",
+            ["b".repeat(64)],
+        )
+        .unwrap();
+        for (offset, kind) in [(0_i64, "missing_nosniff"), (1, "missing_hsts")] {
+            let check_id = 20 + offset;
+            let verification_id = 30 + offset;
+            let observations = json!({
+                "facts": [{"kind": kind, "applicable": true}],
+                "suspectedFacts": [],
+                "responseComplete": true
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO assessment_checks(
+                     id, run_id, requested_endpoint_id, template_id,
+                     template_version, identity_mode, policy_result, status
+                 ) VALUES(?1, 10, ?2, 'security_headers_cookie', '1',
+                          'anonymous', 'allowed', 'completed')",
+                rusqlite::params![check_id, format!("ep_{offset}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_verifications(
+                     id, check_id, verifier_id, verifier_version, verdict,
+                     observations_json, content_hash
+                 ) VALUES(?1, ?2, 'security_headers_cookie', '1', 'suspected', ?3, ?4)",
+                rusqlite::params![
+                    verification_id,
+                    check_id,
+                    observations,
+                    format!("{offset:x}").repeat(64),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO assessment_finding_links(verification_id, finding_id)
+                 VALUES(?1, 40)",
+                [verification_id],
+            )
+            .unwrap();
+        }
+
+        migrate(&mut conn).unwrap();
+
+        let finding: (String, String) = conn
+            .query_row(
+                "SELECT title, fingerprint FROM findings WHERE id = 40",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(finding.0, "legacy endpoint baseline");
+        assert_eq!(finding.1, "b".repeat(64));
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assessment_finding_links WHERE finding_id = 40",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 2);
+        validate_v5(&conn).unwrap();
     }
 
     #[test]
@@ -1995,7 +2609,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert_eq!(schema_version(&conn).unwrap(), 5);
         migrate(&mut conn).unwrap();
         let status: String = conn
             .query_row(
@@ -2061,13 +2675,13 @@ mod tests {
 
         let result = apply_step(
             &mut conn,
-            5,
+            6,
             "CREATE TABLE should_rollback(id INTEGER);
              INSERT INTO table_that_does_not_exist(id) VALUES(1);",
         );
 
         assert!(result.is_err());
-        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert_eq!(schema_version(&conn).unwrap(), 5);
         assert!(!table_exists(&conn, "should_rollback"));
     }
 
@@ -2119,7 +2733,7 @@ mod tests {
             result,
             Err(MigrationError::NewerSchema {
                 found: 99,
-                latest: 4
+                latest: 5
             })
         ));
         assert_eq!(schema_version(&conn).unwrap(), 99);
